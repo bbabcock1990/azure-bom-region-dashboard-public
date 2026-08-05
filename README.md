@@ -47,8 +47,8 @@ git --version; python --version
 
 ```powershell
 cd C:\CapacityPlanning   # or wherever you keep code
-git clone https://github.com/bbabcock1990/Azure-BOM-Region-Dashboard.git
-cd Azure-BOM-Region-Dashboard
+git clone https://github.com/bbabcock1990/Azure-BOM-Region-Dashboard-Public.git
+cd Azure-BOM-Region-Dashboard-Public
 ```
 
 ### Step 3 — Create the Python virtual environment

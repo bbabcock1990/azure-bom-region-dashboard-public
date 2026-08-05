@@ -35,6 +35,7 @@ _lock = threading.Lock()
 _signin_lock = threading.Lock()
 _credential = None  # lazily-built InteractiveBrowserCredential
 _silent_credential = None  # lazily-built non-interactive credential (never prompts)
+_probe_credential = None  # lazily-built non-interactive credential for silent cache probes
 _auth_record = None  # AuthenticationRecord captured at sign-in, for silent reuse
 _signed_in = False  # set True after any successful token acquisition this process
 _cache: Dict[Tuple[str, str, str], "TokenInfo"] = {}
@@ -455,6 +456,52 @@ def get_arm_token(subscription_id: str, *, force_refresh: bool = False) -> Token
     )
 
 
+def _silent_probe_token(scope: str):
+    """Attempt a silent token acquisition from the shared persistent MSAL cache
+    **without ever launching a browser**. Returns an azure-core AccessToken on
+    success, or ``None`` if no cached account can satisfy the request.
+
+    Used to recover a cached account that ``has_cached_account()``'s
+    version-fragile probe missed, without racing an interactive flow. Building
+    a browser prompt here (as an earlier version did) let concurrent callers
+    each start their own loopback listener, colliding the OAuth ``state`` and
+    failing every sign-in. The only interactive path is ``ensure_signed_in``,
+    which is serialized by ``_signin_lock``.
+    """
+    global _probe_credential
+    try:
+        from azure.identity import (
+            InteractiveBrowserCredential,
+            TokenCachePersistenceOptions,
+        )
+    except Exception:
+        return None
+    with _lock:
+        if _probe_credential is None:
+            kwargs = {
+                "additionally_allowed_tenants": ["*"],
+                # Never start an interactive flow — raise instead of prompting.
+                "disable_automatic_authentication": True,
+            }
+            try:
+                kwargs["cache_persistence_options"] = TokenCachePersistenceOptions(
+                    name="azure-bom-region-dashboard"
+                )
+            except Exception:
+                pass
+            try:
+                _probe_credential = InteractiveBrowserCredential(**kwargs)
+            except Exception:
+                return None
+        cred = _probe_credential
+    try:
+        return cred.get_token(scope)
+    except Exception:
+        # AuthenticationRequiredError / CredentialUnavailableError / etc. all
+        # mean "no silently-usable account" — caller re-raises not_signed_in.
+        return None
+
+
 def get_arm_default_token(*, force_refresh: bool = False) -> TokenInfo:
     """ARM token in the signed-in user's home tenant — for tenant-agnostic ARM
     calls (provider-show, global SKU lookup)."""
@@ -463,9 +510,10 @@ def get_arm_default_token(*, force_refresh: bool = False) -> TokenInfo:
     except AuthError as ex:
         if ex.code != "not_signed_in" or not (_signed_in or _credential is not None):
             raise
-        try:
-            access = _credentials().get_token(_scope_for(ARM_RESOURCE_ID))
-        except Exception:
+        # Silent-only recovery of a cached account the probe missed. NEVER
+        # interactive here — the browser prompt belongs to ensure_signed_in.
+        access = _silent_probe_token(_scope_for(ARM_RESOURCE_ID))
+        if access is None:
             raise ex
         info = _to_info(access, scope_resource=ARM_RESOURCE_ID)
         with _lock:

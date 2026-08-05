@@ -15,11 +15,11 @@ def _reload_auth():
 
 
 def test_principal_has_local_oid_and_admin_role(monkeypatch):
-    monkeypatch.setenv("USERNAME", "bbabcock")
+    monkeypatch.setenv("USERNAME", "alice")
     monkeypatch.delenv("USER", raising=False)
     auth = _reload_auth()
     p = auth.get_local_user()
-    assert p.email == "bbabcock"
+    assert p.email == "alice"
     assert p.oid == "local"
     assert p.tenant_id == "local"
     assert p.raw_provider == "local"

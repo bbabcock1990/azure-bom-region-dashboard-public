@@ -7,7 +7,7 @@ here exists only to populate "triggered_by" / "actor_*" fields on runs
 and activity-log entries so legacy records and downstream queries keep
 working.
 
-Attribution: the OS username (e.g. ``bbabcock`` on Windows) is used as
+Attribution: the OS username (e.g. ``alice`` on Windows) is used as
 the ``email`` field, with ``oid`` and ``tenant_id`` set to ``"local"``.
 If the username cannot be determined, the helper falls back to
 ``"local-user"`` so writes never fail on bad input.
@@ -25,7 +25,7 @@ from . import httpfunc as func
 
 @dataclass(frozen=True)
 class Principal:
-    email: str           # OS username (lowercased), e.g. 'bbabcock'
+    email: str           # OS username (lowercased), e.g. 'alice'
     oid: str             # always 'local'
     tenant_id: str       # always 'local'
     name: str            # same as email

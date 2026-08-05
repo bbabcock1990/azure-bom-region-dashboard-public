@@ -237,9 +237,10 @@ def test_list_subscriptions(monkeypatch, cred):
     assert subs[0]["id"] == "s1"
 
 
-def test_arm_default_token_falls_back_to_existing_credential(monkeypatch, cred):
-    """If the silent cache probe says "not signed in" but this process already has
-    a signed-in interactive credential, reuse it instead of failing."""
+def test_arm_default_token_falls_back_to_silent_probe(monkeypatch):
+    """If the primary silent path reports "not signed in" but the persistent
+    cache probe can still mint a token, reuse it instead of failing — and
+    without ever launching an interactive browser flow."""
     auth_token._signed_in = True
 
     def fake_get_token(**kwargs):
@@ -247,7 +248,33 @@ def test_arm_default_token_falls_back_to_existing_credential(monkeypatch, cred):
 
     monkeypatch.setattr(auth_token, "get_token", fake_get_token)
 
+    probe_calls = []
+
+    def fake_probe(scope):
+        probe_calls.append(scope)
+        claims = {"upn": "testuser@example.com", "tid": "home-tenant"}
+        return _FakeAccessToken(_fake_jwt(claims), int(time.time()) + 3600)
+
+    monkeypatch.setattr(auth_token, "_silent_probe_token", fake_probe)
+
     info = auth_token.get_arm_default_token()
 
     assert info.token
-    assert cred.calls[0][0] == "https://management.azure.com/.default"
+    assert probe_calls == ["https://management.azure.com/.default"]
+
+
+def test_arm_default_token_probe_miss_raises_not_signed_in(monkeypatch):
+    """When neither the primary silent path nor the cache probe can mint a
+    token, surface not_signed_in — never pop a browser (which would race the
+    serialized ensure_signed_in flow and collide the OAuth state)."""
+    auth_token._signed_in = True
+
+    def fake_get_token(**kwargs):
+        raise auth_token.AuthError("not_signed_in", "not signed in")
+
+    monkeypatch.setattr(auth_token, "get_token", fake_get_token)
+    monkeypatch.setattr(auth_token, "_silent_probe_token", lambda scope: None)
+
+    with pytest.raises(auth_token.AuthError) as exc:
+        auth_token.get_arm_default_token()
+    assert exc.value.code == "not_signed_in"
