@@ -1,0 +1,184 @@
+{
+  "services": [
+    {
+      "name": "Azure Automation",
+      "provider": "Microsoft.Automation",
+      "resource_type": "automationAccounts",
+      "zone_check": false
+    },
+    {
+      "name": "Premium SSD v2",
+      "provider": "Microsoft.Compute",
+      "resource_type": "disks",
+      "zone_check": true
+    },
+    {
+      "name": "Azure Firewall",
+      "provider": "Microsoft.Network",
+      "resource_type": "azureFirewalls",
+      "zone_check": false
+    },
+    {
+      "name": "Application Gateway (WAF v2)",
+      "provider": "Microsoft.Network",
+      "resource_type": "applicationGateways",
+      "zone_check": false
+    },
+    {
+      "name": "Azure Bastion",
+      "provider": "Microsoft.Network",
+      "resource_type": "bastionHosts",
+      "zone_check": false
+    },
+    {
+      "name": "Azure Private Link",
+      "provider": "Microsoft.Network",
+      "resource_type": "privateLinkServices",
+      "zone_check": false
+    },
+    {
+      "name": "Azure Load Balancer (Standard)",
+      "provider": "Microsoft.Network",
+      "resource_type": "loadBalancers",
+      "zone_check": false
+    },
+    {
+      "name": "Virtual Network",
+      "provider": "Microsoft.Network",
+      "resource_type": "virtualNetworks",
+      "zone_check": false
+    },
+    {
+      "name": "Azure DNS",
+      "provider": "Microsoft.Network",
+      "resource_type": "dnszones",
+      "zone_check": false
+    },
+    {
+      "name": "Public IP Addresses",
+      "provider": "Microsoft.Network",
+      "resource_type": "publicIPAddresses",
+      "zone_check": false
+    },
+    {
+      "name": "Azure NAT Gateway",
+      "provider": "Microsoft.Network",
+      "resource_type": "natGateways",
+      "zone_check": false
+    },
+    {
+      "name": "Azure Kubernetes Service (AKS)",
+      "provider": "Microsoft.ContainerService",
+      "resource_type": "managedClusters",
+      "zone_check": false
+    },
+    {
+      "name": "Azure Virtual Machines",
+      "provider": "Microsoft.Compute",
+      "resource_type": "virtualMachines",
+      "zone_check": false
+    },
+    {
+      "name": "Azure Container Registry",
+      "provider": "Microsoft.ContainerRegistry",
+      "resource_type": "registries",
+      "zone_check": false
+    },
+    {
+      "name": "Azure Database for MySQL",
+      "provider": "Microsoft.DBforMySQL",
+      "resource_type": "flexibleServers",
+      "zone_check": false
+    },
+    {
+      "name": "Azure Database for PostgreSQL",
+      "provider": "Microsoft.DBforPostgreSQL",
+      "resource_type": "flexibleServers",
+      "zone_check": false
+    },
+    {
+      "name": "Azure SQL Database",
+      "provider": "Microsoft.Sql",
+      "resource_type": "servers",
+      "zone_check": false
+    },
+    {
+      "name": "Azure Cosmos DB",
+      "provider": "Microsoft.DocumentDB",
+      "resource_type": "databaseAccounts",
+      "zone_check": false
+    },
+    {
+      "name": "Azure Data Lake Storage Gen2",
+      "provider": "Microsoft.Storage",
+      "resource_type": "storageAccounts",
+      "zone_check": false
+    },
+    {
+      "name": "Azure Blob Storage",
+      "provider": "Microsoft.Storage",
+      "resource_type": "storageAccounts",
+      "zone_check": false
+    },
+    {
+      "name": "Managed Disks (Premium SSD)",
+      "provider": "Microsoft.Compute",
+      "resource_type": "disks",
+      "zone_check": false
+    },
+    {
+      "name": "Azure Monitor",
+      "provider": "Microsoft.Insights",
+      "resource_type": "components",
+      "zone_check": false
+    },
+    {
+      "name": "Azure Key Vault",
+      "provider": "Microsoft.KeyVault",
+      "resource_type": "vaults",
+      "zone_check": false
+    },
+    {
+      "name": "Azure Service Bus",
+      "provider": "Microsoft.ServiceBus",
+      "resource_type": "namespaces",
+      "zone_check": false
+    },
+    {
+      "name": "Azure Event Hub",
+      "provider": "Microsoft.EventHub",
+      "resource_type": "namespaces",
+      "zone_check": false
+    },
+    {
+      "name": "Azure API Management",
+      "provider": "Microsoft.ApiManagement",
+      "resource_type": "service",
+      "zone_check": false
+    },
+    {
+      "name": "Azure App Service",
+      "provider": "Microsoft.Web",
+      "resource_type": "sites",
+      "zone_check": false
+    },
+    {
+      "name": "Azure Functions",
+      "provider": "Microsoft.Web",
+      "resource_type": "sites",
+      "zone_check": false
+    },
+    {
+      "name": "Azure Cache for Redis",
+      "provider": "Microsoft.Cache",
+      "resource_type": "redis",
+      "zone_check": false
+    },
+    {
+      "name": "Azure Cognitive Services",
+      "provider": "Microsoft.CognitiveServices",
+      "resource_type": "accounts",
+      "zone_check": false
+    }
+  ]
+}

@@ -1,0 +1,727 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Azure BOM Region Support Dashboard</title>
+
+  <!-- Leaflet for the world map -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+  <!-- Chart.js for the latency chart -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+  <!-- SheetJS for Excel export -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+  <!-- Apply persisted theme + filters state BEFORE styles.css loads to prevent
+       FOUC. Kept external (not inline) so the CSP can forbid inline scripts.
+       Order matters: this must run before the <link> below. -->
+  <script src="preinit.js?v=2026061503"></script>
+
+  <link rel="stylesheet" href="styles.css?v=2026062910" />
+</head>
+<body>
+
+<header class="app-header">
+  <div class="brand">
+    <div class="ms-logo" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+    <span class="brand-mark" id="brand-mark">Azure BOM Region Support Dashboard</span>
+    <div class="brand-divider"></div>
+    <div class="brand-titles">
+      <h2 id="brand-subtitle" class="subtitle">Zone constraints, BOM availability, and SKU recommendations per customer subscription</h2>
+    </div>
+  </div>
+  <div class="header-meta">
+    <button type="button" id="signin-chip" class="signin-chip" data-state="unknown" title="Sign-in status" aria-label="Sign-in status">
+      <span class="signin-dot" aria-hidden="true"></span>
+      <span class="signin-text" id="signin-chip-text">…</span>
+    </button>
+    <button type="button" id="open-guide" class="theme-toggle-btn" title="Getting Started guide" aria-label="Open the Getting Started guide">
+      <span class="theme-toggle-icon" aria-hidden="true">?</span>
+    </button>
+    <button type="button" id="theme-toggle" class="theme-toggle-btn" title="Toggle light/dark theme" aria-label="Toggle theme">
+      <span class="theme-toggle-icon" aria-hidden="true">☾</span>
+    </button>
+  </div>
+</header>
+
+<div class="layout" id="layout">
+
+  <aside class="sidebar" id="sidebar">
+    <div class="bomnav" id="bomnav">
+      <div class="bomnav-head">
+        <h3>Bills of Materials <span class="bomnav-count" id="bomnav-count"></span></h3>
+        <button type="button" id="bomnav-new" class="btn btn--accent btn--sm" title="Create a new BOM">+ New</button>
+      </div>
+      <input type="text" id="bomnav-search" class="bomnav-search" placeholder="Filter BOMs…" autocomplete="off" spellcheck="false" />
+      <div class="bomnav-list" id="bomnav-list"></div>
+    </div>
+  </aside>
+
+  <main>
+    <section class="bom-panel empty" id="bom-panel">
+      <div class="bom-panel-empty" id="bom-panel-empty">
+        Select a Bill of Materials from the left, or click <strong>+ New</strong> to create one.
+      </div>
+      <div class="bom-panel-body hidden" id="bom-panel-body">
+        <div class="bom-panel-main">
+          <div class="bom-panel-title">
+            <span class="bom-panel-tag" id="bom-panel-tag">—</span>
+            <span class="bom-panel-customer" id="bom-panel-customer"></span>
+            <span class="bom-panel-stale hidden" id="bom-panel-stale">⚠ Out of date</span>
+          </div>
+          <div class="bom-panel-meta" id="bom-panel-meta"></div>
+          <div class="bom-panel-counts" id="bom-panel-counts"></div>
+          <div class="bom-panel-warning hidden" id="bom-panel-warning"></div>
+        </div>
+        <div class="bom-panel-side">
+          <div class="bom-panel-snapshot">
+            <label for="snapshot-picker">Analysis Result</label>
+            <div class="snapshot-picker-row">
+              <select id="snapshot-picker"></select>
+              <button type="button" id="snapshot-compare-toggle" class="btn btn--sm">Compare</button>
+            </div>
+            <div class="snapshot-compare-row hidden" id="snapshot-compare-row">
+              <label for="snapshot-compare-picker">Compare against</label>
+              <select id="snapshot-compare-picker"></select>
+            </div>
+          </div>
+          <div class="bom-panel-controls">
+            <button type="button" id="bom-panel-run" class="btn btn--accent">▶ Refresh analysis</button>
+            <button type="button" id="bom-panel-edit" class="btn">Edit</button>
+            <button type="button" id="bom-panel-delete" class="btn btn--danger">Delete</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div class="tabs">
+      <div class="tab active" data-view="overview">Overview</div>
+      <div class="tab" data-view="table">Table</div>
+      <div class="tab" data-view="map">Map</div>
+      <div class="tab" data-view="latency">Latency Chart</div>
+      <div class="tab" data-view="compare">Compare</div>
+      <div class="tab" data-view="quota">Quota per Region <span id="quota-tab-badge" class="tab-badge hidden">0</span></div>
+      <div class="tab" data-view="settings" id="tab-settings">Settings</div>
+      <div class="tabs-actions">
+        <button id="btn-export-csv" class="btn btn--sm">Export CSV</button>
+        <button id="btn-export-xlsx" class="btn btn--sm">Export Excel</button>
+      </div>
+    </div>
+
+    <div class="view" id="view-overview">
+
+      <section class="overview-blade" id="overview-blade">
+        <div class="overview-card">
+          <div class="overview-title">Deployment Health</div>
+          <div class="overview-chart">
+            <canvas id="chart-health"></canvas>
+            <div class="donut-center">
+              <div class="big" id="kpi-health-num">0</div>
+              <div class="small" id="kpi-health-lbl">healthy</div>
+            </div>
+          </div>
+          <div class="overview-legend" id="legend-health"></div>
+        </div>
+
+        <div class="overview-card">
+          <div class="overview-title">BOM Service Coverage</div>
+          <div class="overview-chart">
+            <canvas id="chart-bom"></canvas>
+            <div class="donut-center">
+              <div class="big" id="kpi-bom-num">0</div>
+              <div class="small">full BOM</div>
+            </div>
+          </div>
+          <div class="overview-legend" id="legend-bom"></div>
+        </div>
+
+        <div class="overview-card">
+          <div class="overview-title">SKU Coverage (all 3 AZs)</div>
+          <div class="overview-chart">
+            <canvas id="chart-sku"></canvas>
+            <div class="donut-center">
+              <div class="big" id="kpi-sku-num">0</div>
+              <div class="small">no blockers</div>
+            </div>
+          </div>
+          <div class="overview-legend" id="legend-sku"></div>
+        </div>
+
+        <div class="overview-card">
+          <div class="overview-title">SKU Tier Mix
+            <div class="overview-subtitle muted" id="overview-sku-subtitle"></div>
+          </div>
+          <div class="overview-chart">
+            <canvas id="chart-mix"></canvas>
+            <div class="donut-center">
+              <div class="big" id="kpi-mix-num">0</div>
+              <div class="small">primary SKUs</div>
+            </div>
+          </div>
+          <div class="overview-legend" id="legend-mix"></div>
+        </div>
+      </section>
+
+      <div class="overview-summary" id="overview-summary"></div>
+    </div>
+
+    <div class="view hidden" id="view-table">
+      <table class="regions" id="regions-table">
+        <thead>
+          <tr>
+            <th data-sort="name">Region</th>
+            <th>VERDICT</th>
+            <th data-sort="geo">Geo</th>
+            <th>AZ 1/2/3</th>
+            <th class="quota-col hidden" data-sort="quota">Quota</th>
+            <th data-sort="recommendation">Recommendation</th>
+            <th>Alternative Regions</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="view hidden" id="view-map">
+      <div id="map"></div>
+    </div>
+
+    <div class="view hidden" id="view-latency">
+      <div id="latency-controls">
+        <label>Source region:</label>
+        <select id="latency-source"></select>
+        <span class="count" id="latency-info"></span>
+      </div>
+      <div id="latency-chart-wrap">
+        <canvas id="latency-chart" height="120"></canvas>
+      </div>
+    </div>
+
+    <div class="view hidden" id="view-compare">
+      <div class="compare-grid" id="compare-grid">
+        <div class="compare-card">
+          <select class="compare-select" data-slot="0"><option value="">- pick a region -</option></select>
+          <div class="compare-content"></div>
+        </div>
+        <div class="compare-card">
+          <select class="compare-select" data-slot="1"><option value="">- pick a region -</option></select>
+          <div class="compare-content"></div>
+        </div>
+        <div class="compare-card">
+          <select class="compare-select" data-slot="2"><option value="">- pick a region -</option></select>
+          <div class="compare-content"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="view hidden" id="view-quota">
+      <div class="bom-wrap">
+        <section class="bom-section">
+          <div class="quota-controls quota-controls--top">
+            <div id="quota-subscription-control" class="quota-subscription-control"></div>
+            <label class="quota-control quota-control--inline">
+              <span>Region:</span>
+              <select id="quota-region-select"></select>
+            </label>
+            <span class="muted quota-region-status" id="quota-region-status"></span>
+          </div>
+          <table class="bom-table" id="quota-table">
+            <thead>
+              <tr>
+                <th>FAMILY</th>
+                <th class="num">REQUIRED</th>
+                <th>SUB QUOTA</th>
+                <th>QUOTA GROUP</th>
+                <th>STATUS</th>
+                <th>ACTION</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <div class="bom-empty hidden" id="quota-empty"></div>
+          <div id="quota-hierarchy-panel" class="hidden"></div>
+          <div id="pending-quota-panel" class="hidden"></div>
+        </section>
+      </div>
+    </div>
+    <div class="view hidden" id="view-settings">
+      <div class="settings-wrap">
+        <section id="settings-activity" class="settings-section">
+          <h2>Activity Log</h2>
+          <p class="muted">
+            Audit trail of every Azure API call, quota request, BOM change, and user action. Use this to track all dashboard activity.
+          </p>
+          <div class="activity-controls">
+            <label class="activity-control">
+              <span>Subscription</span>
+              <select id="activity-filter-sub">
+                <option value="">All</option>
+              </select>
+            </label>
+            <label class="activity-control">
+              <span>Event type</span>
+              <select id="activity-filter-event">
+                <option value="">All</option>
+              </select>
+            </label>
+            <label class="activity-control">
+              <span>Limit</span>
+              <select id="activity-filter-limit">
+                <option value="100">100</option>
+                <option value="200" selected>200</option>
+                <option value="500">500</option>
+                <option value="1000">1000</option>
+              </select>
+            </label>
+            <label class="activity-control">
+              <span>Lookback</span>
+              <select id="activity-filter-days">
+                <option value="1">1 day</option>
+                <option value="3">3 days</option>
+                <option value="7" selected>7 days</option>
+                <option value="30">30 days</option>
+              </select>
+            </label>
+            <button type="button" id="activity-refresh" class="btn btn--primary">Refresh</button>
+            <button type="button" id="activity-clear" class="link-btn danger">Clear log</button>
+            <span class="muted" id="activity-status"></span>
+          </div>
+          <table class="activity-table" id="activity-table">
+            <thead>
+              <tr>
+                <th>Time (UTC)</th>
+                <th>Event</th>
+                <th>Status</th>
+                <th>API Scope</th>
+                <th>Subscription</th>
+                <th>Run</th>
+                <th>Actor</th>
+                <th>Duration</th>
+                <th>Message</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <aside class="sidebar filters" id="filters-rail">
+    <button type="button" class="filters-handle" id="filters-handle" title="Show/hide filters &amp; search" aria-label="Show or hide filters and search">
+      <span class="filters-handle-label">Filters &amp; Search</span>
+      <span class="filters-handle-caret" aria-hidden="true">›</span>
+    </button>
+    <div class="filters-body" id="filters-body">
+      <button id="clear-filters" class="btn btn--block" type="button">Clear All Filters</button>
+
+      <h3>Search</h3>
+      <input type="text" id="filter-search" placeholder="Region name..." />
+
+      <h3>Subscription</h3>
+      <select id="filter-subscription" aria-label="Select the subscription context"></select>
+
+      <h3>Verdict</h3>
+      <label class="checkrow"><input type="checkbox" data-filter="verdict" value="ready" checked /> Ready</label>
+      <label class="checkrow"><input type="checkbox" data-filter="verdict" value="ready_with_constraints" checked /> Ready with constraints</label>
+      <label class="checkrow"><input type="checkbox" data-filter="verdict" value="not_recommended" checked /> Not recommended</label>
+      <label class="checkrow"><input type="checkbox" data-filter="verdict" value="needs_validation" checked /> Needs validation</label>
+
+      <h3>Geo / Continent</h3>
+      <div id="filter-continents"></div>
+
+      <h3>SKU Selection</h3>
+      <div class="filter-subtitle muted" id="filter-sku-subtitle"></div>
+      <label class="checkrow"><input type="checkbox" id="filter-v6-only" /> Only show regions using primary SKUs</label>
+      <label class="checkrow" id="filter-fallback-row"><input type="checkbox" id="filter-v5-fallback" /> Only show regions on fallback SKUs</label>
+
+      <h3>Zone Restrictions</h3>
+      <label class="checkrow"><input type="checkbox" id="filter-restricted-only" /> Only with restriction</label>
+
+      <div class="stats" id="stats">
+        <div class="stat"><span>Showing</span><strong id="stat-shown">0</strong></div>
+        <div class="stat"><span>Total regions</span><strong id="stat-total">0</strong></div>
+        <div class="stat"><span>Ready</span><strong id="stat-ready">0</strong></div>
+        <div class="stat"><span>Other verdicts</span><strong id="stat-other-verdicts">0</strong></div>
+      </div>
+    </div>
+  </aside>
+</div>
+
+
+<!-- Getting Started guide modal -->
+<div id="guide-overlay" class="modal-overlay hidden"></div>
+<div id="guide-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="guide-modal-title">
+  <header>
+    <h2 id="guide-modal-title">&#128075; Getting Started</h2>
+    <button class="close" id="guide-modal-close" aria-label="Close">&times;</button>
+  </header>
+  <div class="modal-body">
+    <section class="getting-started" id="getting-started">
+        <p class="gs-intro">
+          Run this dashboard against a customer's Azure subscription to see
+          available SKUs, BOM coverage, quota headroom, and recommended
+          regions — all in one place.
+        </p>
+        <ol class="gs-steps">
+          <li>
+            <div class="gs-step-num">1</div>
+            <div class="gs-step-body">
+              <h3>Pick or create a BOM</h3>
+              <p>
+                Bills of Materials live in the <strong>Bills of Materials</strong>
+                list on the left. Click one to load it (and its latest analysis),
+                or click <strong>+ New</strong> to create one. The selected BOM —
+                its name, customer, subscription, and controls — appears in the
+                panel at the top of this area.
+              </p>
+              <p>
+                Behind the scenes, your one-time <strong>browser sign-in</strong>
+                mints an <strong>ARM bearer token</strong>. The dashboard then
+                uses Azure's public management APIs directly for both service
+                and VM SKU availability.
+              </p>
+              <ul class="gs-tabs">
+                <li>
+                  <strong>ARM <code>Microsoft.Compute/skus</code></strong> —
+                  region- and zone-level VM SKU availability for the selected
+                  subscription. This is where region-wide and zonal
+                  <code>NotAvailableForSubscription</code> restrictions come
+                  from.
+                </li>
+              </ul>
+              <p>
+                ARM only accepts a token issued for the subscription's
+                home tenant, so the dashboard automatically resolves the
+                subscription tenant and requests the right token before a run.
+              </p>
+              <ul class="gs-tabs">
+                <li>Have <em>Reader</em> on the customer subscription, <strong>or</strong></li>
+                <li>Ask the customer to run this dashboard themselves
+                  in their tenant — same workflow, their
+                  browser sign-in.</li>
+              </ul>
+            </div>
+          </li>
+          <li>
+            <div class="gs-step-num">2</div>
+            <div class="gs-step-body">
+              <h3>Create the customer's BOM (in the dashboard)</h3>
+              <p>
+                Each customer needs a Bill of Materials describing the
+                Azure services they consume plus the SKU families and
+                required cores per workload. Click <strong>+ New</strong> in
+                the Bills of Materials list (left), or <strong>Edit</strong>
+                an existing BOM from its panel.
+              </p>
+              <ul class="gs-tabs">
+                <li>
+                  <strong>BOM Name</strong> — a short, memorable label
+                  (e.g. <code>Avaya-Prod</code>) that shows up in the
+                  BOM list so it's easy to tell BOMs apart.
+                </li>
+                <li>
+                  <strong>Services</strong> — pick from the built-in
+                  Azure service catalog. The dashboard calls ARM
+                  <code>providers/{ns}?api-version=2024-07-01</code>
+                  live to compute the per-region ✅/❌ matrix — no need
+                  for a CLI run.
+                </li>
+                <li>
+                  <strong>Required SKUs</strong> — one row per SKU
+                  family. Family ID is the bit Azure quotas use
+                  (e.g. <code>standardDav6Family</code>), and the
+                  required-cores field drives the
+                  <em>Quota Status</em> column on the dashboard.
+                </li>
+              </ul>
+              <p class="muted">
+                Already have a <code>bom_template.xlsx</code> or
+                <code>region_results_*.xlsx</code> from the legacy CLI
+                flow? Click <strong>Import xlsx</strong> in the BOM
+                editor to prefill the form.
+              </p>
+            </div>
+          </li>
+          <li>
+            <div class="gs-step-num">3</div>
+            <div class="gs-step-body">
+              <h3>Run the analysis</h3>
+              <p>
+                Select your BOM in the left list, then click
+                <strong>▶ Refresh analysis</strong> in its panel.
+                Once a BOM is saved the run dialog defaults to
+                <em>Use saved BOM</em> — pick a
+                segment, confirm the BOM name,
+                and hit <strong>Refresh analysis</strong>. A live progress
+                bar streams ARM SKU availability status across all ~38 Azure
+                regions — it usually takes a few minutes for the
+                full set. (You can still drop a
+                <code>region_results_*.xlsx</code> in to use the
+                legacy xlsx path.)
+              </p>
+            </div>
+          </li>
+          <li>
+            <div class="gs-step-num">4</div>
+            <div class="gs-step-body">
+              <h3>Explore the results</h3>
+              <p>Switch tabs to dig into different facets of the analysis result:</p>
+              <ul class="gs-tabs">
+                <li><strong>Overview</strong> — donut KPIs for Health, BOM coverage, SKU coverage, tier mix</li>
+                <li><strong>Table</strong> — per-region detail with sortable columns</li>
+                <li><strong>Map</strong> — geographic view of healthy vs. unhealthy regions</li>
+                <li><strong>Latency Chart</strong> — round-trip latency from a chosen source region</li>
+                <li><strong>Compare</strong> — side-by-side 3-region drill-down</li>
+                <li><strong>Quota per Region</strong> — legacy quota view for older snapshots</li>
+                <li><strong>Settings → Activity Log</strong> — audit trail of API calls, quota requests, BOM changes, and sign-in activity</li>
+              </ul>
+            </div>
+          </li>
+        </ol>
+        <p class="gs-footer muted">
+          Past analysis results are stored locally and reachable from the
+          <strong>Analysis Result</strong> picker in the selected BOM's panel — switch
+          between results without re-running the pipeline.
+        </p>
+    </section>
+  </div>
+</div>
+<!-- Sign-in status modal -->
+<div id="signin-overlay" class="modal-overlay hidden"></div>
+<div id="signin-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="signin-modal-title">
+  <header>
+    <h2 id="signin-modal-title">Sign-in</h2>
+    <button class="close" id="signin-modal-close" aria-label="Close">&times;</button>
+  </header>
+  <div class="modal-body">
+    <div class="run-step">
+      <div id="run-token-status" class="token-status" data-state="loading">
+        <span class="token-state-icon">⏳</span>
+        <span class="token-state-msg">Checking sign-in…</span>
+        <button type="button" id="run-token-signin" class="link-btn" style="margin-left:8px;">Sign in</button>
+        <button type="button" id="run-token-refresh" class="link-btn" style="margin-left:8px;">Refresh</button>
+      </div>
+      <div id="signin-actions" class="signin-actions" style="margin-top:12px; display:flex; gap:8px;">
+        <button type="button" id="btn-signout" class="btn-secondary" title="Clear cached credentials and sign out">Sign out</button>
+        <button type="button" id="btn-switch-dir" class="btn-secondary" title="Sign out and re-sign-in with a different account or tenant">Switch directory / account</button>
+      </div>
+      <details>
+        <summary>How does this work?</summary>
+        <ol>
+          <li>Click <em>Sign in</em> — a browser window opens once for your Microsoft sign-in. The local backend then mints an ARM bearer token in-process (no Azure CLI required).</li>
+          <li>Your sign-in is cached, so later runs are silent until Azure asks you to refresh.</li>
+          <li><em>Sign out</em> clears the cache. <em>Switch directory</em> signs out then immediately re-opens the sign-in prompt so you can pick a different account or tenant.</li>
+        </ol>
+      </details>
+    </div>
+  </div>
+</div>
+<!-- Run / Refresh modal -->
+<div id="run-overlay" class="modal-overlay hidden"></div>
+<div id="run-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="run-modal-title">
+  <header>
+    <h2 id="run-modal-title">Refresh analysis</h2>
+    <button class="close" id="run-modal-close" aria-label="Close">&times;</button>
+  </header>
+  <div class="modal-body">
+    <div class="run-step">
+      <label for="run-bom-pick">BOM plan</label>
+      <select id="run-bom-pick">
+        <option value="">— Select a saved BOM plan —</option>
+      </select>
+      <div id="run-bom-summary" class="run-bom-summary hidden"></div>
+      <div id="run-bom-empty" class="run-bom-empty hidden">
+        <strong>No saved BOM plans yet.</strong>
+        <p class="muted">BOMs are the source of truth for the subscription, customer, services, regions, and SKUs to analyze.
+        Create one via <button type="button" class="link-btn" id="run-bom-open-editor">+ New BOM</button>, then come back here to run.</p>
+      </div>
+      <p class="muted">BOMs are managed in the <strong>Bills of Materials</strong> list on the left. Pick one above to run a fresh analysis against it — the dashboard calls ARM for service availability and VM SKU availability. Sign-in is handled automatically; check your status anytime from the account chip in the header.</p>
+    </div>
+    <div class="run-status" id="run-status"></div>
+    <div class="run-progress hidden" id="run-progress" aria-live="polite">
+      <div class="run-progress-header">
+        <span class="run-progress-phase" id="run-progress-phase">Initializing…</span>
+        <span class="run-progress-pct" id="run-progress-pct">0%</span>
+      </div>
+      <div class="run-progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="run-progress-bar-aria">
+        <div class="run-progress-fill" id="run-progress-fill" style="width:0%"></div>
+      </div>
+      <div class="run-progress-meta">
+        <span class="run-progress-sub" id="run-progress-sub"></span>
+        <span class="run-progress-eta" id="run-progress-eta"></span>
+      </div>
+    </div>
+  </div>
+  <footer>
+    <button type="button" id="run-cancel" class="btn">Cancel</button>
+    <button type="button" id="run-go" class="btn btn--primary" disabled>Run analysis</button>
+  </footer>
+</div>
+
+<!-- BOM editor modal -->
+<div id="bom-overlay" class="modal-overlay hidden"></div>
+<div id="bom-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="bom-modal-title">
+  <header>
+    <h2 id="bom-modal-title">Edit BOM</h2>
+    <button class="close" id="bom-modal-close" aria-label="Close">&times;</button>
+  </header>
+  <div class="modal-body">
+    <div class="run-step">
+      <label for="bom-tag">BOM Name</label>
+      <input type="text" id="bom-tag" placeholder="Avaya-Prod, Contoso-Dev, …" autocomplete="off" maxlength="80" />
+      <p class="muted">The name shown in the BOM list (preferred over customer name and subscription ID). Letters, digits, spaces and <code>-._/&amp;:()</code> allowed.</p>
+    </div>
+    <div class="run-step">
+      <label for="bom-customer">Customer name</label>
+      <input type="text" id="bom-customer" placeholder="Avaya, Contoso Health, …" autocomplete="off" maxlength="80" />
+    </div>
+    <div class="run-step">
+      <label for="bom-sub">Subscriptions</label>
+      <select id="bom-sub" multiple size="6" style="width:100%;" required>
+        <option disabled>Loading subscriptions…</option>
+      </select>
+      <p class="muted">Select one or more subscriptions to include in the BOM analysis. Hold Ctrl/Cmd to multi-select.</p>
+    </div>
+    <div class="run-step">
+      <label>Services</label>
+      <div class="bom-services-toolbar">
+        <input type="text" id="bom-services-filter" placeholder="Filter…" autocomplete="off" />
+        <span class="muted" id="bom-edit-services-count">0 selected</span>
+        <button type="button" class="link-btn" id="bom-services-select-all">Select all</button>
+        <button type="button" class="link-btn" id="bom-services-clear">Clear</button>
+      </div>
+      <div class="bom-services-list" id="bom-services-list"></div>
+      <details class="bom-custom-add">
+        <summary>+ Add custom service</summary>
+        <div class="bom-custom-add-grid">
+          <input type="text" id="bom-custom-svc-name" placeholder="Service name (e.g. Azure Foo)" autocomplete="off" maxlength="100" />
+          <input type="text" id="bom-custom-svc-provider" placeholder="Provider (e.g. Microsoft.Foo)" autocomplete="off" maxlength="80" />
+          <input type="text" id="bom-custom-svc-rt" placeholder="Resource type (e.g. fooThings)" autocomplete="off" maxlength="100" />
+          <label class="bom-custom-add-zone">
+            <input type="checkbox" id="bom-custom-svc-zone" /> zone check
+          </label>
+          <button type="button" id="bom-custom-svc-add" class="link-btn">Add</button>
+        </div>
+        <p class="muted">Custom services are saved to your local catalog and become selectable below. To manage the <em>built-in</em> list, edit <code>api/_shared/data/bom_service_catalog.json</code> and restart the dashboard.</p>
+        <div class="bom-custom-status" id="bom-custom-svc-status"></div>
+      </details>
+      <p class="muted">The dashboard will call ARM <code>providers/{namespace}?api-version=2024-07-01</code> for each selected service to compute per-region availability. <code>Premium SSD v2</code> additionally calls <code>Microsoft.Compute/skus</code> for live zone data.</p>
+    </div>
+    <div class="run-step">
+      <label>Regions</label>
+      <div class="bom-regions-toolbar">
+        <select id="bom-regions-filter" title="Filter by AZ support">
+          <option value="all" selected>All regions</option>
+          <option value="az">With AZs only</option>
+          <option value="noaz">No AZs only</option>
+        </select>
+        <input type="text" id="bom-regions-search" placeholder="Search…" autocomplete="off" />
+        <span class="muted" id="bom-regions-count">0 selected</span>
+        <button type="button" class="link-btn" id="bom-regions-select-all">Select all</button>
+        <button type="button" class="link-btn" id="bom-regions-clear">Clear</button>
+      </div>
+      <div class="bom-services-list" id="bom-regions-list"></div>
+      <details class="bom-custom-add">
+        <summary>+ Add custom region</summary>
+        <div class="bom-custom-add-grid">
+          <input type="text" id="bom-custom-rg-name" placeholder="Short name (e.g. polandcentral)" autocomplete="off" maxlength="60" />
+          <input type="text" id="bom-custom-rg-display" placeholder="Display name (e.g. Poland Central)" autocomplete="off" maxlength="100" />
+          <label class="bom-custom-add-zone">
+            <input type="checkbox" id="bom-custom-rg-az" /> has AZs
+          </label>
+          <button type="button" id="bom-custom-rg-add" class="link-btn">Add</button>
+        </div>
+        <p class="muted">Custom regions are saved to your local catalog and become selectable above. To manage the <em>built-in</em> list, edit <code>api/_shared/data/bom_region_catalog.json</code> and restart the dashboard.</p>
+        <div class="bom-custom-status" id="bom-custom-rg-status"></div>
+      </details>
+      <p class="muted">Regions chosen here scope the analysis run. Leave the default list checked to use all of Azure, or narrow it for a customer that only wants to deploy in specific regions.</p>
+    </div>
+    <div class="run-step">
+      <label>Required SKUs &amp; cores</label>
+      <table class="bom-skus-table">
+        <thead>
+          <tr>
+            <th style="width:42%;">SKU Family ID</th>
+            <th style="width:35%;">Fallback Family ID</th>
+            <th style="width:15%;">Cores</th>
+            <th style="width:8%;"></th>
+          </tr>
+        </thead>
+        <tbody id="bom-skus-tbody"></tbody>
+      </table>
+      <datalist id="bom-sku-family-options"></datalist>
+      <div class="bom-skus-actions">
+        <button type="button" class="link-btn" id="bom-skus-add">+ Add SKU row</button>
+        <button type="button" class="link-btn" id="bom-skus-refresh" title="Re-fetch the family list from Azure (Microsoft.Compute/skus)">↻ Refresh families</button>
+        <span class="muted small" id="bom-skus-families-status"></span>
+      </div>
+      <p class="muted">Pick a <strong>Family ID</strong> from the dropdown — the list is loaded live from Azure (<code>Microsoft.Compute/skus</code>) so the case-sensitive values (e.g. <code>standardDav6Family</code>, <code>standardDASv5Family</code>) are always exact. You can still type a value if it isn't listed. The dashboard auto-derives the short VM label (e.g. <code>Dav6</code>, <code>Dasv5</code>). Cores must be ≥ 0; required cores drive the <em>Quota Status</em> per region.</p>
+    </div>
+    <div class="run-status" id="bom-status"></div>
+    <details>
+      <summary>Import from xlsx</summary>
+      <p class="muted">Prefill the form from a <code>bom_template.xlsx</code> or legacy <code>region_results_*.xlsx</code>. This does <strong>not</strong> save anything — review the prefilled fields, then click <strong>Save BOM</strong>.</p>
+      <input type="file" id="bom-import-file" accept=".xlsx" />
+      <button type="button" id="bom-import-go" class="link-btn">Import</button>
+    </details>
+  </div>
+  <footer>
+    <button type="button" id="bom-cancel" class="btn">Cancel</button>
+    <button type="button" id="bom-save" class="btn btn--primary">Save</button>
+  </footer>
+</div>
+
+<!-- Snapshot diff modal -->
+<div id="snapshot-diff-overlay" class="modal-overlay hidden"></div>
+<div id="snapshot-diff-modal" class="modal hidden">
+  <header>
+    <div>
+      <h2>Snapshot diff</h2>
+      <div class="muted" id="snapshot-diff-title"></div>
+    </div>
+    <button class="close" id="snapshot-diff-close" title="Close">&times;</button>
+  </header>
+  <div class="modal-body">
+    <div class="diff-summary-grid" id="snapshot-diff-summary"></div>
+    <div class="bom-empty hidden" id="snapshot-diff-empty"></div>
+    <div class="diff-table-wrap">
+      <table class="bom-table diff-table" id="snapshot-diff-table">
+        <thead>
+          <tr>
+            <th>Region</th>
+            <th>Direction</th>
+            <th class="num">Score</th>
+            <th>Verdict</th>
+            <th>Details</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Drill-down panel -->
+<div id="drilldown-overlay"></div>
+<div id="drilldown" class="hidden">
+  <header>
+    <div>
+      <div id="dd-name"></div>
+      <div id="dd-geo"></div>
+    </div>
+    <button class="close" id="dd-close" title="Close">&times;</button>
+  </header>
+  <div class="body" id="dd-body"></div>
+</div>
+
+<div id="toast-container" aria-live="polite" aria-atomic="true"></div>
+
+<script src="app.js?v=2026062910"></script>
+</body>
+</html>

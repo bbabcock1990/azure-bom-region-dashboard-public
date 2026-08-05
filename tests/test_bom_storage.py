@@ -1,0 +1,136 @@
+"""Tests for api/_shared/bom_storage.py — validators (storage-layer
+sanity). Skips CRUD tests that require Azurite to be running."""
+import pytest
+
+from _shared import bom_storage
+
+
+# ─── Validators ────────────────────────────────────────────────────────────
+
+def test_validate_sub_id_lowercases_and_accepts_guid():
+    assert bom_storage._validate_sub_id(
+        "11111111-1111-1111-1111-111111111111"
+    ) == "11111111-1111-1111-1111-111111111111"
+    # Uppercase normalizes
+    assert bom_storage._validate_sub_id(
+        "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA"
+    ) == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+
+def test_validate_sub_id_rejects_non_guid():
+    with pytest.raises(bom_storage.BomStorageError) as ex:
+        bom_storage._validate_sub_id("not-a-guid")
+    assert ex.value.code == "bad_subscription"
+
+
+def test_normalize_subscription_ids_prefers_list_and_dedupes():
+    out = bom_storage._normalize_subscription_ids(
+        "11111111-1111-1111-1111-111111111111",
+        [
+            "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "11111111-1111-1111-1111-111111111111",
+        ],
+    )
+    assert out == [
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        "11111111-1111-1111-1111-111111111111",
+    ]
+
+
+def test_entity_to_record_reads_subscription_ids_json():
+    rec = bom_storage._entity_to_record({
+        "PartitionKey": "sub",
+        "RowKey": "bom-1",
+        "subscription_id": "11111111-1111-1111-1111-111111111111",
+        "subscription_ids_json": '["22222222-2222-2222-2222-222222222222","33333333-3333-3333-3333-333333333333"]',
+    })
+    assert rec["subscription_id"] == "22222222-2222-2222-2222-222222222222"
+    assert rec["subscription_ids"] == [
+        "22222222-2222-2222-2222-222222222222",
+        "33333333-3333-3333-3333-333333333333",
+    ]
+
+
+def test_validate_tag_charset_and_length():
+    assert bom_storage._validate_tag("Avaya-Prod_East") == "Avaya-Prod_East"
+    assert bom_storage._validate_tag("Tag (test)") == "Tag (test)"
+    assert bom_storage._validate_tag(None) is None
+    assert bom_storage._validate_tag("") is None
+    with pytest.raises(bom_storage.BomStorageError):
+        bom_storage._validate_tag("bad<tag>")  # angle brackets disallowed
+    with pytest.raises(bom_storage.BomStorageError):
+        bom_storage._validate_tag("x" * 200)   # length cap
+
+
+def test_validate_segments_defaults_to_ea_any():
+    assert bom_storage._validate_segments(None) == "EA,ANY"
+    assert bom_storage._validate_segments("") == "EA,ANY"
+    assert bom_storage._validate_segments("ea, any") == "EA,ANY"
+    assert bom_storage._validate_segments("MOSP,INTERNAL") == "MOSP,INTERNAL"
+
+
+def test_validate_segments_rejects_unknown():
+    with pytest.raises(bom_storage.BomStorageError) as ex:
+        bom_storage._validate_segments("EA,VIP")
+    assert ex.value.code == "bad_segments"
+    assert "VIP" in ex.value.message
+
+
+def test_validate_services_resolves_against_catalog():
+    out = bom_storage._validate_services([
+        {"name": "Azure Automation"},
+        {"name": "Premium SSD v2"},
+        "Azure Firewall",  # string form is also accepted
+    ])
+    names = [s["name"] for s in out]
+    assert names == ["Azure Automation", "Premium SSD v2", "Azure Firewall"]
+
+
+def test_validate_services_rejects_unknown_via_catalog():
+    with pytest.raises(bom_storage.BomStorageError) as ex:
+        bom_storage._validate_services([{"name": "Made Up Service"}])
+    assert ex.value.code == "unknown_services"
+
+
+def test_validate_services_empty_list_allowed():
+    assert bom_storage._validate_services([]) == []
+
+
+def test_validate_required_skus_normalizes_via_compile_validator():
+    skus = [{
+        "primary_family": "standardDav6Family",
+        "primary_label": "Dav6",
+        "alt_family": "standardDASv5Family",
+        "alt_label": "Dasv5",
+        "required_cores": 100,
+    }]
+    out = bom_storage._validate_required_skus(skus)
+    assert len(out) == 1
+    assert out[0]["primary_family"] == "standardDav6Family"
+    assert out[0]["required_cores"] == 100
+
+
+def test_validate_required_skus_empty_allowed_for_partial_save():
+    assert bom_storage._validate_required_skus([]) == []
+
+
+def test_validate_required_skus_rejects_non_list():
+    with pytest.raises(bom_storage.BomStorageError) as ex:
+        bom_storage._validate_required_skus("not a list")
+    assert ex.value.code == "bad_required_skus"
+
+
+def test_validate_required_skus_rejects_bad_row():
+    # missing primary_family — compile._validate_required_families should reject
+    with pytest.raises(bom_storage.BomStorageError):
+        bom_storage._validate_required_skus([
+            {"primary_label": "Dav6", "required_cores": 100},
+        ])
+
+
+def test_ensure_json_size_rejects_oversize():
+    with pytest.raises(bom_storage.BomStorageError) as ex:
+        bom_storage._ensure_json_size("x" * (bom_storage.MAX_JSON_BYTES + 1),
+                                       what="test")
+    assert ex.value.code == "payload_too_large"

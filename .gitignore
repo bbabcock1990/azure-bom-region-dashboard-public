@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Build outputs
+dist/
+build/
+
+# Local artifacts
+*.log
+*.tmp
+fixtures/local_run_*.json
+
+# Secrets — never commit
+*.pem
+*.key
+.env
+.env.*
+!.env.example
+
+# Local-mode runtime artifacts (SQLite db + snapshot files)
+local-storage/
+
+# Local/customer-specific data (never commit)
+tools/bom-checker/region_results_*.xlsx
+
+
