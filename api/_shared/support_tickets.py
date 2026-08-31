@@ -14,9 +14,11 @@ Two blocker → ticket shapes are supported:
 * ``kind="quota"`` — a "Service and subscription limits (quotas)" ticket asking
   to raise a compute family's vCPU limit in a region. Available on *all* support
   plans (including Basic/free).
-* ``kind="technical"`` — a technical ticket requesting zonal / restricted-SKU
-  access for a subscription. Technical tickets generally require a *paid* support
-  plan; we surface that expectation to the caller rather than guessing.
+* ``kind="technical"`` — an Availability-Zone access ("zonal whitelisting")
+  request. Despite the name, Azure files this as a **quota** ticket under the
+  same "Service and subscription limits (quotas)" service and "Compute-VM
+  (cores-vCPUs)" classification, with a per-SKU × zone ``quotaChangeRequests``
+  payload (``Type:Zonal``). Available on all support plans.
 
 **Dry-run first.** ``create_ticket(..., dry_run=True)`` (the default) builds and
 returns the exact ARM request *without calling Azure*, and records a local
@@ -44,6 +46,9 @@ log = logging.getLogger(__name__)
 
 ARM_BASE = "https://management.azure.com"
 SUPPORT_API_VERSION = "2024-04-01"
+# ARM locations API that exposes logical→physical availability-zone mappings,
+# used to reproduce the portal's "Zone access" payload (Physical AZ0N).
+ZONE_LOCATIONS_API_VERSION = "2022-12-01"
 
 # Well-known "Service and subscription limits (quotas)" service id. This is the
 # stable public service GUID used for quota tickets across subscriptions.
@@ -311,6 +316,142 @@ def build_technical_ticket_payload(
     return {"properties": props}
 
 
+def _physical_zone_map(
+    subscription_id: str, region_code_lower: str, token: Optional[str]
+) -> Dict[str, str]:
+    """Map logical zone ("1") → physical-zone display ("Physical AZ01").
+
+    Reads the ARM ``locations`` API ``availabilityZoneMappings`` for the
+    subscription so the zonal payload carries the subscription-specific physical
+    AZ the portal's "Zone access" flow submits. Best-effort: returns ``{}`` when
+    unavailable (e.g. offline dry-run with no token), and callers fall back to a
+    generic ``Physical AZ0N``.
+    """
+    if not token:
+        return {}
+    url = f"{ARM_BASE}/subscriptions/{subscription_id}/locations"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    out: Dict[str, str] = {}
+    try:
+        with httpx.Client(timeout=30.0, http2=False) as client:
+            resp = client.get(
+                url, params={"api-version": ZONE_LOCATIONS_API_VERSION}, headers=headers
+            )
+        if resp.status_code >= 400:
+            log.debug("zone mapping lookup HTTP %d", resp.status_code)
+            return {}
+        for loc in (resp.json().get("value") or []):
+            if str(loc.get("name") or "").lower() != region_code_lower:
+                continue
+            for m in (loc.get("availabilityZoneMappings") or []):
+                logical = str(m.get("logicalZone") or "").strip()
+                physical = str(m.get("physicalZone") or "").strip()
+                if not logical:
+                    continue
+                # physicalZone looks like "australiaeast-az1" → "Physical AZ01".
+                mt = re.search(r"az(\d+)$", physical, re.IGNORECASE)
+                out[logical] = (
+                    f"Physical AZ{int(mt.group(1)):02d}" if mt else (physical or f"Physical AZ{logical}")
+                )
+    except Exception as ex:  # pragma: no cover - defensive
+        log.debug("zone mapping lookup failed: %s", ex)
+    return out
+
+
+def build_zonal_ticket_payload(
+    *,
+    subscription_id: str,
+    region: str,
+    family: str,
+    new_limit: int,
+    zones: Optional[List[str]],
+    severity: str,
+    settings: Dict[str, Any],
+    problem_classification_id: str,
+    family_label: Optional[str] = None,
+    zone_map: Optional[Dict[str, str]] = None,
+    detail: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build an Availability-Zone access ("zonal whitelisting") request.
+
+    Azure files zonal whitelisting as a **quota** ticket (service "Service and
+    subscription limits (quotas)", classification "Compute-VM (cores-vCPUs)
+    subscription limit increases") — *not* a technical ticket — with one
+    ``quotaChangeRequests`` entry per SKU family × availability zone. Each
+    payload mirrors the portal's "Zone access" submission exactly::
+
+        {VMFamily:<family>,NewLimit:<n>,DeploymentStack:ARM,Type:Zonal,
+         AvailabilityZone:Physical AZ0N,LogicalAvailabilityZone:Zone N}
+
+    ``region`` is uppercased with spaces stripped (as the portal stores it), and
+    the physical AZ comes from ``zone_map`` (see ``_physical_zone_map``).
+    """
+    label = family_label or family
+    region_code = re.sub(r"\s+", "", str(region or ""))
+    region_upper = region_code.upper()
+    zone_map = zone_map or {}
+    zlist = [str(z).strip() for z in (zones or []) if str(z).strip()]
+    if not zlist:
+        raise SupportError(
+            "bad_zones", "At least one availability zone is required for a zonal access ticket.", 400
+        )
+    if int(new_limit or 0) <= 0:
+        raise SupportError(
+            "bad_limit", "new_limit (target vCPU limit) must be a positive integer for zonal tickets.", 400
+        )
+
+    change_requests: List[Dict[str, str]] = []
+    detail_lines: List[str] = []
+    for z in zlist:
+        logical_display = f"Zone {z}"
+        physical_display = zone_map.get(z) or (
+            f"Physical AZ{int(z):02d}" if z.isdigit() else f"Physical AZ{z}"
+        )
+        payload_str = (
+            "{VMFamily:%s,NewLimit:%d,DeploymentStack:ARM,Type:Zonal,"
+            "AvailabilityZone:%s,LogicalAvailabilityZone:%s}"
+            % (family, int(new_limit), physical_display, logical_display)
+        )
+        change_requests.append({"region": region_upper, "payload": payload_str})
+        detail_lines.append(f"{logical_display} ({physical_display}): {label} = {new_limit} vCPUs")
+
+    title = f"{label} zonal access whitelisting in {region_code} (zones {', '.join(zlist)})"
+    description = (
+        "Automated request from Azure BOM Region Dashboard.\n\n"
+        f"Subscription: {subscription_id}\n"
+        f"Region: {region_upper}\n"
+        f"SKU family: {label} ({family})\n"
+        f"Requested new vCPU limit: {new_limit}\n"
+        f"Availability zones: {', '.join(zlist)}\n\n"
+        "Reason: this SKU family is zone-restricted for this subscription. "
+        "Requesting Availability Zone access (Zone access request type) / zonal "
+        "whitelisting for the listed zones so we can deploy.\n\n"
+        "Payload Details - requested new limit (vCPUs) per Availability Zone:\n"
+        + "\n".join(detail_lines)
+        + f"\nApplies to all rows: Type=Zonal, DeploymentStack=ARM, Region={region_upper}, "
+        "quotaChangeVersion=1.0."
+    )
+    if detail:
+        description += f"\n\nAdditional detail:\n{detail}"
+
+    return {
+        "properties": {
+            "description": description,
+            "title": title,
+            "severity": severity,
+            "serviceId": _service_id(QUOTA_SERVICE_GUID),
+            "problemClassificationId": problem_classification_id,
+            "contactDetails": _contact_details(settings),
+            "quotaTicketDetails": {
+                "quotaChangeRequestSubType": "Cores",
+                "quotaChangeRequestVersion": "1.0",
+                "quotaChangeRequests": change_requests,
+            },
+            "advancedDiagnosticConsent": "No",
+        }
+    }
+
+
 # ─── problem-classification resolution (best-effort) ─────────────────────────
 
 def resolve_problem_classification(
@@ -460,6 +601,13 @@ def create_ticket(
         raise SupportError("bad_family", "family is required.")
     if kind == "quota" and int(new_limit or 0) <= 0:
         raise SupportError("bad_limit", "new_limit must be a positive integer for quota tickets.")
+    if kind == "technical":
+        # Zonal access ("whitelisting") is filed as a quota ticket and needs a
+        # target vCPU limit plus at least one zone.
+        if int(new_limit or 0) <= 0:
+            raise SupportError("bad_limit", "new_limit (target vCPU limit) is required for zonal access tickets.")
+        if not (zones and any(str(z).strip() for z in zones)):
+            raise SupportError("bad_zones", "At least one availability zone is required for a zonal access ticket.", 400)
 
     subscription_id = subscription_id.lower()
     settings = _effective_support_settings(bom_id)
@@ -479,11 +627,13 @@ def create_ticket(
 
     # Resolve a problem classification when we can reach Azure (real submits
     # only). Previews stay fully offline and use a documented placeholder.
-    service_guid = QUOTA_SERVICE_GUID if kind == "quota" else TECHNICAL_SERVICE_GUID
+    # Zonal whitelisting is filed under the *quota* service (cores-vCPUs
+    # classification) — the same service/classification as a cores increase.
+    service_guid = QUOTA_SERVICE_GUID
     problem_classification_id: Optional[str] = None
     classification_resolved = False
     if token and not is_preview:
-        keywords = ["cores", "vcpu"] if kind == "quota" else ["sku", "series"]
+        keywords = ["cores", "vcpu"]
         problem_classification_id = resolve_problem_classification(token, service_guid, keywords)
         classification_resolved = problem_classification_id is not None
     if not problem_classification_id:
@@ -504,15 +654,23 @@ def create_ticket(
             family_label=family_label,
         )
     else:
-        payload = build_technical_ticket_payload(
+        # Resolve the subscription-specific physical AZ mapping for real submits
+        # so the payload matches the portal; previews stay offline (zone_map={}).
+        zone_map: Dict[str, str] = {}
+        if token and not is_preview:
+            region_code_lower = re.sub(r"\s+", "", region).lower()
+            zone_map = _physical_zone_map(subscription_id, region_code_lower, token)
+        payload = build_zonal_ticket_payload(
             subscription_id=subscription_id,
             region=region,
             family=family,
+            new_limit=int(new_limit),
+            zones=zones,
             severity=sev,
             settings=settings,
             problem_classification_id=problem_classification_id,
-            zones=zones,
             family_label=family_label,
+            zone_map=zone_map,
             detail=detail,
         )
 
@@ -525,7 +683,7 @@ def create_ticket(
         "region": region,
         "family": family,
         "family_label": family_label or family,
-        "new_limit": int(new_limit) if kind == "quota" else None,
+        "new_limit": int(new_limit) if int(new_limit or 0) > 0 else None,
         "severity": sev,
         "title": title,
         "bom_id": bom_id,

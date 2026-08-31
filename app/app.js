@@ -6754,7 +6754,9 @@ function _supportSyncKindFields() {
   const kind = (document.getElementById("sup-kind") || {}).value;
   const limitWrap = document.getElementById("sup-limit-wrap");
   const zonesWrap = document.getElementById("sup-zones-wrap");
-  if (limitWrap) limitWrap.classList.toggle("hidden", kind !== "quota");
+  // Both quota and zonal ("technical") tickets need a target vCPU limit; only
+  // zonal needs the availability-zone list.
+  if (limitWrap) limitWrap.classList.remove("hidden");
   if (zonesWrap) zonesWrap.classList.toggle("hidden", kind !== "technical");
   _supportUpdateQuotaMath();
 }
@@ -6768,7 +6770,7 @@ function _supportUpdateQuotaMath(opts) {
   const info = document.getElementById("sup-limit-info");
   const limitInput = document.getElementById("sup-limit");
   if (!info || !limitInput) return;
-  if (kind !== "quota") { info.textContent = ""; return; }
+  if (kind !== "quota" && kind !== "technical") { info.textContent = ""; return; }
 
   const region = (document.getElementById("sup-region") || {}).value || "";
   const familySel = document.getElementById("sup-family");
@@ -6829,9 +6831,10 @@ function _supportGatherForm() {
     family_label: opt ? opt.getAttribute("data-label") : "",
     severity: (document.getElementById("sup-sev") || {}).value || "moderate",
   };
-  if (kind === "quota") {
+  if (kind === "quota" || kind === "technical") {
     body.new_limit = parseInt((document.getElementById("sup-limit") || {}).value || "0", 10);
-  } else {
+  }
+  if (kind === "technical") {
     const z = ((document.getElementById("sup-zones") || {}).value || "").split(",").map(x => x.trim()).filter(Boolean);
     if (z.length) body.zones = z;
   }
@@ -6845,6 +6848,12 @@ async function _supportCreate(dryRun) {
   if (!body.subscription_id) { showToast("Pick a subscription first.", "warning"); return; }
   if (!body.region) { showToast("Pick a region first.", "warning"); return; }
   if (!body.family) { showToast("Pick a SKU family first.", "warning"); return; }
+  if (body.kind === "technical" && !(body.zones && body.zones.length)) {
+    showToast("Enter at least one availability zone (e.g. 1,2,3) for a zonal access ticket.", "warning"); return;
+  }
+  if ((body.kind === "quota" || body.kind === "technical") && !(body.new_limit > 0)) {
+    showToast("Enter a target vCPU limit.", "warning"); return;
+  }
   if (!dryRun && !confirm(`Submit a real ${body.kind} support ticket to Azure for ${body.region}?`)) return;
   const box = document.getElementById("sup-preview-box");
   try {

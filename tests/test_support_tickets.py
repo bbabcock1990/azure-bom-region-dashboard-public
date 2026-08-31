@@ -6,6 +6,7 @@ import os
 import httpx
 import pytest
 import respx
+from unittest.mock import MagicMock, patch
 
 
 @pytest.fixture()
@@ -88,11 +89,73 @@ def test_create_ticket_demo_mode_never_submits(isolated_storage):
     from _shared import support_tickets
     result = support_tickets.create_ticket(
         kind="technical", subscription_id="11111111-1111-1111-1111-111111111111",
-        region="westus2", family="standardNCadsH100v5Family",
+        region="westus2", family="standardNCadsH100v5Family", new_limit=100,
         zones=["1", "2"], dry_run=False, token="should-not-be-used", demo_mode=True,
     )
     assert result["status"] == "preview"
     assert result["dry_run"] is True
+
+
+def test_zonal_ticket_is_quota_shaped_with_zonal_payload(isolated_storage):
+    from _shared import support_tickets as st
+    result = st.create_ticket(
+        kind="technical", subscription_id="11111111-1111-1111-1111-111111111111",
+        region="australiaeast", family="StandardDsv7Family", family_label="Dsv7",
+        new_limit=900, zones=["1", "3"], dry_run=True, token=None,
+    )
+    props = result["payload"]["properties"]
+    # Filed under the quota service (cores-vCPUs), NOT a technical ticket.
+    assert props["serviceId"].endswith(st.QUOTA_SERVICE_GUID)
+    assert "technicalTicketDetails" not in props
+    qtd = props["quotaTicketDetails"]
+    assert qtd["quotaChangeRequestVersion"] == "1.0"
+    reqs = qtd["quotaChangeRequests"]
+    assert len(reqs) == 2  # one per requested zone
+    # Region is uppercased + space-stripped; payload carries the portal format.
+    assert all(r["region"] == "AUSTRALIAEAST" for r in reqs)
+    p0 = reqs[0]["payload"]
+    assert "VMFamily:StandardDsv7Family" in p0
+    assert "NewLimit:900" in p0
+    assert "Type:Zonal" in p0
+    assert "DeploymentStack:ARM" in p0
+    assert "LogicalAvailabilityZone:Zone 1" in p0
+    # Offline preview (no token) falls back to a generic physical AZ label.
+    assert "AvailabilityZone:Physical AZ01" in p0
+    assert "LogicalAvailabilityZone:Zone 3" in reqs[1]["payload"]
+
+
+def test_zonal_ticket_requires_zones_and_limit(isolated_storage):
+    from _shared import support_tickets as st
+    sub = "11111111-1111-1111-1111-111111111111"
+    with pytest.raises(st.SupportError) as ex1:
+        st.create_ticket(kind="technical", subscription_id=sub, region="eastus",
+                         family="StandardDsv7Family", new_limit=100, zones=[], dry_run=True)
+    assert ex1.value.code == "bad_zones"
+    with pytest.raises(st.SupportError) as ex2:
+        st.create_ticket(kind="technical", subscription_id=sub, region="eastus",
+                         family="StandardDsv7Family", new_limit=0, zones=["1"], dry_run=True)
+    assert ex2.value.code == "bad_limit"
+
+
+def test_physical_zone_map_parses_availability_zone_mappings(isolated_storage):
+    from _shared import support_tickets as st
+    sub = "11111111-1111-1111-1111-111111111111"
+    with patch("_shared.support_tickets.httpx.Client") as MC:
+        client = MC.return_value.__enter__.return_value
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"value": [
+            {"name": "australiaeast", "availabilityZoneMappings": [
+                {"logicalZone": "1", "physicalZone": "australiaeast-az2"},
+                {"logicalZone": "2", "physicalZone": "australiaeast-az1"},
+            ]},
+            {"name": "eastus", "availabilityZoneMappings": [
+                {"logicalZone": "1", "physicalZone": "eastus-az3"},
+            ]},
+        ]}
+        client.get.return_value = resp
+        out = st._physical_zone_map(sub, "australiaeast", "token")
+    assert out == {"1": "Physical AZ02", "2": "Physical AZ01"}
 
 
 def test_create_ticket_bad_kind(isolated_storage):
