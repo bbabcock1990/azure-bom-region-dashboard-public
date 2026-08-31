@@ -958,19 +958,28 @@ function _altValidBadge(v, regionShort) {
   const limit = (v.quota && v.quota.limit != null) ? Number(v.quota.limit) : "";
   const ticketLink = (kind, text) =>
     `<a href="#" class="alt-ticket-link" data-alt-ticket="${kind}" data-alt-region="${region}" data-alt-family="${armFam}" data-alt-label="${label}" data-alt-cores="${cores}" data-alt-limit="${limit}">${text}</a>`;
+  // Surface partial-zone restrictions (some AZs blocked, others usable).
+  let zoneNote = "";
+  if (v.zone_limited && Array.isArray(v.zones)) {
+    const blocked = v.zones.map((ok, i) => ok ? null : i + 1).filter(Boolean);
+    const avail = v.zones.map((ok, i) => ok ? i + 1 : null).filter(Boolean);
+    if (blocked.length) {
+      zoneNote = ` <span class="alt-zone-note" title="Restricted in AZ ${blocked.join(", ")} for this subscription; usable in AZ ${avail.join(", ") || "none"}.">⚠️ AZ-limited (not in ${blocked.map(z => "AZ " + z).join(", ")})</span> ${ticketLink("technical", "Request AZ access →")}`;
+    }
+  }
   switch (v.verdict) {
     case "ok":
-      return `<span class="alt-valid ok" title="${title}">✅ Available · quota OK</span>`;
+      return `<span class="alt-valid ok" title="${title}">✅ Available · quota OK</span>${zoneNote}`;
     case "quota": {
       const need = v.quota && v.quota.shortfall != null ? Math.round(v.quota.shortfall) : null;
-      return `<span class="alt-valid warn" title="${title}">⚠️ Quota short${need != null ? ` ${need} vCPU` : ""}</span> ${ticketLink("quota", "Request quota →")}`;
+      return `<span class="alt-valid warn" title="${title}">⚠️ Quota short${need != null ? ` ${need} vCPU` : ""}</span>${zoneNote} ${ticketLink("quota", "Request quota →")}`;
     }
     case "restricted":
       return `<span class="alt-valid danger" title="${title}">⛔ Restricted</span> ${ticketLink("technical", "Request access →")}`;
     case "unavailable":
       return `<span class="alt-valid danger" title="${title}">⛔ Not offered in region</span>`;
     default:
-      return `<span class="alt-valid muted" title="${title}">ℹ️ ${escapeHtml(v.message || "Verify availability & quota manually")}</span>`;
+      return `<span class="alt-valid muted" title="${title}">ℹ️ ${escapeHtml(v.message || "Verify availability & quota manually")}</span>${zoneNote}`;
   }
 }
 
