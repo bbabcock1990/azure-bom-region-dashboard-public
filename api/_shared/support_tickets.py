@@ -678,6 +678,67 @@ def refresh_status(ticket_name: str, token: str) -> Dict[str, Any]:
 _CLOSED_STATUSES = {"closed"}
 
 
+def close_azure_ticket(subscription_id: str, ticket_name: str, token: str) -> Dict[str, Any]:
+    """Close an Azure support ticket via ARM ``PATCH`` (``status = Closed``).
+
+    Works for both dashboard-created and externally created tickets. Azure only
+    permits closing a ticket that is not actively assigned to an engineer;
+    otherwise ARM returns an error which is surfaced to the caller. When the
+    ticket is also tracked locally, its cached ``azure_status`` is updated.
+    """
+    sub_id = str(subscription_id or "").strip().lower()
+    name = str(ticket_name or "").strip()
+    if not GUID_RE.match(sub_id):
+        raise SupportError("bad_subscription", "subscription_id must be a GUID.", 400)
+    if not name:
+        raise SupportError("bad_name", "ticket_name is required.", 400)
+    if not token:
+        raise SupportError("no_token", "An ARM token is required to close a ticket.", 401)
+
+    url = (
+        f"{ARM_BASE}/subscriptions/{sub_id}/providers/"
+        f"Microsoft.Support/supportTickets/{quote(name, safe='')}"
+    )
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    try:
+        with httpx.Client(timeout=30.0, http2=False) as client:
+            resp = client.patch(
+                url,
+                params={"api-version": SUPPORT_API_VERSION},
+                headers=headers,
+                json={"status": "Closed"},
+            )
+    except Exception as ex:
+        raise SupportError("request_failed", f"Close request failed: {ex!r}", 502)
+
+    if resp.status_code >= 400:
+        body = _safe_json(resp)
+        raise SupportError(
+            "close_failed",
+            _extract_message(body, f"Could not close the ticket ({resp.status_code})."),
+            resp.status_code,
+            details=body,
+        )
+
+    props = (resp.json() or {}).get("properties") or {}
+    new_status = props.get("status") or "closed"
+
+    # Reflect the new status locally if we track this ticket.
+    try:
+        entity = storage.get_table_client(TABLE_NAME).get_entity(_PK, name)
+        entity["azure_status"] = new_status
+        entity["updated_at"] = _now_iso()
+        storage.get_table_client(TABLE_NAME).upsert_entity(entity, mode="merge")
+    except Exception:
+        pass
+
+    return {"ticket_name": name, "subscription_id": sub_id, "azure_status": new_status}
+
+
 def _normalize_azure_ticket(sub_id: str, item: Dict[str, Any]) -> Dict[str, Any]:
     """Map an ARM Microsoft.Support/supportTickets item to the UI ticket shape."""
     props = (item or {}).get("properties") or {}

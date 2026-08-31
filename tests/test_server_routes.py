@@ -22,3 +22,10 @@ def test_azure_tickets_route_registered_before_ticket_name_route():
     # catch-all so it isn't shadowed.
     assert routes.index("support/azure-tickets") < routes.index("support/tickets/{ticket_name}")
 
+
+def test_azure_ticket_close_route_registered():
+    assert ("support/azure-tickets/close", ["POST"], "support_azure_ticket_close") in ROUTES
+    routes = [r[0] for r in ROUTES]
+    # The more specific /close path must precede the 2-segment azure-tickets GET.
+    assert routes.index("support/azure-tickets/close") < routes.index("support/azure-tickets")
+

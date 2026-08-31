@@ -6614,9 +6614,9 @@ function _supportHtml() {
       </div>
       <p class="muted">Pulled live from Azure — support tickets on your BOM subscription(s), including any created from this dashboard.</p>
       <table class="support-table"><thead><tr>
-        <th>Type</th><th>Title</th><th>Severity</th><th>Status</th><th>Created</th>
+        <th>Type</th><th>Title</th><th>Severity</th><th>Status</th><th>Created</th><th></th>
       </tr></thead><tbody id="support-azure-tickets-body">
-        <tr><td colspan="5" class="muted">Loading live tickets from Azure…</td></tr>
+        <tr><td colspan="6" class="muted">Loading live tickets from Azure…</td></tr>
       </tbody></table>
     </section>
   </div>`;
@@ -6625,15 +6625,20 @@ function _supportHtml() {
 function _supportAzureTicketRow(t) {
   const created = (t.created_at || "").replace("T", " ").replace("Z", "").slice(0, 19);
   const status = String(t.azure_status || "");
+  const isClosed = status.toLowerCase() === "closed";
   const statusPill = status
-    ? `<span class="pill ${status.toLowerCase() === "closed" ? "pill-ok" : "pill-warn"}">${escapeHtml(status)}</span>`
+    ? `<span class="pill ${isClosed ? "pill-ok" : "pill-warn"}">${escapeHtml(status)}</span>`
     : `<span class="pill pill-muted">—</span>`;
+  const closeBtn = isClosed
+    ? ""
+    : `<button type="button" class="btn btn--sm" data-azure-ticket-close="${escapeHtml(t.ticket_name || "")}" data-azure-ticket-sub="${escapeHtml(t.subscription_id || "")}" data-azure-ticket-title="${escapeHtml(t.title || t.ticket_name || "")}">Close</button>`;
   return `<tr>
     <td>${escapeHtml(t.kind || "support")}</td>
     <td title="${escapeHtml(t.ticket_name || "")}">${escapeHtml(t.title || t.ticket_name || "")}</td>
     <td>${escapeHtml(t.severity || "")}</td>
     <td>${statusPill}</td>
     <td>${escapeHtml(created)}</td>
+    <td class="support-ticket-actions">${closeBtn}</td>
   </tr>`;
 }
 
@@ -6646,10 +6651,10 @@ async function _supportLoadAzureTickets() {
   const filter = (filterSel && filterSel.value) || "open";
   const subs = _activeBomSubs().filter(Boolean);
   if (!subs.length) {
-    body.innerHTML = `<tr><td colspan="5" class="muted">Sign in and select a BOM to see live tickets.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="6" class="muted">Sign in and select a BOM to see live tickets.</td></tr>`;
     return;
   }
-  body.innerHTML = `<tr><td colspan="5" class="muted"><span class="quota-request-spinner" aria-hidden="true"></span> Loading live tickets from Azure…</td></tr>`;
+  body.innerHTML = `<tr><td colspan="6" class="muted"><span class="quota-request-spinner" aria-hidden="true"></span> Loading live tickets from Azure…</td></tr>`;
 
   const seen = new Set();
   const collected = [];
@@ -6684,14 +6689,37 @@ async function _supportLoadAzureTickets() {
     const note = errors.length && !collected.length
       ? `Could not load tickets for ${errors.length} subscription(s): ${escapeHtml(errors[0].message)}`
       : `No other ${label ? label + " " : ""}Azure support tickets on this subscription.`;
-    body.innerHTML = `<tr><td colspan="5" class="muted">${note}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="6" class="muted">${note}</td></tr>`;
     return;
   }
   let html = filtered.map(_supportAzureTicketRow).join("");
   if (errors.length) {
-    html += `<tr><td colspan="5" class="muted">Note: ${errors.length} subscription(s) could not be read (${escapeHtml(errors[0].message)}).</td></tr>`;
+    html += `<tr><td colspan="6" class="muted">Note: ${errors.length} subscription(s) could not be read (${escapeHtml(errors[0].message)}).</td></tr>`;
   }
   body.innerHTML = html;
+}
+
+// Close an Azure support ticket straight from the live list.
+async function _supportCloseAzureTicket(ticketName, subId, title, btn) {
+  ticketName = (ticketName || "").trim();
+  subId = (subId || "").trim();
+  if (!ticketName || !subId) { showToast("Missing ticket details to close.", "warning"); return; }
+  const label = title || ticketName;
+  if (!confirm(`Close Azure support ticket "${label}"?\n\nAzure only allows closing tickets that aren't actively assigned to an engineer.`)) return;
+  const original = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; btn.textContent = "Closing…"; }
+  try {
+    await apiJson("/api/support/azure-tickets/close", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subscription_id: subId, ticket_name: ticketName }),
+    });
+    showToast(`✓ Ticket closed: ${label}`, "success");
+    await _supportLoadAzureTickets();
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = original || "Close"; }
+    showToast(e.message || "Could not close the ticket.", "error");
+  }
 }
 
 function _supportTicketRow(t) {
@@ -6949,6 +6977,17 @@ function _wireSupportTab(view) {
   if (azureRefresh) azureRefresh.addEventListener("click", _supportLoadAzureTickets);
   const azureFilter = view.querySelector("#sup-azure-filter");
   if (azureFilter) azureFilter.addEventListener("change", _supportLoadAzureTickets);
+  const azureBody = view.querySelector("#support-azure-tickets-body");
+  if (azureBody) azureBody.addEventListener("click", (ev) => {
+    const btn = ev.target.closest("[data-azure-ticket-close]");
+    if (!btn) return;
+    _supportCloseAzureTicket(
+      btn.getAttribute("data-azure-ticket-close"),
+      btn.getAttribute("data-azure-ticket-sub"),
+      btn.getAttribute("data-azure-ticket-title"),
+      btn
+    );
+  });
   _supportLoadAzureTickets();
   const prev = view.querySelector("#sup-preview");
   if (prev) prev.addEventListener("click", () => _supportCreate(true));

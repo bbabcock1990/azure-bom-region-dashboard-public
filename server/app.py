@@ -69,6 +69,7 @@ ROUTES = [
     ("donor-quota-scan", ["POST"], "donor_quota_scan"),
     ("app-config", ["GET"], "app_config"),
     ("support/settings", ["GET", "POST"], "support_settings"),
+    ("support/azure-tickets/close", ["POST"], "support_azure_ticket_close"),
     ("support/azure-tickets", ["GET"], "support_azure_tickets"),
     ("support/tickets/{ticket_name}", ["GET", "POST"], "support_ticket_get"),
     ("support/tickets", ["GET"], "support_tickets_list"),

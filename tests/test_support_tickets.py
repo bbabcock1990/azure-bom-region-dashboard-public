@@ -234,6 +234,51 @@ def test_list_azure_tickets_surfaces_arm_error(isolated_storage):
     assert "support plan" in ex.value.message.lower()
 
 
+# ─── close ticket ────────────────────────────────────────────────────────────
+
+@respx.mock
+def test_close_azure_ticket_patches_and_returns_status(isolated_storage):
+    from _shared import support_tickets
+    import json as _json
+    sub = "11111111-1111-1111-1111-111111111111"
+    route = respx.patch(url__regex=r".*/supportTickets/2400001(\?.*)?$").mock(
+        return_value=httpx.Response(200, json={"properties": {"status": "Closed"}})
+    )
+    out = support_tickets.close_azure_ticket(sub, "2400001", "fake-token")
+    assert route.called
+    assert out["ticket_name"] == "2400001"
+    assert out["azure_status"] == "Closed"
+    assert _json.loads(route.calls[0].request.content)["status"] == "Closed"
+
+
+def test_close_azure_ticket_rejects_bad_subscription(isolated_storage):
+    from _shared import support_tickets
+    with pytest.raises(support_tickets.SupportError) as ex:
+        support_tickets.close_azure_ticket("not-a-guid", "2400001", "fake-token")
+    assert ex.value.code == "bad_subscription"
+
+
+def test_close_azure_ticket_requires_name(isolated_storage):
+    from _shared import support_tickets
+    sub = "11111111-1111-1111-1111-111111111111"
+    with pytest.raises(support_tickets.SupportError) as ex:
+        support_tickets.close_azure_ticket(sub, "", "fake-token")
+    assert ex.value.code == "bad_name"
+
+
+@respx.mock
+def test_close_azure_ticket_surfaces_arm_error(isolated_storage):
+    from _shared import support_tickets
+    sub = "11111111-1111-1111-1111-111111111111"
+    respx.patch(url__regex=r".*/supportTickets/2400001(\?.*)?$").mock(
+        return_value=httpx.Response(409, json={"error": {"message": "ticket is assigned"}})
+    )
+    with pytest.raises(support_tickets.SupportError) as ex:
+        support_tickets.close_azure_ticket(sub, "2400001", "fake-token")
+    assert ex.value.status == 409
+    assert "assigned" in ex.value.message.lower()
+
+
 # ─── problem-classification resolution ───────────────────────────────────────
 
 @respx.mock
