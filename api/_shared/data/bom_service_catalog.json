@@ -55,7 +55,24 @@
       "provider": "Microsoft.ContainerService",
       "resource_type": "managedClusters",
       "zone_check": false,
-      "category": "Containers"
+      "category": "Containers",
+      "tiers": [
+        {
+          "id": "free",
+          "label": "Free (control plane)",
+          "zone_redundant": false
+        },
+        {
+          "id": "standard",
+          "label": "Standard (control plane)",
+          "zone_redundant": false
+        },
+        {
+          "id": "premium",
+          "label": "Premium (control plane)",
+          "zone_redundant": false
+        }
+      ]
     },
     {
       "name": "Azure Arc-enabled Kubernetes",
@@ -69,7 +86,19 @@
       "provider": "Microsoft.App",
       "resource_type": "*",
       "zone_check": false,
-      "category": "Containers"
+      "category": "Containers",
+      "tiers": [
+        {
+          "id": "consumption",
+          "label": "Consumption",
+          "zone_redundant": false
+        },
+        {
+          "id": "dedicated",
+          "label": "Dedicated",
+          "zone_redundant": false
+        }
+      ]
     },
     {
       "name": "Azure Container Instances",
@@ -83,7 +112,24 @@
       "provider": "Microsoft.ContainerRegistry",
       "resource_type": "registries",
       "zone_check": false,
-      "category": "Containers"
+      "category": "Containers",
+      "tiers": [
+        {
+          "id": "basic",
+          "label": "Basic",
+          "zone_redundant": false
+        },
+        {
+          "id": "standard",
+          "label": "Standard",
+          "zone_redundant": false
+        },
+        {
+          "id": "premium",
+          "label": "Premium",
+          "zone_redundant": true
+        }
+      ]
     },
     {
       "name": "Azure Red Hat OpenShift",
@@ -104,42 +150,144 @@
       "provider": "Microsoft.AppPlatform",
       "resource_type": "*",
       "zone_check": false,
-      "category": "Containers"
+      "category": "Containers",
+      "tiers": [
+        {
+          "id": "basic",
+          "label": "Basic",
+          "zone_redundant": false
+        },
+        {
+          "id": "standard",
+          "label": "Standard",
+          "zone_redundant": true
+        },
+        {
+          "id": "enterprise",
+          "label": "Enterprise",
+          "zone_redundant": true
+        }
+      ]
     },
     {
       "name": "Azure App Service",
       "provider": "Microsoft.Web",
       "resource_type": "sites",
       "zone_check": false,
-      "category": "Web"
+      "category": "Web",
+      "tiers": [
+        {
+          "id": "free",
+          "label": "Free (F1)",
+          "zone_redundant": false
+        },
+        {
+          "id": "shared",
+          "label": "Shared (D1)",
+          "zone_redundant": false
+        },
+        {
+          "id": "basic",
+          "label": "Basic (B1-B3)",
+          "zone_redundant": false
+        },
+        {
+          "id": "standard",
+          "label": "Standard (S1-S3)",
+          "zone_redundant": false
+        },
+        {
+          "id": "premium_v2",
+          "label": "Premium v2 (P1v2-P3v2)",
+          "zone_redundant": true
+        },
+        {
+          "id": "premium_v3",
+          "label": "Premium v3 (P0v3-P5v3)",
+          "zone_redundant": true
+        },
+        {
+          "id": "isolated_v2",
+          "label": "Isolated v2 (I1v2-I6v2)",
+          "zone_redundant": true
+        }
+      ]
     },
     {
       "name": "Azure Static Web Apps",
       "provider": "Microsoft.Web",
       "resource_type": "staticSites",
       "zone_check": false,
-      "category": "Web"
+      "category": "Web",
+      "tiers": [
+        {
+          "id": "free",
+          "label": "Free",
+          "zone_redundant": false
+        },
+        {
+          "id": "standard",
+          "label": "Standard",
+          "zone_redundant": false
+        }
+      ]
     },
     {
       "name": "App Service Environment",
       "provider": "Microsoft.Web",
       "resource_type": "hostingEnvironments",
       "zone_check": false,
-      "category": "Web"
+      "category": "Web",
+      "tiers": [
+        {
+          "id": "ase_v3",
+          "label": "App Service Environment v3",
+          "zone_redundant": true
+        }
+      ]
     },
     {
       "name": "Azure SignalR Service",
       "provider": "Microsoft.SignalRService",
       "resource_type": "*",
       "zone_check": false,
-      "category": "Web"
+      "category": "Web",
+      "tiers": [
+        {
+          "id": "free",
+          "label": "Free",
+          "zone_redundant": false
+        },
+        {
+          "id": "standard",
+          "label": "Standard",
+          "zone_redundant": false
+        },
+        {
+          "id": "premium",
+          "label": "Premium",
+          "zone_redundant": true
+        }
+      ]
     },
     {
       "name": "Azure Front Door & CDN",
       "provider": "Microsoft.Cdn",
       "resource_type": "*",
       "zone_check": false,
-      "category": "Web"
+      "category": "Web",
+      "tiers": [
+        {
+          "id": "standard",
+          "label": "Standard",
+          "zone_redundant": false
+        },
+        {
+          "id": "premium",
+          "label": "Premium",
+          "zone_redundant": false
+        }
+      ]
     },
     {
       "name": "Azure SQL Database",
@@ -148,12 +296,36 @@
       "zone_check": false,
       "category": "Databases",
       "tiers": [
-        {"id": "basic", "label": "Basic (DTU)", "zone_redundant": false},
-        {"id": "standard", "label": "Standard (DTU)", "zone_redundant": false},
-        {"id": "premium", "label": "Premium (DTU)", "zone_redundant": true},
-        {"id": "general_purpose", "label": "General Purpose (vCore)", "zone_redundant": true},
-        {"id": "business_critical", "label": "Business Critical (vCore)", "zone_redundant": true},
-        {"id": "hyperscale", "label": "Hyperscale (vCore)", "zone_redundant": true}
+        {
+          "id": "basic",
+          "label": "Basic (DTU)",
+          "zone_redundant": false
+        },
+        {
+          "id": "standard",
+          "label": "Standard (DTU)",
+          "zone_redundant": false
+        },
+        {
+          "id": "premium",
+          "label": "Premium (DTU)",
+          "zone_redundant": true
+        },
+        {
+          "id": "general_purpose",
+          "label": "General Purpose (vCore)",
+          "zone_redundant": true
+        },
+        {
+          "id": "business_critical",
+          "label": "Business Critical (vCore)",
+          "zone_redundant": true
+        },
+        {
+          "id": "hyperscale",
+          "label": "Hyperscale (vCore)",
+          "zone_redundant": true
+        }
       ]
     },
     {
@@ -163,8 +335,16 @@
       "zone_check": false,
       "category": "Databases",
       "tiers": [
-        {"id": "general_purpose", "label": "General Purpose", "zone_redundant": true},
-        {"id": "business_critical", "label": "Business Critical", "zone_redundant": true}
+        {
+          "id": "general_purpose",
+          "label": "General Purpose",
+          "zone_redundant": true
+        },
+        {
+          "id": "business_critical",
+          "label": "Business Critical",
+          "zone_redundant": true
+        }
       ]
     },
     {
@@ -188,9 +368,21 @@
       "zone_check": false,
       "category": "Databases",
       "tiers": [
-        {"id": "burstable", "label": "Burstable", "zone_redundant": false},
-        {"id": "general_purpose", "label": "General Purpose", "zone_redundant": true},
-        {"id": "memory_optimized", "label": "Business Critical (Memory Optimized)", "zone_redundant": true}
+        {
+          "id": "burstable",
+          "label": "Burstable",
+          "zone_redundant": false
+        },
+        {
+          "id": "general_purpose",
+          "label": "General Purpose",
+          "zone_redundant": true
+        },
+        {
+          "id": "memory_optimized",
+          "label": "Business Critical (Memory Optimized)",
+          "zone_redundant": true
+        }
       ]
     },
     {
@@ -200,9 +392,21 @@
       "zone_check": false,
       "category": "Databases",
       "tiers": [
-        {"id": "burstable", "label": "Burstable", "zone_redundant": false},
-        {"id": "general_purpose", "label": "General Purpose", "zone_redundant": true},
-        {"id": "memory_optimized", "label": "Memory Optimized", "zone_redundant": true}
+        {
+          "id": "burstable",
+          "label": "Burstable",
+          "zone_redundant": false
+        },
+        {
+          "id": "general_purpose",
+          "label": "General Purpose",
+          "zone_redundant": true
+        },
+        {
+          "id": "memory_optimized",
+          "label": "Memory Optimized",
+          "zone_redundant": true
+        }
       ]
     },
     {
@@ -219,11 +423,31 @@
       "zone_check": false,
       "category": "Databases",
       "tiers": [
-        {"id": "basic", "label": "Basic", "zone_redundant": false},
-        {"id": "standard", "label": "Standard", "zone_redundant": false},
-        {"id": "premium", "label": "Premium", "zone_redundant": true},
-        {"id": "enterprise", "label": "Enterprise", "zone_redundant": true},
-        {"id": "enterprise_flash", "label": "Enterprise Flash", "zone_redundant": true}
+        {
+          "id": "basic",
+          "label": "Basic",
+          "zone_redundant": false
+        },
+        {
+          "id": "standard",
+          "label": "Standard",
+          "zone_redundant": false
+        },
+        {
+          "id": "premium",
+          "label": "Premium",
+          "zone_redundant": true
+        },
+        {
+          "id": "enterprise",
+          "label": "Enterprise",
+          "zone_redundant": true
+        },
+        {
+          "id": "enterprise_flash",
+          "label": "Enterprise Flash",
+          "zone_redundant": true
+        }
       ]
     },
     {
@@ -231,28 +455,141 @@
       "provider": "Microsoft.Storage",
       "resource_type": "storageAccounts",
       "zone_check": false,
-      "category": "Storage"
+      "category": "Storage",
+      "tiers": [
+        {
+          "id": "lrs",
+          "label": "LRS (locally redundant)",
+          "zone_redundant": false
+        },
+        {
+          "id": "zrs",
+          "label": "ZRS (zone redundant)",
+          "zone_redundant": true
+        },
+        {
+          "id": "grs",
+          "label": "GRS (geo redundant)",
+          "zone_redundant": false
+        },
+        {
+          "id": "ragrs",
+          "label": "RA-GRS (read-access geo)",
+          "zone_redundant": false
+        },
+        {
+          "id": "gzrs",
+          "label": "GZRS (geo-zone redundant)",
+          "zone_redundant": true
+        },
+        {
+          "id": "ragzrs",
+          "label": "RA-GZRS (read-access geo-zone)",
+          "zone_redundant": true
+        }
+      ]
     },
     {
       "name": "Azure Data Lake Storage Gen2",
       "provider": "Microsoft.Storage",
       "resource_type": "storageAccounts",
       "zone_check": false,
-      "category": "Storage"
+      "category": "Storage",
+      "tiers": [
+        {
+          "id": "lrs",
+          "label": "LRS (locally redundant)",
+          "zone_redundant": false
+        },
+        {
+          "id": "zrs",
+          "label": "ZRS (zone redundant)",
+          "zone_redundant": true
+        },
+        {
+          "id": "grs",
+          "label": "GRS (geo redundant)",
+          "zone_redundant": false
+        },
+        {
+          "id": "gzrs",
+          "label": "GZRS (geo-zone redundant)",
+          "zone_redundant": true
+        },
+        {
+          "id": "ragzrs",
+          "label": "RA-GZRS (read-access geo-zone)",
+          "zone_redundant": true
+        }
+      ]
     },
     {
       "name": "Azure Files",
       "provider": "Microsoft.Storage",
       "resource_type": "storageAccounts",
       "zone_check": false,
-      "category": "Storage"
+      "category": "Storage",
+      "tiers": [
+        {
+          "id": "lrs",
+          "label": "LRS (locally redundant)",
+          "zone_redundant": false
+        },
+        {
+          "id": "zrs",
+          "label": "ZRS (zone redundant)",
+          "zone_redundant": true
+        },
+        {
+          "id": "grs",
+          "label": "GRS (geo redundant)",
+          "zone_redundant": false
+        },
+        {
+          "id": "gzrs",
+          "label": "GZRS (geo-zone redundant)",
+          "zone_redundant": true
+        }
+      ]
     },
     {
       "name": "Managed Disks (Premium SSD)",
       "provider": "Microsoft.Compute",
       "resource_type": "disks",
       "zone_check": false,
-      "category": "Storage"
+      "category": "Storage",
+      "tiers": [
+        {
+          "id": "standard_lrs",
+          "label": "Standard HDD (LRS)",
+          "zone_redundant": false
+        },
+        {
+          "id": "standardssd_lrs",
+          "label": "Standard SSD (LRS)",
+          "zone_redundant": false
+        },
+        {
+          "id": "standardssd_zrs",
+          "label": "Standard SSD (ZRS)",
+          "zone_redundant": true
+        },
+        {
+          "id": "premium_lrs",
+          "label": "Premium SSD (LRS)",
+          "zone_redundant": false
+        },
+        {
+          "id": "premium_zrs",
+          "label": "Premium SSD (ZRS)",
+          "zone_redundant": true
+        },
+        {
+          "id": "ultrassd_lrs",
+          "label": "Ultra Disk (LRS)",
+          "zone_redundant": false
+        }
+      ]
     },
     {
       "name": "Premium SSD v2",
@@ -266,14 +603,43 @@
       "provider": "Microsoft.NetApp",
       "resource_type": "*",
       "zone_check": false,
-      "category": "Storage"
+      "category": "Storage",
+      "tiers": [
+        {
+          "id": "standard",
+          "label": "Standard",
+          "zone_redundant": false
+        },
+        {
+          "id": "premium",
+          "label": "Premium",
+          "zone_redundant": false
+        },
+        {
+          "id": "ultra",
+          "label": "Ultra",
+          "zone_redundant": false
+        }
+      ]
     },
     {
       "name": "Azure Elastic SAN",
       "provider": "Microsoft.ElasticSan",
       "resource_type": "*",
       "zone_check": false,
-      "category": "Storage"
+      "category": "Storage",
+      "tiers": [
+        {
+          "id": "lrs",
+          "label": "LRS (locally redundant)",
+          "zone_redundant": false
+        },
+        {
+          "id": "zrs",
+          "label": "ZRS (zone redundant)",
+          "zone_redundant": true
+        }
+      ]
     },
     {
       "name": "Azure Container Storage",
@@ -323,28 +689,96 @@
       "provider": "Microsoft.Network",
       "resource_type": "loadBalancers",
       "zone_check": false,
-      "category": "Networking"
+      "category": "Networking",
+      "tiers": [
+        {
+          "id": "basic",
+          "label": "Basic",
+          "zone_redundant": false
+        },
+        {
+          "id": "standard",
+          "label": "Standard",
+          "zone_redundant": true
+        },
+        {
+          "id": "gateway",
+          "label": "Gateway",
+          "zone_redundant": false
+        }
+      ]
     },
     {
       "name": "Application Gateway (WAF v2)",
       "provider": "Microsoft.Network",
       "resource_type": "applicationGateways",
       "zone_check": false,
-      "category": "Networking"
+      "category": "Networking",
+      "tiers": [
+        {
+          "id": "standard_v2",
+          "label": "Standard v2",
+          "zone_redundant": true
+        },
+        {
+          "id": "waf_v2",
+          "label": "WAF v2",
+          "zone_redundant": true
+        }
+      ]
     },
     {
       "name": "Azure Firewall",
       "provider": "Microsoft.Network",
       "resource_type": "azureFirewalls",
       "zone_check": false,
-      "category": "Networking"
+      "category": "Networking",
+      "tiers": [
+        {
+          "id": "basic",
+          "label": "Basic",
+          "zone_redundant": false
+        },
+        {
+          "id": "standard",
+          "label": "Standard",
+          "zone_redundant": false
+        },
+        {
+          "id": "premium",
+          "label": "Premium",
+          "zone_redundant": false
+        }
+      ]
     },
     {
       "name": "Azure Bastion",
       "provider": "Microsoft.Network",
       "resource_type": "bastionHosts",
       "zone_check": false,
-      "category": "Networking"
+      "category": "Networking",
+      "tiers": [
+        {
+          "id": "developer",
+          "label": "Developer",
+          "zone_redundant": false
+        },
+        {
+          "id": "basic",
+          "label": "Basic",
+          "zone_redundant": false
+        },
+        {
+          "id": "standard",
+          "label": "Standard",
+          "zone_redundant": false
+        },
+        {
+          "id": "premium",
+          "label": "Premium",
+          "zone_redundant": false
+        }
+      ]
     },
     {
       "name": "Azure Private Link",
@@ -372,7 +806,19 @@
       "provider": "Microsoft.Network",
       "resource_type": "publicIPAddresses",
       "zone_check": false,
-      "category": "Networking"
+      "category": "Networking",
+      "tiers": [
+        {
+          "id": "basic",
+          "label": "Basic",
+          "zone_redundant": false
+        },
+        {
+          "id": "standard",
+          "label": "Standard",
+          "zone_redundant": true
+        }
+      ]
     },
     {
       "name": "Azure NAT Gateway",
@@ -386,21 +832,102 @@
       "provider": "Microsoft.Network",
       "resource_type": "expressRouteCircuits",
       "zone_check": false,
-      "category": "Networking"
+      "category": "Networking",
+      "tiers": [
+        {
+          "id": "standard",
+          "label": "Standard (gateway)",
+          "zone_redundant": false
+        },
+        {
+          "id": "highperf",
+          "label": "High Performance",
+          "zone_redundant": false
+        },
+        {
+          "id": "ultraperf",
+          "label": "Ultra Performance",
+          "zone_redundant": false
+        },
+        {
+          "id": "ergw1az",
+          "label": "ErGw1AZ",
+          "zone_redundant": true
+        },
+        {
+          "id": "ergw2az",
+          "label": "ErGw2AZ",
+          "zone_redundant": true
+        },
+        {
+          "id": "ergw3az",
+          "label": "ErGw3AZ",
+          "zone_redundant": true
+        }
+      ]
     },
     {
       "name": "Azure VPN Gateway",
       "provider": "Microsoft.Network",
       "resource_type": "virtualNetworkGateways",
       "zone_check": false,
-      "category": "Networking"
+      "category": "Networking",
+      "tiers": [
+        {
+          "id": "basic",
+          "label": "Basic",
+          "zone_redundant": false
+        },
+        {
+          "id": "vpngw1",
+          "label": "VpnGw1",
+          "zone_redundant": false
+        },
+        {
+          "id": "vpngw2",
+          "label": "VpnGw2",
+          "zone_redundant": false
+        },
+        {
+          "id": "vpngw3",
+          "label": "VpnGw3",
+          "zone_redundant": false
+        },
+        {
+          "id": "vpngw1az",
+          "label": "VpnGw1AZ",
+          "zone_redundant": true
+        },
+        {
+          "id": "vpngw2az",
+          "label": "VpnGw2AZ",
+          "zone_redundant": true
+        },
+        {
+          "id": "vpngw3az",
+          "label": "VpnGw3AZ",
+          "zone_redundant": true
+        }
+      ]
     },
     {
       "name": "Azure Virtual WAN",
       "provider": "Microsoft.Network",
       "resource_type": "virtualWans",
       "zone_check": false,
-      "category": "Networking"
+      "category": "Networking",
+      "tiers": [
+        {
+          "id": "basic",
+          "label": "Basic",
+          "zone_redundant": false
+        },
+        {
+          "id": "standard",
+          "label": "Standard",
+          "zone_redundant": false
+        }
+      ]
     },
     {
       "name": "Azure Traffic Manager",
@@ -414,7 +941,19 @@
       "provider": "Microsoft.Network",
       "resource_type": "ddosProtectionPlans",
       "zone_check": false,
-      "category": "Networking"
+      "category": "Networking",
+      "tiers": [
+        {
+          "id": "network_protection",
+          "label": "Network Protection",
+          "zone_redundant": false
+        },
+        {
+          "id": "ip_protection",
+          "label": "IP Protection",
+          "zone_redundant": false
+        }
+      ]
     },
     {
       "name": "Network Watcher",
@@ -428,14 +967,48 @@
       "provider": "Microsoft.CognitiveServices",
       "resource_type": "accounts",
       "zone_check": false,
-      "category": "AI + Machine Learning"
+      "category": "AI + Machine Learning",
+      "tiers": [
+        {
+          "id": "free",
+          "label": "Free (F0)",
+          "zone_redundant": false
+        },
+        {
+          "id": "standard",
+          "label": "Standard (S0)",
+          "zone_redundant": false
+        }
+      ]
     },
     {
       "name": "Azure OpenAI Service",
       "provider": "Microsoft.CognitiveServices",
       "resource_type": "accounts",
       "zone_check": false,
-      "category": "AI + Machine Learning"
+      "category": "AI + Machine Learning",
+      "tiers": [
+        {
+          "id": "standard",
+          "label": "Standard",
+          "zone_redundant": false
+        },
+        {
+          "id": "global_standard",
+          "label": "Global Standard",
+          "zone_redundant": false
+        },
+        {
+          "id": "data_zone",
+          "label": "Data Zone Standard",
+          "zone_redundant": false
+        },
+        {
+          "id": "provisioned",
+          "label": "Provisioned (PTU)",
+          "zone_redundant": false
+        }
+      ]
     },
     {
       "name": "Azure Machine Learning",
@@ -449,7 +1022,44 @@
       "provider": "Microsoft.Search",
       "resource_type": "searchServices",
       "zone_check": false,
-      "category": "AI + Machine Learning"
+      "category": "AI + Machine Learning",
+      "tiers": [
+        {
+          "id": "free",
+          "label": "Free",
+          "zone_redundant": false
+        },
+        {
+          "id": "basic",
+          "label": "Basic",
+          "zone_redundant": false
+        },
+        {
+          "id": "standard_s1",
+          "label": "Standard S1",
+          "zone_redundant": true
+        },
+        {
+          "id": "standard_s2",
+          "label": "Standard S2",
+          "zone_redundant": true
+        },
+        {
+          "id": "standard_s3",
+          "label": "Standard S3",
+          "zone_redundant": true
+        },
+        {
+          "id": "storage_l1",
+          "label": "Storage Optimized L1",
+          "zone_redundant": true
+        },
+        {
+          "id": "storage_l2",
+          "label": "Storage Optimized L2",
+          "zone_redundant": true
+        }
+      ]
     },
     {
       "name": "Azure AI Bot Service",
@@ -477,7 +1087,19 @@
       "provider": "Microsoft.Databricks",
       "resource_type": "*",
       "zone_check": false,
-      "category": "Analytics"
+      "category": "Analytics",
+      "tiers": [
+        {
+          "id": "standard",
+          "label": "Standard",
+          "zone_redundant": false
+        },
+        {
+          "id": "premium",
+          "label": "Premium",
+          "zone_redundant": false
+        }
+      ]
     },
     {
       "name": "Azure HDInsight",
@@ -526,7 +1148,24 @@
       "provider": "Microsoft.AnalysisServices",
       "resource_type": "*",
       "zone_check": false,
-      "category": "Analytics"
+      "category": "Analytics",
+      "tiers": [
+        {
+          "id": "developer",
+          "label": "Developer (D1)",
+          "zone_redundant": false
+        },
+        {
+          "id": "basic",
+          "label": "Basic (B1-B2)",
+          "zone_redundant": false
+        },
+        {
+          "id": "standard",
+          "label": "Standard (S0-S9)",
+          "zone_redundant": false
+        }
+      ]
     },
     {
       "name": "Microsoft Fabric",
@@ -540,35 +1179,140 @@
       "provider": "Microsoft.ServiceBus",
       "resource_type": "namespaces",
       "zone_check": false,
-      "category": "Integration"
+      "category": "Integration",
+      "tiers": [
+        {
+          "id": "basic",
+          "label": "Basic",
+          "zone_redundant": false
+        },
+        {
+          "id": "standard",
+          "label": "Standard",
+          "zone_redundant": false
+        },
+        {
+          "id": "premium",
+          "label": "Premium",
+          "zone_redundant": true
+        }
+      ]
     },
     {
       "name": "Azure Event Hubs",
       "provider": "Microsoft.EventHub",
       "resource_type": "namespaces",
       "zone_check": false,
-      "category": "Integration"
+      "category": "Integration",
+      "tiers": [
+        {
+          "id": "basic",
+          "label": "Basic",
+          "zone_redundant": false
+        },
+        {
+          "id": "standard",
+          "label": "Standard",
+          "zone_redundant": false
+        },
+        {
+          "id": "premium",
+          "label": "Premium",
+          "zone_redundant": true
+        },
+        {
+          "id": "dedicated",
+          "label": "Dedicated",
+          "zone_redundant": true
+        }
+      ]
     },
     {
       "name": "Azure Event Grid",
       "provider": "Microsoft.EventGrid",
       "resource_type": "*",
       "zone_check": false,
-      "category": "Integration"
+      "category": "Integration",
+      "tiers": [
+        {
+          "id": "basic",
+          "label": "Basic",
+          "zone_redundant": false
+        },
+        {
+          "id": "standard",
+          "label": "Standard",
+          "zone_redundant": false
+        }
+      ]
     },
     {
       "name": "Azure Logic Apps",
       "provider": "Microsoft.Logic",
       "resource_type": "workflows",
       "zone_check": false,
-      "category": "Integration"
+      "category": "Integration",
+      "tiers": [
+        {
+          "id": "consumption",
+          "label": "Consumption",
+          "zone_redundant": false
+        },
+        {
+          "id": "standard",
+          "label": "Standard",
+          "zone_redundant": true
+        }
+      ]
     },
     {
       "name": "Azure API Management",
       "provider": "Microsoft.ApiManagement",
       "resource_type": "service",
       "zone_check": false,
-      "category": "Integration"
+      "category": "Integration",
+      "tiers": [
+        {
+          "id": "consumption",
+          "label": "Consumption",
+          "zone_redundant": false
+        },
+        {
+          "id": "developer",
+          "label": "Developer",
+          "zone_redundant": false
+        },
+        {
+          "id": "basic",
+          "label": "Basic",
+          "zone_redundant": false
+        },
+        {
+          "id": "standard",
+          "label": "Standard",
+          "zone_redundant": false
+        },
+        {
+          "id": "premium",
+          "label": "Premium",
+          "zone_redundant": true
+        },
+        {
+          "id": "basic_v2",
+          "label": "Basic v2",
+          "zone_redundant": false
+        },
+        {
+          "id": "standard_v2",
+          "label": "Standard v2",
+          "zone_redundant": false
+        },
+        {
+          "id": "premium_v2",
+          "label": "Premium v2",
+          "zone_redundant": true
+        }
+      ]
     },
     {
       "name": "Azure API Center",
@@ -596,14 +1340,48 @@
       "provider": "Microsoft.NotificationHubs",
       "resource_type": "*",
       "zone_check": false,
-      "category": "Integration"
+      "category": "Integration",
+      "tiers": [
+        {
+          "id": "free",
+          "label": "Free",
+          "zone_redundant": false
+        },
+        {
+          "id": "basic",
+          "label": "Basic",
+          "zone_redundant": false
+        },
+        {
+          "id": "standard",
+          "label": "Standard",
+          "zone_redundant": false
+        }
+      ]
     },
     {
       "name": "Azure IoT Hub",
       "provider": "Microsoft.Devices",
       "resource_type": "IotHubs",
       "zone_check": false,
-      "category": "Internet of Things"
+      "category": "Internet of Things",
+      "tiers": [
+        {
+          "id": "free",
+          "label": "Free",
+          "zone_redundant": false
+        },
+        {
+          "id": "basic",
+          "label": "Basic (B1-B3)",
+          "zone_redundant": false
+        },
+        {
+          "id": "standard",
+          "label": "Standard (S1-S3)",
+          "zone_redundant": false
+        }
+      ]
     },
     {
       "name": "Azure IoT Central",
@@ -631,7 +1409,19 @@
       "provider": "Microsoft.KeyVault",
       "resource_type": "vaults",
       "zone_check": false,
-      "category": "Security & Identity"
+      "category": "Security & Identity",
+      "tiers": [
+        {
+          "id": "standard",
+          "label": "Standard",
+          "zone_redundant": false
+        },
+        {
+          "id": "premium",
+          "label": "Premium (HSM-backed)",
+          "zone_redundant": false
+        }
+      ]
     },
     {
       "name": "Azure Managed HSM",
@@ -709,7 +1499,19 @@
       "provider": "Microsoft.Dashboard",
       "resource_type": "*",
       "zone_check": false,
-      "category": "Management & Governance"
+      "category": "Management & Governance",
+      "tiers": [
+        {
+          "id": "essential",
+          "label": "Essential",
+          "zone_redundant": false
+        },
+        {
+          "id": "standard",
+          "label": "Standard",
+          "zone_redundant": false
+        }
+      ]
     },
     {
       "name": "Azure Monitor Workspace",
