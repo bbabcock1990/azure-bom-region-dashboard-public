@@ -248,10 +248,11 @@
     },
     {
       "name": "Azure Container Storage",
-      "provider": "Microsoft.ContainerStorage",
-      "resource_type": "pools",
+      "provider": "Microsoft.ContainerService",
+      "resource_type": "managedClusters",
       "zone_check": false,
-      "category": "Storage"
+      "category": "Storage",
+      "note": "Azure Container Storage (v2) is an AKS add-on (az aks --enable-azure-container-storage), not a standalone resource provider. Availability tracks AKS (Microsoft.ContainerService). The Elastic SAN storage type additionally needs a one-time 'az provider register --namespace Microsoft.ElasticSan'."
     },
     {
       "name": "Azure File Sync",
