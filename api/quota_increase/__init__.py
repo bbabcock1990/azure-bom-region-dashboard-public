@@ -169,7 +169,7 @@ async def main(req: func.HttpRequest) -> func.HttpResponse:
             event_type="quota_request_failed",
             api_scope="subscription",
             subscription_id=subscription_id,
-            severity="error",
+            status="error",
             message=f"Quota increase FAILED: {family} in {region} (HTTP {resp.status_code})",
             details={"family": family, "region": region, "new_limit": new_limit,
                      "status_code": resp.status_code, "request_id": request_id},

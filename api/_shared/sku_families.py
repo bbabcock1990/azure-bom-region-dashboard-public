@@ -55,10 +55,21 @@ _LOCK = threading.Lock()
 _CACHE: Optional[Dict] = None
 
 
+def reset_dataset_caches() -> None:
+    """Drop the memoized family list so a freshly uploaded seed override is
+    picked up without a restart."""
+    global _CACHE
+    with _LOCK:
+        _CACHE = None
+
+
 def _load_seed_families() -> List[str]:
     """Bundled canonical families for the picker. Prefer the broad snapshot,
     fall back to the pipeline-default seed (skus.txt)."""
-    seed_path = _FAMILIES_SEED if _FAMILIES_SEED.exists() else _SKUS_SEED
+    from . import dataset_store
+    families_seed = Path(dataset_store.resolve_path("sku_families_seed"))
+    skus_seed = Path(dataset_store.resolve_path("skus_list"))
+    seed_path = families_seed if families_seed.exists() else skus_seed
     try:
         text = seed_path.read_text(encoding="utf-8")
     except Exception:

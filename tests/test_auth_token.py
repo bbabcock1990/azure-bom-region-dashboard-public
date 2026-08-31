@@ -34,7 +34,10 @@ class _FakeCredential:
 
 
 @pytest.fixture(autouse=True)
-def _reset(monkeypatch):
+def _reset(monkeypatch, tmp_path):
+    # Isolate the on-disk AuthenticationRecord so tests never read a developer's
+    # real persisted sign-in (which would make silent paths spuriously succeed).
+    monkeypatch.setenv("LOCAL_STORAGE_DIR", str(tmp_path))
     auth_token.reset_for_tests()
     # Always pretend a usable account exists so silent paths don't raise.
     monkeypatch.setattr(auth_token, "has_cached_account", lambda: True)

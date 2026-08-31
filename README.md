@@ -4,7 +4,41 @@ Interactive web app for evaluating Azure region and zone readiness against a cus
 
 The dashboard combines live Azure control-plane signals with BOM requirements to produce a reusable analysis snapshot for each run. It is now **ARM-only**: SKU and quota intelligence come from Azure Resource Manager APIs such as `Microsoft.Compute/skus`, `Microsoft.Compute/locations/*/usages`, `get-azvmskuavailability`, and `Microsoft.Quota`.
 
-The result powers the **Overview**, **Table**, **Map**, **Latency Chart**, **Compare**, **Quota per Region**, and **Settings** tabs.
+The result powers the **Overview**, **Table**, **Map**, **Latency Chart**, **Compare**, **Quota per Region**, **Support**, and **Settings** tabs.
+
+---
+
+## Running it without a Python setup (customer-friendly)
+
+Three ways to launch, in order of least setup:
+
+| Option | Command | Notes |
+|---|---|---|
+| **Windows .exe** | `.\tools\build-exe.ps1` → run `dist\AzureBomRegionDashboard\AzureBomRegionDashboard.exe` | One-dir bundle, no Python/venv/pip needed. Zip the `dist\AzureBomRegionDashboard` folder to hand off. Code-sign the folder for locked-down (WDAC/AppLocker) environments. |
+| **Docker** | `docker compose up --build` | Serves on <http://localhost:4280/>. State persists in the `bomdash-data` volume. Set `DEMO_MODE=true` to seed sample data. |
+| **Python** | `.\start-local.ps1` | The original dev flow. |
+
+### Demo / sample mode
+
+Set `DEMO_MODE=true` before launching (any option) to seed a bundled, scrubbed
+sample BOM + analysis snapshot so the dashboard is fully populated **before** any
+Azure sign-in — ideal for demos and first-run walkthroughs. A banner indicates
+demo mode, and support-ticket submission is disabled (preview-only).
+
+### Automated support tickets
+
+The **Support** tab turns a deployment blocker into an Azure support request via
+the `Microsoft.Support` ARM provider (same token the app already uses):
+
+- **Quota increase** tickets (e.g. not enough vCPU quota for a family in a region).
+- **Zonal / restricted-SKU access** tickets (e.g. a subscription restricted for a
+  SKU in a zone).
+
+Tickets are **dry-run first**: *Preview* builds the exact ARM request with no Azure
+call; *Submit to Azure* files it (outside demo mode) after a confirmation. All
+tickets — preview or real — are tracked in the Support tab, and real ones can be
+status-refreshed. Contact defaults (name, email, country, severity) live under
+**Support → Support contact settings**.
 
 ---
 
@@ -79,6 +113,41 @@ There is **no `az login` step**.
 On first use, the dashboard opens a browser window and signs you in through `InteractiveBrowserCredential`. The token cache is persisted locally, so later launches are usually silent. The temporary auth tab auto-closes after sign-in.
 
 The app also discovers **all tenants** you can access, then enumerates subscriptions across those tenants so guest-access subscriptions are available in the BOM editor.
+
+#### If sign-in is blocked by Conditional Access (AADSTS53003)
+
+By default the app signs in using the **Azure CLI** first-party client
+(`04b07795-8ddb-461a-bbee-02f9e1bf7b46`) — the same one `az login` uses — so no
+app registration is required. Some tenants have a Conditional Access policy that
+blocks the Azure CLI app. This surfaces during sign-in as:
+
+> **AADSTS53003** — "You don't have access to this resource" (sign-in succeeded
+> but you don't have permission).
+
+To work around it, point the app at a **dedicated app registration** the tenant
+permits, via environment variables (set them before launching):
+
+| Variable | Purpose | Example |
+| --- | --- | --- |
+| `AZURE_CLIENT_ID` | Application (client) ID of your app registration | `1111aaaa-....` |
+| `AZURE_TENANT_ID` | Home tenant to authenticate against (optional) | `contoso.onmicrosoft.com` |
+| `AZURE_REDIRECT_URI` | Public-client redirect on the app registration | `http://localhost` |
+
+```powershell
+$env:AZURE_CLIENT_ID   = "<your-app-registration-client-id>"
+$env:AZURE_TENANT_ID   = "<your-tenant-id>"     # optional
+$env:AZURE_REDIRECT_URI = "http://localhost"    # must match the app registration
+```
+
+The app registration needs:
+- Platform **Mobile and desktop applications** with redirect URI `http://localhost`
+  (and **Allow public client flows** = Yes).
+- Delegated permission **Azure Service Management → user_impersonation**
+  (admin-consented if required by the tenant).
+
+Once these are set, sign-in uses your app registration instead of the Azure CLI
+client, avoiding the CA block. If the policy instead requires MFA or a compliant
+device, complete those requirements in the browser prompt.
 
 ### Step 5 — Launch the dashboard
 
@@ -186,7 +255,7 @@ The **Quota per Region** experience now supports:
 | Symptom | Fix |
 |---|---|
 | `Missing required tool: python` | Install Python and reopen PowerShell. |
-| Browser sign-in fails or gets blocked by Conditional Access | Open the **Sign in** chip in the header and complete the interactive browser prompt. |
+| Browser sign-in fails or gets blocked by Conditional Access (**AADSTS53003**) | The tenant blocks the Azure CLI app. Set `AZURE_CLIENT_ID` (+ `AZURE_TENANT_ID`, `AZURE_REDIRECT_URI`) to a dedicated app registration — see **Step 4 → If sign-in is blocked by Conditional Access**. |
 | No subscriptions appear in the BOM editor | Sign in first. The app only lists subscriptions visible to your account across accessible tenants. |
 | A customer subscription is missing | Make sure your account has access in that tenant/subscription, then use **Switch directory / account** and sign in again. |
 | `Port 4280 already in use` | Find the PID with `Get-NetTCPConnection -LocalPort 4280` and stop it with `Stop-Process -Id <pid>`. |

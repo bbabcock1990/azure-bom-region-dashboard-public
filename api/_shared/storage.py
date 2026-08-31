@@ -356,6 +356,31 @@ class _LocalBlobContainer:
             raise FileNotFoundError(f"blob {name!r} not found")
         return _Downloader(path)
 
+    def list_blobs(self, name_starts_with: Optional[str] = None, **kwargs) -> List["_BlobItem"]:
+        base = os.path.realpath(self._dir)
+        out: List[_BlobItem] = []
+        for root, _dirs, files in os.walk(self._dir):
+            for fn in files:
+                rel = os.path.relpath(os.path.join(root, fn), base).replace(os.sep, "/")
+                if name_starts_with and not rel.startswith(name_starts_with):
+                    continue
+                out.append(_BlobItem(rel))
+        return out
+
+    def delete_blob(self, blob, **kwargs) -> None:
+        name = getattr(blob, "name", blob)
+        try:
+            os.remove(self._path(name))
+        except (FileNotFoundError, ValueError):
+            pass
+
+
+class _BlobItem:
+    """Minimal stand-in for the azure-storage-blob list item (``.name`` only)."""
+
+    def __init__(self, name: str):
+        self.name = name
+
 
 class _LocalBlobService:
     def get_container_client(self, name: str) -> _LocalBlobContainer:
@@ -382,3 +407,13 @@ def get_table_client(name: str) -> _LocalTable:
 def get_blob_container(name: str = None) -> _LocalBlobContainer:
     name = name or os.getenv("STORAGE_CONTAINER", "snapshots")
     return _LocalBlobContainer(name)
+
+
+def wipe_snapshot_blobs() -> int:
+    """Delete every snapshot blob file. Returns the number removed."""
+    container = get_blob_container("snapshots")
+    count = 0
+    for item in container.list_blobs():
+        container.delete_blob(item)
+        count += 1
+    return count

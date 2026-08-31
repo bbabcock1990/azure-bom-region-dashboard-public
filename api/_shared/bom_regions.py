@@ -33,6 +33,14 @@ _LOCK = threading.Lock()
 _BUILTIN_CACHE: Optional[List[Dict]] = None
 
 
+def reset_dataset_caches() -> None:
+    """Drop the memoized built-in region catalog so a freshly uploaded
+    override is picked up without a restart."""
+    global _BUILTIN_CACHE
+    with _LOCK:
+        _BUILTIN_CACHE = None
+
+
 def _load_builtin() -> List[Dict]:
     """Read + cache the built-in JSON seed. Cached for the process
     lifetime; restart the function host to pick up edits."""
@@ -40,17 +48,19 @@ def _load_builtin() -> List[Dict]:
     with _LOCK:
         if _BUILTIN_CACHE is not None:
             return [dict(r) for r in _BUILTIN_CACHE]
-    if not os.path.exists(_CATALOG_PATH):
+    from . import dataset_store
+    catalog_path = dataset_store.resolve_path("region_catalog")
+    if not os.path.exists(catalog_path):
         log.warning("bom_regions: seed file missing at %s — empty built-in catalog",
-                    _CATALOG_PATH)
+                    catalog_path)
         with _LOCK:
             _BUILTIN_CACHE = []
         return []
     try:
-        with open(_CATALOG_PATH, "r", encoding="utf-8") as f:
+        with open(catalog_path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except Exception:
-        log.exception("bom_regions: failed to parse %s", _CATALOG_PATH)
+        log.exception("bom_regions: failed to parse %s", catalog_path)
         with _LOCK:
             _BUILTIN_CACHE = []
         return []

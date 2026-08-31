@@ -40,6 +40,14 @@ _CATALOG_PATH = os.path.join(_DATA_DIR, "bom_service_catalog.json")
 _CATALOG_CACHE: Optional[List[Dict]] = None
 
 
+def reset_dataset_caches() -> None:
+    """Drop memoized dataset state (service catalog + latency display map)
+    so a freshly uploaded override is picked up without a restart."""
+    global _CATALOG_CACHE, _REGION_DISPLAY_CACHE
+    _CATALOG_CACHE = None
+    _REGION_DISPLAY_CACHE = None
+
+
 class BomServicesError(Exception):
     """Stable error code we hand back to callers for nice UI messages."""
 
@@ -60,7 +68,8 @@ def load_builtin_catalog() -> List[Dict]:
     """
     global _CATALOG_CACHE
     if _CATALOG_CACHE is None:
-        with open(_CATALOG_PATH, "r", encoding="utf-8") as f:
+        from . import dataset_store
+        with open(dataset_store.resolve_path("service_catalog"), "r", encoding="utf-8") as f:
             data = json.load(f)
         services = data.get("services") or []
         # Defensive copy + normalize types so callers can't accidentally
@@ -587,7 +596,8 @@ def load_region_display_map(data_dir: str) -> Dict[str, str]:
     global _REGION_DISPLAY_CACHE
     if _REGION_DISPLAY_CACHE is not None:
         return dict(_REGION_DISPLAY_CACHE)
-    path = os.path.join(data_dir, "azure_region_latency.csv")
+    from . import dataset_store
+    path = dataset_store.resolve_path("latency")
     out: Dict[str, str] = {}
     if not os.path.exists(path):
         _REGION_DISPLAY_CACHE = out

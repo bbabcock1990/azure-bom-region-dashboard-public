@@ -36,6 +36,7 @@ _signin_lock = threading.Lock()
 _credential = None  # lazily-built InteractiveBrowserCredential
 _silent_credential = None  # lazily-built non-interactive credential (never prompts)
 _probe_credential = None  # lazily-built non-interactive credential for silent cache probes
+_probe_credential_key = None  # home_account_id the probe credential was built for (rebuild on change)
 _auth_record = None  # AuthenticationRecord captured at sign-in, for silent reuse
 _signed_in = False  # set True after any successful token acquisition this process
 _cache: Dict[Tuple[str, str, str], "TokenInfo"] = {}
@@ -44,6 +45,101 @@ _sub_tenant_map: Dict[str, str] = {}  # subscription_id -> tenant_id (populated 
 def is_local_mode() -> bool:
     import os
     return os.getenv("LOCAL_MODE", "").lower() in ("true", "1", "yes")
+
+
+# Azure CLI first-party public client. Used as the default so the app works with
+# no app registration. If the customer's tenant Conditional Access policy blocks
+# the Azure CLI app (surfaces as AADSTS53003 "you don't have access"), set
+# AZURE_CLIENT_ID (and usually AZURE_TENANT_ID + AZURE_REDIRECT_URI) to a
+# dedicated app registration the tenant permits.
+_AZURE_CLI_CLIENT_ID = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
+
+
+def _auth_config_kwargs() -> Dict[str, str]:
+    """Env-driven overrides for the interactive credential.
+
+    Returns kwargs to merge into every ``InteractiveBrowserCredential(...)``
+    construction so all three credential builders (interactive, silent, probe)
+    stay consistent and target the same client/tenant/redirect.
+
+    - ``AZURE_CLIENT_ID``    -> ``client_id``    (custom app registration)
+    - ``AZURE_TENANT_ID``    -> ``tenant_id``    (home authority tenant)
+    - ``AZURE_REDIRECT_URI`` -> ``redirect_uri`` (must match a public-client
+      redirect on the app registration, e.g. ``http://localhost``)
+    """
+    import os
+    cfg: Dict[str, str] = {}
+    client_id = os.getenv("AZURE_CLIENT_ID", "").strip()
+    if client_id:
+        cfg["client_id"] = client_id
+    tenant_id = os.getenv("AZURE_TENANT_ID", "").strip()
+    if tenant_id:
+        cfg["tenant_id"] = tenant_id
+    redirect_uri = os.getenv("AZURE_REDIRECT_URI", "").strip()
+    if redirect_uri:
+        cfg["redirect_uri"] = redirect_uri
+    return cfg
+
+
+def _auth_record_path() -> str:
+    """Path to the persisted AuthenticationRecord JSON.
+
+    Stored under ``LOCAL_STORAGE_DIR`` (set by launch.py) so it lives beside the
+    rest of the local state; falls back to ``<repo>/local-storage``. The record
+    contains **no secrets** (home_account_id, username, tenant, authority,
+    client_id) — the actual refresh tokens stay in the OS-encrypted MSAL cache.
+    """
+    import os
+    base = os.getenv("LOCAL_STORAGE_DIR", "").strip()
+    if not base:
+        base = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+            "local-storage",
+        )
+    try:
+        os.makedirs(base, exist_ok=True)
+    except Exception:
+        pass
+    return os.path.join(base, "auth_record.json")
+
+
+def _persist_auth_record(record) -> None:
+    """Serialize the AuthenticationRecord to disk (best-effort, no secrets)."""
+    if record is None:
+        return
+    try:
+        data = record.serialize()
+        with open(_auth_record_path(), "w", encoding="utf-8") as f:
+            f.write(data)
+    except Exception:
+        pass
+
+
+def _load_auth_record():
+    """Load the persisted AuthenticationRecord into ``_auth_record`` (once).
+
+    Enables silent SSO across process restarts: a fresh process can point the
+    non-interactive probe/silent credentials at the exact cached account without
+    any browser prompt. Returns the record or ``None``.
+    """
+    global _auth_record
+    if _auth_record is not None:
+        return _auth_record
+    try:
+        from azure.identity import AuthenticationRecord
+    except Exception:
+        return None
+    try:
+        import os
+        p = _auth_record_path()
+        if not os.path.exists(p):
+            return None
+        with open(p, "r", encoding="utf-8") as f:
+            data = f.read()
+        _auth_record = AuthenticationRecord.deserialize(data)
+    except Exception:
+        _auth_record = None
+    return _auth_record
 
 
 class AuthError(Exception):
@@ -180,7 +276,19 @@ def _credentials():
             # All tenants allowed so per-customer-subscription ARM tokens (which
             # live in foreign tenants) can be requested via get_token(tenant_id=).
             "additionally_allowed_tenants": ["*"],
+            # Never let get_token() transparently pop a browser. Interactive
+            # sign-in happens ONLY through ensure_signed_in() -> authenticate(),
+            # which is serialized. This is what prevents the "keeps asking me to
+            # sign in" behavior: silent paths raise AuthenticationRequiredError
+            # (mapped to not_signed_in) instead of opening a login window.
+            "disable_automatic_authentication": True,
         }
+        # Bind to the persisted account when available so a fresh process can
+        # silently reuse the OS-encrypted cache (silent SSO across restarts).
+        _rec = _load_auth_record()
+        if _rec is not None:
+            kwargs["authentication_record"] = _rec
+        kwargs.update(_auth_config_kwargs())
         try:
             kwargs["cache_persistence_options"] = TokenCachePersistenceOptions(
                 name="azure-bom-region-dashboard"
@@ -202,6 +310,7 @@ def _acquire(*, scope: str, tenant: Optional[str], allow_interactive: bool) -> "
     account exists azure-identity raises, which we translate to a stable code so
     callers can prompt the user to sign in.
     """
+    global _signed_in, _auth_record
     cred = _credentials()
     kwargs = {}
     if tenant:
@@ -210,10 +319,18 @@ def _acquire(*, scope: str, tenant: Optional[str], allow_interactive: bool) -> "
         from azure.identity import CredentialUnavailableError
     except Exception:  # pragma: no cover
         CredentialUnavailableError = Exception  # type: ignore
+    try:
+        from azure.identity import AuthenticationRequiredError
+    except Exception:  # pragma: no cover
+        AuthenticationRequiredError = Exception  # type: ignore
 
-    # azure-identity has no public "silent only" switch on get_token; we rely on
-    # a cached account for silent paths. When interactive isn't allowed and there
-    # is no account, surface a not-signed-in error instead of popping a browser.
+    # The main credential is built with disable_automatic_authentication=True,
+    # so get_token() NEVER pops a browser: it silently uses the persistent cache
+    # (bound to the persisted AuthenticationRecord) or raises
+    # AuthenticationRequiredError. On the silent path we translate that raise to
+    # a stable not_signed_in code so the UI can show a Sign in action instead of
+    # a login window appearing on its own. The one-time interactive prompt only
+    # happens via ensure_signed_in() -> authenticate().
     if not allow_interactive and not has_cached_account():
         raise AuthError(
             "not_signed_in",
@@ -222,7 +339,6 @@ def _acquire(*, scope: str, tenant: Optional[str], allow_interactive: bool) -> "
         )
     try:
         info = cred.get_token(scope, **kwargs)
-        global _signed_in, _auth_record
         _signed_in = True
         # Opportunistically capture the AuthenticationRecord so a later
         # non-interactive refresh can silently reuse this account (covers
@@ -233,40 +349,62 @@ def _acquire(*, scope: str, tenant: Optional[str], allow_interactive: bool) -> "
                 rec = getattr(cred, "_auth_record", None)
                 if rec is not None:
                     _auth_record = rec
+                    _persist_auth_record(rec)
             except Exception:
                 pass
         return info
+    except AuthenticationRequiredError as ex:  # type: ignore
+        raise AuthError(
+            "not_signed_in",
+            "Not signed in. Use the dashboard's Sign in action (or POST "
+            "/api/auth/signin) to start the one-time browser sign-in.",
+        )
     except CredentialUnavailableError as ex:  # type: ignore
         raise AuthError("not_signed_in", f"Sign-in required: {ex}")
     except Exception as ex:
-        low = str(ex).lower()
-        if "aadsts50020" in low:
-            raise AuthError(
-                "cross_tenant_not_guest",
-                "User is not a guest in the target tenant.",
-            )
-        if "aadsts700016" in low:
-            raise AuthError(
-                "cross_tenant_no_consent",
-                "Application not registered in target tenant.",
-            )
-        if "aadsts65001" in low:
-            raise AuthError(
-                "cross_tenant_no_consent",
-                "Consent required in target tenant.",
-            )
-        if "status code 403" in low or "403 client error" in low or "forbidden" in low:
-            raise AuthError(
-                "subscription_no_reader",
-                "Need Reader role on the subscription.",
-            )
-        if "aadsts53003" in low or "conditional access" in low:
-            raise AuthError(
-                "ca_consent_required",
-                "Conditional Access requires interactive sign-in. Use the "
-                "dashboard's Sign in action and complete the browser prompt.",
-            )
-        raise AuthError("token_acquire_failed", f"Token acquisition failed: {ex}")
+        _raise_mapped_auth_error(ex)
+
+
+def _raise_mapped_auth_error(ex: Exception) -> "None":
+    """Translate a raw azure-identity/MSAL exception into a stable AuthError.
+
+    Shared by the silent acquisition path and the interactive
+    ``authenticate()`` call so both surface identical, actionable codes
+    (Conditional Access, cross-tenant, missing Reader, etc.).
+    """
+    low = str(ex).lower()
+    if "aadsts50020" in low:
+        raise AuthError(
+            "cross_tenant_not_guest",
+            "User is not a guest in the target tenant.",
+        )
+    if "aadsts700016" in low:
+        raise AuthError(
+            "cross_tenant_no_consent",
+            "Application not registered in target tenant.",
+        )
+    if "aadsts65001" in low:
+        raise AuthError(
+            "cross_tenant_no_consent",
+            "Consent required in target tenant.",
+        )
+    if "status code 403" in low or "403 client error" in low or "forbidden" in low:
+        raise AuthError(
+            "subscription_no_reader",
+            "Need Reader role on the subscription.",
+        )
+    if "aadsts53003" in low or "conditional access" in low:
+        raise AuthError(
+            "ca_consent_required",
+            "Sign-in blocked by your organization's Conditional Access "
+            "policy (AADSTS53003). The built-in Microsoft Azure CLI sign-in "
+            "app is not permitted in this tenant. An admin must either "
+            "exclude that app from the policy, or register a dedicated app "
+            "and launch with AZURE_CLIENT_ID / AZURE_TENANT_ID / "
+            "AZURE_REDIRECT_URI set. See the README section 'If sign-in is "
+            "blocked by Conditional Access'.",
+        )
+    raise AuthError("token_acquire_failed", f"Token acquisition failed: {ex}")
 
 
 def has_cached_account() -> bool:
@@ -282,6 +420,14 @@ def has_cached_account() -> bool:
     """
     if _signed_in:
         return True
+    # A persisted AuthenticationRecord means we have an account to silently
+    # target from the OS-encrypted cache — treat that as "signed in" so a fresh
+    # process attempts silent SSO instead of forcing a new interactive prompt.
+    try:
+        if _load_auth_record() is not None:
+            return True
+    except Exception:
+        pass
     global _credential
     if _credential is None:
         # Building the credential is cheap and reads the persistent cache.
@@ -365,21 +511,41 @@ def ensure_signed_in(*, force: bool = False) -> TokenInfo:
     """Trigger the one-time interactive browser sign-in (or refresh) and return
     the ARM TokenInfo. Serialized so concurrent callers don't open multiple
     browser windows. Call this from the explicit sign-in endpoint, off the
-    silent GET path."""
+    silent GET path.
+
+    The main credential is built with ``disable_automatic_authentication=True``,
+    so ``get_token`` never prompts on its own. The single interactive prompt is
+    performed here via ``authenticate()``; afterwards every silent acquisition
+    (this process and future ones, via the persisted AuthenticationRecord)
+    succeeds without a browser."""
+    global _auth_record, _signed_in
     with _signin_lock:
+        cred = _credentials()
+        # Prompt only when we can't already satisfy a silent acquisition. An
+        # explicit Sign in click (force=True) always re-authenticates; otherwise
+        # a persisted/known account refreshes silently with no window.
+        if force or not has_cached_account():
+            try:
+                rec = cred.authenticate(scopes=[_scope_for(ARM_RESOURCE_ID)])
+                if rec is not None:
+                    _auth_record = rec
+                    _persist_auth_record(rec)
+                    _signed_in = True
+            except AuthError:
+                raise
+            except Exception as ex:
+                _raise_mapped_auth_error(ex)
         info = get_token(force_refresh=force, allow_interactive=True)
-        # Best-effort: capture the AuthenticationRecord azure-identity stored on
-        # the credential after sign-in, so a later non-interactive refresh
-        # (``try_silent_refresh``) can silently reuse this exact account. This is
-        # read post-hoc (no extra prompt); if the attribute isn't present the
-        # silent refresh simply stays a safe no-op.
-        global _auth_record
-        try:
-            rec = getattr(_credentials(), "_auth_record", None)
-            if rec is not None:
-                _auth_record = rec
-        except Exception:
-            pass
+        # Best-effort post-hoc capture (covers a silent refresh that warmed the
+        # cache without going through authenticate()).
+        if _auth_record is None:
+            try:
+                rec = getattr(cred, "_auth_record", None)
+                if rec is not None:
+                    _auth_record = rec
+                    _persist_auth_record(rec)
+            except Exception:
+                pass
         return info
 
 
@@ -397,7 +563,7 @@ def try_silent_refresh(
     token outlives the work without risking an interactive prompt.
     """
     global _silent_credential
-    record = _auth_record
+    record = _load_auth_record()
     if record is None:
         # No captured account this session — can't silently target one. Caller
         # keeps its existing token.
@@ -417,6 +583,7 @@ def try_silent_refresh(
                 "disable_automatic_authentication": True,
                 "authentication_record": record,
             }
+            kwargs.update(_auth_config_kwargs())
             try:
                 kwargs["cache_persistence_options"] = TokenCachePersistenceOptions(
                     name="azure-bom-region-dashboard"
@@ -456,7 +623,7 @@ def get_arm_token(subscription_id: str, *, force_refresh: bool = False) -> Token
     )
 
 
-def _silent_probe_token(scope: str):
+def _silent_probe_token(scope: str, tenant: Optional[str] = None):
     """Attempt a silent token acquisition from the shared persistent MSAL cache
     **without ever launching a browser**. Returns an azure-core AccessToken on
     success, or ``None`` if no cached account can satisfy the request.
@@ -468,7 +635,7 @@ def _silent_probe_token(scope: str):
     failing every sign-in. The only interactive path is ``ensure_signed_in``,
     which is serialized by ``_signin_lock``.
     """
-    global _probe_credential
+    global _probe_credential, _probe_credential_key
     try:
         from azure.identity import (
             InteractiveBrowserCredential,
@@ -476,13 +643,25 @@ def _silent_probe_token(scope: str):
         )
     except Exception:
         return None
+    # A persisted AuthenticationRecord lets a fresh process silently target the
+    # exact cached account (silent SSO across restarts) instead of raising
+    # "no account". Without it, disable_automatic_authentication has nothing to
+    # bind to and the probe can only succeed within the same process lifetime.
+    record = _load_auth_record()
+    record_key = getattr(record, "home_account_id", None) if record is not None else None
     with _lock:
-        if _probe_credential is None:
+        # Rebuild if never built, or if a record became available (or changed)
+        # since the cached credential was constructed — otherwise a probe built
+        # before sign-in would stay record-less and never SSO.
+        if _probe_credential is None or _probe_credential_key != record_key:
             kwargs = {
                 "additionally_allowed_tenants": ["*"],
                 # Never start an interactive flow — raise instead of prompting.
                 "disable_automatic_authentication": True,
             }
+            if record is not None:
+                kwargs["authentication_record"] = record
+            kwargs.update(_auth_config_kwargs())
             try:
                 kwargs["cache_persistence_options"] = TokenCachePersistenceOptions(
                     name="azure-bom-region-dashboard"
@@ -491,11 +670,15 @@ def _silent_probe_token(scope: str):
                 pass
             try:
                 _probe_credential = InteractiveBrowserCredential(**kwargs)
+                _probe_credential_key = record_key
             except Exception:
                 return None
         cred = _probe_credential
     try:
-        return cred.get_token(scope)
+        kw = {}
+        if tenant:
+            kw["tenant_id"] = tenant
+        return cred.get_token(scope, **kw)
     except Exception:
         # AuthenticationRequiredError / CredentialUnavailableError / etc. all
         # mean "no silently-usable account" — caller re-raises not_signed_in.

@@ -7,7 +7,9 @@ const STATE = {
   filtered: [],               // currently visible regions
   sortKey: "name",
   sortDir: 1,
-  view: "table",
+  view: "overview",
+  regionsSub: "table",        // active sub-view within the Regions tab
+  settingsTab: "owner",       // active tab within the Settings view
   selectedSlots: ["", "", ""],
   map: null,
   mapLayer: null,
@@ -336,7 +338,7 @@ function renderBomPanel() {
     if (bodyEl) bodyEl.classList.add("hidden");
     if (emptyEl) {
       emptyEl.classList.remove("hidden");
-      emptyEl.innerHTML = 'Select a Bill of Materials from the left, or click <strong>+ New</strong> to create one.';
+      renderOnboardingStepper(emptyEl);
     }
     return;
   }
@@ -394,6 +396,140 @@ function renderBomPanel() {
       staleEl.title = "The BOM was edited after the analysis shown below. Click ▶ Refresh analysis to update.";
     }
     staleEl.classList.toggle("hidden", !stale);
+  }
+}
+
+// ---------------------------------------------------------------- Onboarding
+// Active empty-state stepper shown when no BOM is selected/exists. Replaces the
+// old passive "select a BOM" text with a guided path: sign in → create a BOM,
+// plus a one-click "explore with sample data" escape hatch. Re-rendered on
+// sign-in state changes via updateSigninChip().
+function _isSignedIn() {
+  return !!(TOKEN.info && (TOKEN.info.expires_in_seconds || 0) > 0);
+}
+
+function renderOnboardingStepper(host) {
+  if (!host) return;
+  const hasBoms = Object.keys((BOM_META && BOM_META.index) || {}).length > 0;
+  const signedIn = _isSignedIn();
+  const who = signedIn ? (TOKEN.info.az_user || "signed in") : "";
+  const demo = !!(APP_CONFIG && APP_CONFIG.demo_mode);
+
+  // If BOMs already exist the user just hasn't picked one — keep it lightweight.
+  if (hasBoms) {
+    host.innerHTML =
+      '<div class="onboard-pick">Select a Bill of Materials from the left, ' +
+      'or <button type="button" class="link-btn" data-onboard="new">create a new one</button>.</div>';
+    const btn = host.querySelector('[data-onboard="new"]');
+    if (btn) btn.addEventListener("click", () => openBomModal(null, { create: true }));
+    return;
+  }
+
+  const step1Done = signedIn;
+  const step2Done = _onboardSettingsDone();
+  const s1State = step1Done ? "done" : "active";
+  const s2State = !step1Done ? "todo" : (step2Done ? "done" : "active");
+  const s3State = !step1Done ? "todo" : (step2Done ? "active" : "todo");
+
+  host.innerHTML = `
+    <div class="onboard">
+      <div class="onboard-head">
+        <h2>Welcome — let's plan a deployment</h2>
+        <p class="muted">Three quick steps to see where a customer's Bill of Materials can deploy,
+        where quota or zonal access is a blocker, and which regions are best.</p>
+      </div>
+      <ol class="onboard-steps">
+        <li class="onboard-step is-${s1State}" data-step="1">
+          <span class="onboard-num">${step1Done ? "✓" : "1"}</span>
+          <div class="onboard-body">
+            <h3>Sign in to Azure</h3>
+            <p class="muted">${step1Done
+              ? `Signed in as <strong>${escapeHtml(who)}</strong>.`
+              : "A one-time browser sign-in mints a read-only ARM token to query SKU, region and quota data."}</p>
+            <div class="onboard-actions">
+              ${step1Done
+                ? '<button type="button" class="btn btn--sm" data-onboard="signin">Switch account</button>'
+                : '<button type="button" class="btn btn--accent" data-onboard="signin">Sign in</button>'}
+            </div>
+          </div>
+        </li>
+        <li class="onboard-step is-${s2State}" data-step="2">
+          <span class="onboard-num">${step2Done ? "✓" : "2"}</span>
+          <div class="onboard-body">
+            <h3>Configure &amp; refresh your settings</h3>
+            <p class="muted">Open <strong>Settings</strong> to set your support ticket owner and
+            refresh the model datasets (regions, latency, SKUs) so your analysis uses the latest Azure data.</p>
+            <div class="onboard-actions">
+              <button type="button" class="btn btn--accent" data-onboard="settings" ${step1Done ? "" : "disabled"}>⚙ Open Settings</button>
+              ${step1Done ? "" : '<span class="muted small">Sign in first</span>'}
+            </div>
+          </div>
+        </li>
+        <li class="onboard-step is-${s3State}" data-step="3">
+          <span class="onboard-num">3</span>
+          <div class="onboard-body">
+            <h3>Create your first BOM</h3>
+            <p class="muted">Name it, pick the customer subscription(s), then choose the services,
+            regions and SKUs to analyze.</p>
+            <div class="onboard-actions">
+              <button type="button" class="btn btn--accent" data-onboard="new" ${step1Done ? "" : "disabled"}>+ New BOM</button>
+              ${step1Done ? "" : '<span class="muted small">Sign in first</span>'}
+            </div>
+          </div>
+        </li>
+      </ol>
+      ${demo ? "" : `
+      <div class="onboard-or"><span>or</span></div>
+      <div class="onboard-demo">
+        <button type="button" class="btn" data-onboard="demo">▶ Explore with sample data</button>
+        <span class="muted small">Loads a bundled example BOM &amp; analysis — no Azure sign-in needed.</span>
+      </div>`}
+    </div>`;
+
+  const signinBtn = host.querySelector('[data-onboard="signin"]');
+  if (signinBtn) signinBtn.addEventListener("click", () => {
+    // Open the sign-in modal so the browser flow + any errors are visible,
+    // then kick off the interactive sign-in.
+    openSigninModal();
+    refreshAuthToken({ force: true });
+  });
+  const settingsBtn = host.querySelector('[data-onboard="settings"]');
+  if (settingsBtn) settingsBtn.addEventListener("click", () => {
+    _setOnboardSettingsDone();
+    dismissSettingsCoach();
+    switchView("settings");
+  });
+  const newBtn = host.querySelector('[data-onboard="new"]');
+  if (newBtn) newBtn.addEventListener("click", () => openBomModal(null, { create: true }));
+  const demoBtn = host.querySelector('[data-onboard="demo"]');
+  if (demoBtn) demoBtn.addEventListener("click", () => loadSampleData(demoBtn));
+}
+
+// Remembers that the user has visited Settings from the onboarding stepper, so
+// step 2 shows as complete on subsequent renders/reloads.
+const ONBOARD_SETTINGS_KEY = "onboard_settings_done";
+function _onboardSettingsDone() {
+  try { return localStorage.getItem(ONBOARD_SETTINGS_KEY) === "1"; }
+  catch (_e) { return false; }
+}
+function _setOnboardSettingsDone() {
+  try { localStorage.setItem(ONBOARD_SETTINGS_KEY, "1"); } catch (_e) {}
+}
+
+// Seed the bundled sample BOM on demand, then reload the list and open it so
+// the user sees a fully populated dashboard immediately.
+async function loadSampleData(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = "Loading sample…"; }
+  try {
+    const r = await apiJson("/api/demo/seed", { method: "POST" });
+    await loadSubscriptions();
+    await loadSnapshotsList();
+    const target = r.bom_id && BOM_META.index[r.bom_id] ? r.bom_id : (Object.keys(BOM_META.index)[0] || "");
+    if (target) await selectBom(target);
+    showToast(r.seeded ? "Sample data loaded." : "Sample data already present.", "success");
+  } catch (e) {
+    showToast(e.message || "Could not load sample data.", "error");
+    if (btn) { btn.disabled = false; btn.textContent = "▶ Explore with sample data"; }
   }
 }
 
@@ -631,6 +767,7 @@ function applyFilters() {
   renderTable();
   refreshMap();
   renderOverviewCharts();
+  renderOverviewReco();
   updateStats();
 }
 
@@ -1027,22 +1164,74 @@ function renderDeploymentReadinessSection(region, deployment) {
 
 // ---------------------------------------------------------------- Tabs / views
 
+// Region sub-views are grouped under the single "Regions" primary tab.
+const REGION_SUBVIEWS = ["table", "map", "latency", "compare"];
+
 function switchView(view) {
+  // Legacy/direct calls to a sub-view name are routed into the Regions group.
+  if (REGION_SUBVIEWS.includes(view)) {
+    STATE.regionsSub = view;
+    view = "regions";
+  }
   STATE.view = view;
   document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.view === view));
-  for (const v of ["overview", "table", "map", "latency", "compare", "quota", "settings"]) {
+
+  // The Filters & Search rail only applies to region views (table/map/compare)
+  // and the overview; hide it where it's meaningless (quota/tickets/settings).
+  const filtersRail = document.getElementById("filters-rail");
+  if (filtersRail) {
+    const showFilters = (view === "regions" || view === "overview");
+    filtersRail.classList.toggle("hidden", !showFilters);
+  }
+
+  const subbar = document.getElementById("region-subtabs");
+  if (view === "regions") {
+    const sub = REGION_SUBVIEWS.includes(STATE.regionsSub) ? STATE.regionsSub : "table";
+    STATE.regionsSub = sub;
+    if (subbar) subbar.classList.remove("hidden");
+    document.querySelectorAll(".region-subtab").forEach(t =>
+      t.classList.toggle("active", t.dataset.sub === sub));
+    // Hide the non-region primary views; show only the active sub-view.
+    for (const v of ["overview", "quota", "support", "settings"]) {
+      const el = document.getElementById("view-" + v);
+      if (el) el.classList.add("hidden");
+    }
+    for (const v of REGION_SUBVIEWS) {
+      const el = document.getElementById("view-" + v);
+      if (el) el.classList.toggle("hidden", v !== sub);
+    }
+    if (sub === "map") setTimeout(refreshMap, 100);
+    if (sub === "latency") refreshLatencyChart();
+    return;
+  }
+
+  if (subbar) subbar.classList.add("hidden");
+  for (const v of ["overview", "table", "map", "latency", "compare", "quota", "support", "settings"]) {
     const el = document.getElementById("view-" + v);
     if (el) el.classList.toggle("hidden", v !== view);
   }
-  if (view === "map") setTimeout(refreshMap, 100);
-  if (view === "latency") refreshLatencyChart();
   if (view === "overview") setTimeout(() => {
     Object.values(STATE.overviewCharts).forEach(c => c && c.resize());
   }, 50);
   if (view === "quota") renderQuotaTab();
+  if (view === "support") renderSupportTab();
   if (view === "settings") {
-    loadActivityLog();
+    switchSettingsTab(STATE.settingsTab || "owner");
   }
+}
+
+// Switch the active sub-view within the Regions tab.
+function switchRegionsSub(sub) {
+  if (!REGION_SUBVIEWS.includes(sub)) return;
+  STATE.regionsSub = sub;
+  switchView("regions");
+}
+
+// True when the Regions tab is active AND showing the given sub-view. After the
+// Phase 3 consolidation STATE.view is always "regions" for map/latency/table/
+// compare; the specific pane lives in STATE.regionsSub.
+function _isRegionsSub(sub) {
+  return STATE.view === "regions" && STATE.regionsSub === sub;
 }
 
 // ---------------------------------------------------------------- Shared quota helpers
@@ -2173,9 +2362,28 @@ function _renderQuotaRequestAction(row) {
   return `<div class="quota-card-action">${buttonHtml}${statusText ? `<div class="quota-request-status ${statusCls}">${escapeHtml(statusText)}</div>` : ""}</div>`;
 }
 
+function _quotaTicketEscalationHtml(row) {
+  // Offer a support-ticket escalation when self-service can't resolve the gap:
+  // the family is short on quota, or subscription self-service data is missing.
+  const insufficient = row.overall_status === "insufficient";
+  const noSelfService = !row.subscription_id;
+  if (!insufficient && !noSelfService) return "";
+  const suggested = _quotaRequestLimitForRow(row);
+  return `<div class="quota-ticket-escalate">
+    <button type="button" class="btn-link quota-open-ticket-btn"
+      data-open-ticket="quota"
+      data-region="${escapeHtml(row.region_short || "")}"
+      data-family="${escapeHtml(row.family || "")}"
+      data-limit="${escapeHtml(String(suggested || ""))}"
+      title="Open a Microsoft support ticket for this quota shortfall">Open support ticket ↗</button>
+  </div>`;
+}
+
 function _renderQuotaActionCell(row) {
   const state = _getQuotaRequestState(row.region_short, row.family);
-  if (!row.subscription_id && !state) return `<span class="muted">—</span>`;
+  if (!row.subscription_id && !state) {
+    return `<span class="muted">—</span>${_quotaTicketEscalationHtml(row)}`;
+  }
   if (row.alt_family) {
     const altRow = { ...row, family: row.alt_family, family_label: row.alt_label || row.alt_family };
     const altState = _getQuotaRequestState(row.region_short, row.alt_family);
@@ -2189,13 +2397,23 @@ function _renderQuotaActionCell(row) {
           ${_renderQuotaRequestAction(altRow)}
           <div class="sku-tag sku-tag--fallback" style="margin-top:4px;">Fallback</div>
         </div>
-      </div>`;
+      </div>${_quotaTicketEscalationHtml(row)}`;
     }
   }
-  return _renderQuotaRequestAction(row);
+  return `${_renderQuotaRequestAction(row)}${_quotaTicketEscalationHtml(row)}`;
 }
 
 function _handleQuotaRequestInteraction(ev) {
+  const openTicketBtn = ev.target.closest("[data-open-ticket]");
+  if (openTicketBtn) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    _supportPrefill(openTicketBtn.dataset.openTicket || "quota", openTicketBtn.dataset.region, {
+      family: openTicketBtn.dataset.family || "",
+      newLimit: openTicketBtn.dataset.limit || null,
+    });
+    return;
+  }
   const btn = ev.target.closest("[data-quota-request]");
   const submitBtn = ev.target.closest("[data-quota-submit]");
   const cancelBtn = ev.target.closest("[data-quota-cancel]");
@@ -3043,7 +3261,7 @@ function _renderQuotaForSelectedRegion() {
 // ---------------------------------------------------------------- Map
 
 function refreshMap() {
-  if (STATE.view !== "map" || !STATE.snapshot) return;
+  if (!_isRegionsSub("map") || !STATE.snapshot) return;
   if (!STATE.map) {
     STATE.map = L.map("map", { worldCopyJump: true }).setView([20, 10], 2);
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -3105,7 +3323,7 @@ function initSourceRegionDropdown() {
 }
 
 function refreshLatencyChart() {
-  if (STATE.view !== "latency" || !STATE.snapshot) return;
+  if (!_isRegionsSub("latency") || !STATE.snapshot) return;
   const sel = document.getElementById("latency-source");
   if (!sel.value) return;
 
@@ -3393,8 +3611,8 @@ function toggleSidebar() {
 
   // Leaflet needs a kick to recalc tiles after the grid resize animation
   setTimeout(() => {
-    if (STATE.map && STATE.view === "map") STATE.map.invalidateSize();
-    if (STATE.latencyChart && STATE.view === "latency") STATE.latencyChart.resize();
+    if (STATE.map && _isRegionsSub("map")) STATE.map.invalidateSize();
+    if (STATE.latencyChart && _isRegionsSub("latency")) STATE.latencyChart.resize();
     Object.values(STATE.overviewCharts).forEach(c => c && c.resize());
   }, 280);
 }
@@ -3754,6 +3972,8 @@ function setBomStatus(html, kind = "info") {
 async function openBomModal(bomId, opts = {}) {
   document.getElementById("bom-overlay").classList.remove("hidden");
   document.getElementById("bom-modal").classList.remove("hidden");
+  BOM_WIZARD.editing = !(opts.create);
+  bomWizardGoTo(1);
   const titleEl = document.getElementById("bom-modal-title");
   if (titleEl) titleEl.textContent = opts.create ? "Create BOM" : "Edit BOM";
   setBomStatus("Loading…");
@@ -3767,6 +3987,11 @@ async function openBomModal(bomId, opts = {}) {
   document.getElementById("bom-skus-tbody").innerHTML = "";
   document.getElementById("bom-import-file").value = "";
   BOM_EDIT.current = null;
+
+  // Prefill the ticket owner independently of the catalog loads below: those
+  // can reject in a signed-out/empty environment, and owner prefill must not
+  // depend on them.
+  ensureSupportSettings().then(_prefillBomOwnerFields).catch(() => {});
 
   // Load catalogs + the SKU family list in parallel — none blocks the others.
   await Promise.all([ensureBomCatalog(), ensureBomRegionsCatalog(), ensureBomSkuFamilies(), loadSubscriptionsDropdown()]);
@@ -3791,6 +4016,70 @@ async function openBomModal(bomId, opts = {}) {
 function closeBomModal() {
   document.getElementById("bom-overlay").classList.add("hidden");
   document.getElementById("bom-modal").classList.add("hidden");
+}
+
+// ---------------------------------------------------------------- BOM wizard
+// The editor modal is a 3-step wizard (Basics → Services & Regions → SKUs).
+// These helpers only toggle which step is visible and drive the footer nav;
+// the underlying inputs, catalogs and save logic are unchanged.
+const BOM_WIZARD = { step: 1, total: 3, editing: false };
+
+function bomWizardGoTo(step) {
+  step = Math.max(1, Math.min(BOM_WIZARD.total, step));
+  BOM_WIZARD.step = step;
+  document.querySelectorAll("#bom-modal .bom-wizard-step").forEach(el => {
+    el.classList.toggle("is-current", el.getAttribute("data-wstep") === String(step));
+  });
+  document.querySelectorAll("#bom-wizard-nav .bom-wizard-tab").forEach(tab => {
+    const n = parseInt(tab.getAttribute("data-wstep"), 10);
+    tab.classList.toggle("is-current", n === step);
+    tab.classList.toggle("is-done", n < step);
+  });
+  const back = document.getElementById("bom-wizard-back");
+  const next = document.getElementById("bom-wizard-next");
+  const save = document.getElementById("bom-save");
+  if (back) back.hidden = step === 1;
+  const last = step === BOM_WIZARD.total;
+  // Keep Next visible on the final step but grayed out/disabled, so it's clear
+  // there's nothing further to advance to (Save takes over there).
+  if (next) {
+    next.hidden = false;
+    next.disabled = last;
+  }
+  // When editing an existing BOM, Save is always available (users often tweak a
+  // single field). When creating, Save appears only on the final step.
+  if (save) save.hidden = BOM_WIZARD.editing ? false : !last;
+}
+
+// Validate the given step before advancing. Only step 1 (Basics) has required
+// fields: a BOM name and at least one subscription.
+function bomWizardValidateStep(step) {
+  if (step === 1) {
+    const tag = (document.getElementById("bom-tag").value || "").trim();
+    const subSel = document.getElementById("bom-sub");
+    const anySub = subSel && Array.from(subSel.selectedOptions || []).some(o => o.value);
+    if (!tag) {
+      setBomStatus('Enter a <strong>BOM name</strong> to continue.', "error");
+      document.getElementById("bom-tag").focus();
+      return false;
+    }
+    if (!anySub) {
+      setBomStatus('Select at least one <strong>subscription</strong> to continue.', "error");
+      subSel && subSel.focus();
+      return false;
+    }
+    setBomStatus("");
+  }
+  return true;
+}
+
+function bomWizardNext() {
+  if (!bomWizardValidateStep(BOM_WIZARD.step)) return;
+  bomWizardGoTo(BOM_WIZARD.step + 1);
+}
+
+function bomWizardBack() {
+  bomWizardGoTo(BOM_WIZARD.step - 1);
 }
 
 // ---------------------------------------------------------------- BOM navigator
@@ -4231,6 +4520,8 @@ async function loadBomFromApi(bomId) {
     const meta = await r.json();
     BOM_EDIT.current = meta;
     applyBomToForm(meta);
+    // Layer this BOM's saved support override on top of the global prefill.
+    _overlayBomSupportOverride(meta.support_override);
     updateBomServiceCount();
     updateBomRegionsCount();
     setBomStatus(`Loaded — last updated ${escapeHtml(meta.bom_updated_at || "—")} by ${escapeHtml(meta.bom_updated_by || "—")}.`, "info");
@@ -4266,6 +4557,7 @@ async function saveBom() {
     subscription_ids: subIds,
     tag, customer_name,
     services, regions, required_skus,
+    support_override: _collectBomSupportOverride(),
   };
 
   // Editing an existing BOM updates it (PUT /{bom_id}); otherwise create a
@@ -4368,8 +4660,13 @@ async function refreshAuthToken({ force = false } = {}) {
         return null;
       }
       const msg = body.message || r.statusText;
-      const safe = escapeHtml(msg).replace(/\n/g, "<br>");
-      setTokenStatus("error", `<strong>${escapeHtml(err)}:</strong><br>${safe}`);
+      const ca = conditionalAccessGuidanceHtml(msg, err);
+      if (ca) {
+        setTokenStatus("error", ca);
+      } else {
+        const safe = escapeHtml(msg).replace(/\n/g, "<br>");
+        setTokenStatus("error", `<strong>${escapeHtml(err)}:</strong><br>${safe}`);
+      }
       TOKEN.info = null;
       updateSigninChip();
       return null;
@@ -4384,6 +4681,37 @@ async function refreshAuthToken({ force = false } = {}) {
     updateSigninChip();
     return null;
   }
+}
+
+// Detects a Conditional Access block of the default Azure CLI sign-in client
+// (AADSTS53003 "you don't have access to this resource"). Returns guided-fix
+// HTML for the sign-in status banner, or null if the error is unrelated.
+// The default flow needs no app registration; this guidance only appears when
+// the customer's tenant policy actually blocks the built-in client.
+function conditionalAccessGuidanceHtml(message, code) {
+  const m = String(message || "");
+  const c = String(code || "");
+  const isCaBlock =
+    c === "ca_consent_required" ||
+    /AADSTS53003/i.test(m) ||
+    /conditional access/i.test(m) ||
+    /you don'?t have access to this resource/i.test(m);
+  if (!isCaBlock) return null;
+  return (
+    `<strong>Sign-in blocked by your organization (AADSTS53003).</strong><br>` +
+    `Your tenant's Conditional Access policy is blocking the built-in ` +
+    `<em>Microsoft Azure CLI</em> sign-in app. No app registration is needed ` +
+    `normally — this only happens when a policy blocks that app.<br><br>` +
+    `<strong>To fix, an admin can either:</strong>` +
+    `<ol style="margin:6px 0 6px 18px;padding:0;">` +
+    `<li>Exclude the <em>Microsoft Azure CLI</em> app (<code>04b07795-8ddb-461a-bbee-02f9e1bf7b46</code>) from the blocking policy, <strong>or</strong></li>` +
+    `<li>Register a dedicated app and launch with these environment variables set:` +
+    `<br><code>AZURE_CLIENT_ID</code>, <code>AZURE_TENANT_ID</code>, <code>AZURE_REDIRECT_URI=http://localhost</code>` +
+    `<br>(Public client / <em>Allow public client flows</em> = Yes, redirect <code>http://localhost</code>, delegated <em>Azure Service Management → user_impersonation</em>.)</li>` +
+    `</ol>` +
+    `See the README section <em>“If sign-in is blocked by Conditional Access”</em> for full steps. ` +
+    `If the policy requires MFA or a compliant device instead, complete that in the browser prompt and try again.`
+  );
 }
 
 // ----- Header sign-in chip ---------------------------------------------------
@@ -4401,6 +4729,11 @@ function updateSigninChip() {
     chip.dataset.state = "out";
     text.textContent = "Sign in";
     chip.title = "Not signed in. Click for sign-in options.";
+  }
+  // Keep the onboarding stepper's step-1 state in sync with sign-in changes.
+  if (!STATE.activeBomId) {
+    const emptyEl = document.getElementById("bom-panel-empty");
+    if (emptyEl && !emptyEl.classList.contains("hidden")) renderOnboardingStepper(emptyEl);
   }
 }
 
@@ -4482,7 +4815,7 @@ async function preloadSubscriptionNames() {
       window._loadedSubscriptions = subs;
       renderSubscriptionSwitcher();
       renderSubscriptionFilter();
-      if (STATE.view === "table") renderTable();
+      if (_isRegionsSub("table")) renderTable();
       if (STATE.view === "quota") _renderQuotaForSelectedRegion();
     }
   } catch (e) { /* silent — best effort */ }
@@ -5101,6 +5434,839 @@ async function clearActivityLog() {
   }
 }
 
+// ---------------------------------------------------------------- Support tickets
+
+// Bootstrap config + support-feature state. APP_CONFIG is fetched once at boot
+// and tells the SPA whether demo mode is on (which forces ticket dry-run and
+// shows the demo banner).
+let APP_CONFIG = { demo_mode: false, support_configured: false, snapshot_retention: 15 };
+const SUPPORT = { settings: null, tickets: [], lastPreview: null, loaded: false };
+
+// Fetch the global support/ticket-owner settings once (cached on SUPPORT).
+// Used by the BOM wizard + gear Settings, which may run before the Tickets tab
+// has ever been opened.
+async function ensureSupportSettings() {
+  if (SUPPORT.settings) return SUPPORT.settings;
+  try {
+    const s = await apiJson("/api/support/settings");
+    SUPPORT.settings = s.settings;
+    if (typeof APP_CONFIG === "object" && APP_CONFIG) APP_CONFIG.support_configured = s.configured;
+  } catch (e) { /* non-fatal */ }
+  return SUPPORT.settings;
+}
+
+// The BOM's support contact is the profile Azure tickets for that BOM are filed
+// under. It is initialized from the global support settings but stored per-BOM
+// (support_override) so each BOM can have different owners/contacts. These
+// wizard field IDs map to the support_settings field names the backend merges.
+const BOM_SUPPORT_FIELDS = {
+  contact_first_name: "bom-owner-first",
+  contact_last_name: "bom-owner-last",
+  primary_email: "bom-owner-email",
+  phone: "bom-owner-phone",
+  country: "bom-owner-country",
+  preferred_timezone: "bom-owner-tz",
+  preferred_contact_method: "bom-owner-method",
+  default_severity: "bom-owner-sev",
+  additional_emails: "bom-owner-cc",
+};
+
+const _BOM_SUPPORT_DEFAULTS = {
+  preferred_contact_method: "email",
+  default_severity: "moderate",
+};
+
+// Prefill the wizard support fields from the GLOBAL settings (the per-BOM
+// defaults). Called for both new and existing BOMs; for existing BOMs the
+// BOM's own override is layered on top afterwards via _overlayBomSupportOverride.
+function _prefillBomOwnerFields() {
+  const s = SUPPORT.settings || {};
+  for (const [key, id] of Object.entries(BOM_SUPPORT_FIELDS)) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    const v = s[key];
+    el.value = (v !== undefined && v !== null && v !== "")
+      ? v
+      : (_BOM_SUPPORT_DEFAULTS[key] || "");
+  }
+}
+
+// Layer a BOM's saved per-BOM override on top of the global-prefilled fields:
+// only non-empty override values win, so unset fields keep inheriting global.
+function _overlayBomSupportOverride(override) {
+  if (!override || typeof override !== "object") return;
+  for (const [key, id] of Object.entries(BOM_SUPPORT_FIELDS)) {
+    const v = override[key];
+    if (v === undefined || v === null || v === "") continue;
+    const el = document.getElementById(id);
+    if (el) el.value = v;
+  }
+}
+
+// Collect the wizard support fields into a per-BOM override object. Only
+// non-empty values are sent; empty fields are omitted so the BOM inherits the
+// corresponding global default at ticket time.
+function _collectBomSupportOverride() {
+  const out = {};
+  for (const [key, id] of Object.entries(BOM_SUPPORT_FIELDS)) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    const v = (el.value || "").trim();
+    if (v) out[key] = v;
+  }
+  return out;
+}
+
+// Gear Settings → Ticket owner section.
+// Switch the active panel within the Settings view. Lazy-loads each tab's
+// data the first time (and on every re-open, so the content stays fresh).
+function switchSettingsTab(tab) {
+  const tabs = ["owner", "datasets", "activity"];
+  if (!tabs.includes(tab)) tab = "owner";
+  STATE.settingsTab = tab;
+  document.querySelectorAll("[data-settings-tab]").forEach(btn => {
+    const active = btn.getAttribute("data-settings-tab") === tab;
+    btn.classList.toggle("is-active", active);
+    btn.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  document.querySelectorAll("[data-settings-panel]").forEach(p => {
+    p.classList.toggle("is-active", p.getAttribute("data-settings-panel") === tab);
+  });
+  if (tab === "owner") loadOwnerSettings();
+  else if (tab === "datasets") loadDatasetsSettings();
+  else if (tab === "activity") loadActivityLog();
+}
+
+async function loadOwnerSettings() {
+  await ensureSupportSettings();
+  const s = SUPPORT.settings || {};
+  const f = document.getElementById("owner-first");
+  const l = document.getElementById("owner-last");
+  const e = document.getElementById("owner-email");
+  const sev = document.getElementById("owner-sev");
+  if (f) f.value = s.contact_first_name || "";
+  if (l) l.value = s.contact_last_name || "";
+  if (e) e.value = s.primary_email || "";
+  if (sev) sev.value = s.default_severity || "moderate";
+}
+
+async function saveOwnerSettings() {
+  const status = document.getElementById("owner-status");
+  const body = {
+    contact_first_name: ((document.getElementById("owner-first") || {}).value || "").trim(),
+    contact_last_name: ((document.getElementById("owner-last") || {}).value || "").trim(),
+    primary_email: ((document.getElementById("owner-email") || {}).value || "").trim(),
+    default_severity: (document.getElementById("owner-sev") || {}).value || "moderate",
+  };
+  if (status) status.textContent = "Saving…";
+  try {
+    const res = await apiJson("/api/support/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    SUPPORT.settings = res.settings;
+    if (typeof APP_CONFIG === "object" && APP_CONFIG) APP_CONFIG.support_configured = res.configured;
+    if (status) status.textContent = res.configured ? "✓ Saved" : "Saved (name + email needed to submit tickets)";
+    showToast("Ticket owner saved.", "success");
+  } catch (e) {
+    if (status) status.textContent = `❌ ${e.message}`;
+  }
+}
+
+// ---------------------------------------------------------------- Model datasets
+
+function _fmtBytes(n) {
+  if (n === null || n === undefined) return "—";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function _fmtDatasetDate(iso) {
+  if (!iso) return "—";
+  try {
+    return new Date(iso).toLocaleString();
+  } catch (e) { return iso; }
+}
+
+async function loadDatasetsSettings() {
+  const host = document.getElementById("datasets-list");
+  if (!host) return;
+  host.innerHTML = `<p class="muted">Loading datasets…</p>`;
+  let datasets = [];
+  try {
+    const res = await apiJson("/api/datasets");
+    datasets = (res && res.datasets) || [];
+  } catch (e) {
+    host.innerHTML = `<p class="muted">❌ Could not load datasets: ${escapeHtml(e.message)}</p>`;
+    return;
+  }
+  if (!datasets.length) {
+    host.innerHTML = `<p class="muted">No managed datasets.</p>`;
+    return;
+  }
+  host.innerHTML = datasets.map(_datasetCardHtml).join("");
+  for (const ds of datasets) _wireDatasetCard(ds);
+}
+
+function _datasetSourceLine(ds) {
+  const origin = ds.origin || (ds.source === "custom" ? "upload" : "builtin");
+  let label, cls;
+  if (origin === "arm") { label = "Azure ARM"; cls = "ds-src--arm"; }
+  else if (origin === "url") { label = "Linked URL"; cls = "ds-src--url"; }
+  else if (origin === "upload") { label = "Manual upload"; cls = "ds-src--upload"; }
+  else { label = "Built-in seed"; cls = "ds-src--builtin"; }
+  const bits = [`<span class="ds-src ${cls}">${escapeHtml(label)}</span>`];
+  if (ds.fetched_at) bits.push(`<span>fetched ${_fmtDatasetDate(ds.fetched_at)}</span>`);
+  if (ds.source_url) {
+    const u = escapeHtml(ds.source_url);
+    bits.push(`<a href="${u}" target="_blank" rel="noopener" class="ds-src-url" title="${u}">${u}</a>`);
+  }
+  return `<div class="dataset-source muted">${bits.join(" · ")}</div>`;
+}
+
+function _datasetCardHtml(ds) {
+  const custom = ds.source === "custom";
+  const badge = custom
+    ? `<span class="ds-badge ds-badge--custom">Custom</span>`
+    : `<span class="ds-badge ds-badge--builtin">Built-in</span>`;
+  const summary = ds.summary ? escapeHtml(ds.summary) : "";
+  const canArm = !!ds.can_refresh_arm;
+  const hasUrl = !!ds.source_url;
+  const id = escapeHtml(ds.id);
+  // Primary "get fresh data" actions.
+  const armBtn = canArm
+    ? `<button type="button" class="btn btn--sm" data-ds-refresh="${id}" title="Regenerate this dataset live from your Azure subscription">↻ Refresh from Azure</button>`
+    : "";
+  const refetchBtn = hasUrl
+    ? `<button type="button" class="btn btn--sm" data-ds-refetch="${id}" title="Re-download from the linked URL">↻ Refresh from URL</button>`
+    : "";
+  // One-click canonical public source (e.g. latency → Microsoft Docs markdown).
+  const showPreset = ds.suggested_url && ds.source_url !== ds.suggested_url;
+  const presetBtn = showPreset
+    ? `<button type="button" class="btn btn--sm" data-ds-preset="${id}" data-ds-preset-url="${escapeHtml(ds.suggested_url)}" title="${escapeHtml(ds.suggested_url)}">↻ Refresh from ${escapeHtml(ds.suggested_label || "source")}</button>`
+    : "";
+  const downloadBtn = `<a class="btn btn--sm" href="/api/datasets/${encodeURIComponent(ds.id)}" download>Download</a>`;
+  // Secondary configuration links.
+  const linkBtn = ds.supports_url
+    ? `<button type="button" class="link-btn" data-ds-link="${id}">${hasUrl ? "Change URL…" : "Link data URL…"}</button>`
+    : "";
+  const unlinkBtn = hasUrl
+    ? `<button type="button" class="link-btn danger" data-ds-unlink="${id}">Unlink URL</button>`
+    : "";
+  const revertBtn = `<button type="button" class="link-btn danger" data-ds-reset="${id}" ${custom ? "" : "hidden"}>Revert to built-in</button>`;
+  return `
+    <div class="dataset-card" data-ds="${id}">
+      <div class="dataset-head">
+        <div class="dataset-title">
+          <strong>${escapeHtml(ds.label)}</strong> ${badge}
+          <code class="dataset-file">${escapeHtml(ds.filename)}</code>
+        </div>
+      </div>
+      <p class="muted dataset-desc">${escapeHtml(ds.description || "")}</p>
+      <div class="dataset-meta muted">
+        ${summary ? `<span>${summary}</span>` : ""}
+        <span>${_fmtBytes(ds.size)}</span>
+        <span>Updated ${_fmtDatasetDate(ds.modified)}</span>
+      </div>
+      ${_datasetSourceLine(ds)}
+      <div class="dataset-actions">
+        ${armBtn}
+        ${presetBtn}
+        ${refetchBtn}
+        ${downloadBtn}
+        ${linkBtn}
+        ${unlinkBtn}
+        ${revertBtn}
+        <span class="muted dataset-status" data-ds-status="${id}"></span>
+      </div>
+    </div>`;
+}
+
+function _wireDatasetCard(ds) {
+  const reset = document.querySelector(`[data-ds-reset="${CSS.escape(ds.id)}"]`);
+  if (reset) reset.addEventListener("click", () => _resetDataset(ds.id, ds.label));
+
+  const refresh = document.querySelector(`[data-ds-refresh="${CSS.escape(ds.id)}"]`);
+  if (refresh) refresh.addEventListener("click", () => _refreshDatasetArm(ds.id, ds.label));
+
+  const link = document.querySelector(`[data-ds-link="${CSS.escape(ds.id)}"]`);
+  if (link) link.addEventListener("click", () => _linkDatasetUrl(ds.id, ds.label, ds.source_url || ""));
+
+  const refetch = document.querySelector(`[data-ds-refetch="${CSS.escape(ds.id)}"]`);
+  if (refetch) refetch.addEventListener("click", () => _refetchDatasetUrl(ds.id));
+
+  const preset = document.querySelector(`[data-ds-preset="${CSS.escape(ds.id)}"]`);
+  if (preset) preset.addEventListener("click", () => _linkDatasetUrl(ds.id, ds.label, preset.getAttribute("data-ds-preset-url"), true));
+
+  const unlink = document.querySelector(`[data-ds-unlink="${CSS.escape(ds.id)}"]`);
+  if (unlink) unlink.addEventListener("click", () => _unlinkDatasetUrl(ds.id, ds.label));
+}
+
+function _datasetStatusEl(id) {
+  return document.querySelector(`[data-ds-status="${CSS.escape(id)}"]`);
+}
+
+async function _resetDataset(id, label) {
+  if (!confirm(`Revert “${label || id}” to the built-in dataset? Your custom file will be removed.`)) return;
+  const status = _datasetStatusEl(id);
+  if (status) status.textContent = "Reverting…";
+  try {
+    const res = await apiFetch(`/api/datasets/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (!res.ok) {
+      let body = null;
+      try { body = await res.json(); } catch (e) {}
+      throw new Error((body && (body.message || body.error)) || res.statusText);
+    }
+    showToast(`Dataset “${id}” reverted to built-in.`, "success");
+    await loadDatasetsSettings();
+  } catch (e) {
+    if (status) status.textContent = `❌ ${e.message}`;
+    showToast(`Revert failed: ${e.message}`, "error");
+  }
+}
+
+async function _refreshDatasetArm(id, label) {
+  const status = _datasetStatusEl(id);
+  if (status) status.textContent = "Refreshing from Azure…";
+  try {
+    const res = await apiFetch(`/api/datasets/${encodeURIComponent(id)}/refresh`, { method: "POST" });
+    if (!res.ok) {
+      let body = null;
+      try { body = await res.json(); } catch (e) {}
+      throw new Error((body && (body.message || body.error)) || res.statusText);
+    }
+    showToast(`“${label || id}” refreshed from Azure.`, "success");
+    await loadDatasetsSettings();
+  } catch (e) {
+    if (status) status.textContent = `❌ ${e.message}`;
+    showToast(`Refresh failed: ${e.message}`, "error");
+  }
+}
+
+async function _linkDatasetUrl(id, label, currentUrl, usePreset) {
+  let trimmed;
+  if (usePreset) {
+    // One-click canonical source — no prompt.
+    trimmed = (currentUrl || "").trim();
+    if (!trimmed) return;
+  } else {
+    const url = prompt(
+      `Link a data URL for “${label || id}”.\n\n` +
+      `Paste an https:// link to the raw file (e.g. a GitHub raw URL, or a ` +
+      `github.com …/blob/… link which is converted automatically). ` +
+      `The dashboard will fetch, validate, and use it — and you can re-fetch it later.`,
+      currentUrl || "https://raw.githubusercontent.com/");
+    if (url === null) return;
+    trimmed = url.trim();
+    if (!trimmed) return;
+  }
+  const status = _datasetStatusEl(id);
+  if (status) status.textContent = "Fetching from URL…";
+  try {
+    const res = await apiFetch(`/api/datasets/${encodeURIComponent(id)}/source`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: trimmed }),
+    });
+    if (!res.ok) {
+      let body = null;
+      try { body = await res.json(); } catch (e) {}
+      throw new Error((body && (body.message || body.error)) || res.statusText);
+    }
+    showToast(`“${label || id}” linked and fetched from URL.`, "success");
+    await loadDatasetsSettings();
+  } catch (e) {
+    if (status) status.textContent = `❌ ${e.message}`;
+    showToast(`URL fetch failed: ${e.message}`, "error");
+  }
+}
+
+async function _refetchDatasetUrl(id) {
+  const status = _datasetStatusEl(id);
+  if (status) status.textContent = "Re-fetching…";
+  try {
+    const res = await apiFetch(`/api/datasets/${encodeURIComponent(id)}/source`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    if (!res.ok) {
+      let body = null;
+      try { body = await res.json(); } catch (e) {}
+      throw new Error((body && (body.message || body.error)) || res.statusText);
+    }
+    showToast(`Dataset “${id}” re-fetched from its linked URL.`, "success");
+    await loadDatasetsSettings();
+  } catch (e) {
+    if (status) status.textContent = `❌ ${e.message}`;
+    showToast(`Re-fetch failed: ${e.message}`, "error");
+  }
+}
+
+async function _unlinkDatasetUrl(id, label) {
+  if (!confirm(`Unlink the source URL for “${label || id}”? The current file stays; it just won't be re-fetchable.`)) return;
+  const status = _datasetStatusEl(id);
+  if (status) status.textContent = "Unlinking…";
+  try {
+    const res = await apiFetch(`/api/datasets/${encodeURIComponent(id)}/source`, { method: "DELETE" });
+    if (!res.ok) {
+      let body = null;
+      try { body = await res.json(); } catch (e) {}
+      throw new Error((body && (body.message || body.error)) || res.statusText);
+    }
+    showToast(`Source URL unlinked for “${id}”.`, "success");
+    await loadDatasetsSettings();
+  } catch (e) {
+    if (status) status.textContent = `❌ ${e.message}`;
+    showToast(`Unlink failed: ${e.message}`, "error");
+  }
+}
+
+async function loadAppConfig() {
+  try {
+    APP_CONFIG = await apiJson("/api/app-config");
+  } catch (e) { /* keep defaults */ }
+  applyDemoBanner();
+}
+
+function applyDemoBanner() {
+  const el = document.getElementById("demo-banner");
+  if (!el) return;
+  if (APP_CONFIG && APP_CONFIG.demo_mode) {
+    el.innerHTML = `<strong>Demo mode</strong> — you're viewing a bundled sample BOM and analysis.
+      Support tickets are <em>preview-only</em> (no Azure calls). Sign in and create your own BOM to run a live analysis.`;
+    el.classList.remove("hidden");
+  } else {
+    el.classList.add("hidden");
+  }
+}
+
+// Friendly, non-GUID label for a subscription (Tag/Customer · short-GUID).
+function _supportSubLabel(subId) {
+  if (!subId) return "—";
+  let name = "";
+  try { name = _subNameById(subId) || ""; } catch (e) {}
+  const shortId = subId.length >= 12 ? subId.slice(0, 8) + "…" + subId.slice(-4) : subId;
+  return name && name !== subId ? `${name} · ${shortId}` : shortId;
+}
+
+// Plain-language recommendation banner rendered above the Overview donuts.
+function renderOverviewReco() {
+  const el = document.getElementById("overview-reco");
+  if (!el) return;
+  const snap = STATE.snapshot;
+  const regions = (snap && snap.regions) || [];
+  if (!regions.length) { el.classList.add("hidden"); el.innerHTML = ""; return; }
+
+  const ready = regions.filter(r => r.deployment_health === "Yes");
+  const blocked = regions.filter(r => r.deployment_health !== "Yes");
+  const readyNames = ready.map(r => r.name);
+  // Prefer ready regions with the lowest latency footprint if available, else
+  // just list the first few alphabetically.
+  const topReady = readyNames.slice(0, 3);
+
+  // Summarize the dominant blocker reasons across blocked regions.
+  let quotaHits = 0, skuHits = 0, zoneHits = 0, svcHits = 0;
+  for (const r of blocked) {
+    if ((r.sku_blockers || []).length) skuHits++;
+    if (r.has_zone_restriction) zoneHits++;
+    if ((r.missing_services || []).length) svcHits++;
+  }
+  const subLabel = _supportSubLabel(focusedSubscriptionId());
+
+  const parts = [];
+  if (ready.length) {
+    parts.push(`<span class="reco-good">✅ ${ready.length} region${ready.length === 1 ? "" : "s"} ready to deploy</span>${topReady.length ? ` — e.g. <strong>${escapeHtml(topReady.join(", "))}</strong>` : ""}`);
+  } else {
+    parts.push(`<span class="reco-bad">⚠️ No region is fully ready for this BOM yet</span>`);
+  }
+  const reasonBits = [];
+  if (zoneHits) reasonBits.push(`${zoneHits} with zone/SKU restrictions`);
+  if (skuHits) reasonBits.push(`${skuHits} missing required SKUs`);
+  if (svcHits) reasonBits.push(`${svcHits} missing services`);
+  if (blocked.length) {
+    parts.push(`<span class="reco-warn">${blocked.length} need attention</span>${reasonBits.length ? ` (${escapeHtml(reasonBits.join(", "))})` : ""}`);
+  }
+
+  const action = blocked.length
+    ? `<button type="button" class="btn btn--sm" id="reco-open-support">Open a support ticket for a blocker →</button>`
+    : "";
+
+  el.innerHTML = `<div class="reco-line">${parts.join(" &nbsp;·&nbsp; ")}</div>
+    <div class="reco-sub">Subscription: <strong>${escapeHtml(subLabel)}</strong>${action ? " " + action : ""}</div>`;
+  el.classList.remove("hidden");
+  const btn = document.getElementById("reco-open-support");
+  if (btn) btn.addEventListener("click", () => switchView("support"));
+}
+
+// Create the #view-support container lazily as a sibling of #view-settings so
+// we don't have to hand-edit the views markup.
+function ensureSupportView() {
+  let el = document.getElementById("view-support");
+  if (el) return el;
+  const settings = document.getElementById("view-settings");
+  el = document.createElement("div");
+  el.className = "view hidden";
+  el.id = "view-support";
+  if (settings && settings.parentNode) settings.parentNode.insertBefore(el, settings.nextSibling);
+  else document.querySelector("main").appendChild(el);
+  return el;
+}
+
+async function renderSupportTab() {
+  const view = ensureSupportView();
+  view.classList.remove("hidden");  // switchView's loop ran before this existed
+  view.innerHTML = `<div class="support-loading">Loading support…</div>`;
+  try {
+    const [s, t] = await Promise.all([
+      apiJson("/api/support/settings"),
+      apiJson("/api/support/tickets"),
+    ]);
+    SUPPORT.settings = s.settings;
+    SUPPORT.tickets = t.tickets || [];
+    SUPPORT.loaded = true;
+  } catch (e) {
+    view.innerHTML = `<div class="support-error">Could not load support data: ${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  view.innerHTML = _supportHtml();
+  _wireSupportTab(view);
+  _updateSupportBadge();
+}
+
+function _updateSupportBadge() {
+  const badge = document.getElementById("support-tab-badge");
+  if (!badge) return;
+  const open = (SUPPORT.tickets || []).filter(t => t.status !== "closed" && (t.azure_status || "").toLowerCase() !== "closed").length;
+  badge.textContent = String(open);
+  badge.classList.toggle("hidden", open === 0);
+}
+
+function _supportBlockedRegions() {
+  const regions = (STATE.snapshot && STATE.snapshot.regions) || [];
+  return regions.filter(r => r.deployment_health !== "Yes");
+}
+
+function _activeBomFamilies() {
+  const meta = (typeof getBomMeta === "function") ? getBomMeta(STATE.activeBomId) : null;
+  const skus = (meta && meta.required_skus) || [];
+  const out = [];
+  for (const s of skus) {
+    if (s.primary_family) out.push({ family: s.primary_family, label: s.primary_label || s.primary_family, cores: s.required_cores || 0 });
+    if (s.alt_family) out.push({ family: s.alt_family, label: s.alt_label || s.alt_family, cores: s.required_cores || 0 });
+  }
+  return out;
+}
+
+function _activeBomSubs() {
+  const meta = (typeof getBomMeta === "function") ? getBomMeta(STATE.activeBomId) : null;
+  const ids = (meta && meta.subscription_ids) || [];
+  return ids.length ? ids : (focusedSubscriptionId() ? [focusedSubscriptionId()] : []);
+}
+
+function _supportHtml() {
+  const s = SUPPORT.settings || {};
+  const demo = !!(APP_CONFIG && APP_CONFIG.demo_mode);
+  const blocked = _supportBlockedRegions();
+  const families = _activeBomFamilies();
+  const subs = _activeBomSubs();
+  const sevOpts = ["minimal", "moderate", "critical"]
+    .map(v => `<option value="${v}" ${((s.default_severity || "moderate") === v) ? "selected" : ""}>${v[0].toUpperCase() + v.slice(1)}</option>`).join("");
+
+  const regionOpts = (STATE.snapshot && STATE.snapshot.regions || [])
+    .slice().sort((a, b) => a.name.localeCompare(b.name))
+    .map(r => `<option value="${escapeHtml(r.short || "")}" data-blocked="${r.deployment_health !== "Yes" ? 1 : 0}">${escapeHtml(r.name)}${r.deployment_health !== "Yes" ? " ⚠" : ""}</option>`).join("");
+  const familyOpts = families.map(f => `<option value="${escapeHtml(f.family)}" data-label="${escapeHtml(f.label)}" data-cores="${f.cores}">${escapeHtml(f.label)} (${escapeHtml(f.family)})</option>`).join("")
+    || `<option value="">— no BOM families —</option>`;
+  const subOpts = subs.map(id => `<option value="${escapeHtml(id)}">${escapeHtml(_supportSubLabel(id))}</option>`).join("")
+    || `<option value="">— sign in / select a BOM —</option>`;
+
+  const blockersHtml = blocked.length
+    ? blocked.slice(0, 12).map(r => {
+        const reasons = [];
+        if (r.has_zone_restriction) reasons.push("zone/SKU restriction");
+        if ((r.sku_blockers || []).length) reasons.push(`${r.sku_blockers.length} SKU blocker(s)`);
+        if ((r.missing_services || []).length) reasons.push(`${r.missing_services.length} missing service(s)`);
+        return `<tr>
+          <td>${escapeHtml(r.name)}</td>
+          <td>${escapeHtml(reasons.join(", ") || "needs validation")}</td>
+          <td class="support-blocker-actions">
+            <button type="button" class="btn btn--sm" data-prefill="quota" data-region="${escapeHtml(r.short || "")}">Quota ticket</button>
+            <button type="button" class="btn btn--sm" data-prefill="technical" data-region="${escapeHtml(r.short || "")}">Access ticket</button>
+          </td></tr>`;
+      }).join("")
+    : `<tr><td colspan="3" class="muted">No blocked regions in the current analysis 🎉</td></tr>`;
+
+  const ticketsHtml = (SUPPORT.tickets || []).length
+    ? SUPPORT.tickets.map(_supportTicketRow).join("")
+    : `<tr><td colspan="7" class="muted">No tickets yet. Preview one above to get started.</td></tr>`;
+
+  return `
+  <div class="support-wrap">
+    <div class="support-intro">
+      <h2>Support tickets</h2>
+      <p class="muted">Turn a deployment blocker into an Azure support request — a <strong>quota increase</strong>
+      or a <strong>zonal / restricted-SKU access</strong> ticket. Preview builds the exact request with no Azure call;
+      submitting files it via <code>Microsoft.Support</code>.${demo ? " <strong>Demo mode: submission is disabled.</strong>" : ""}</p>
+    </div>
+
+    <section class="support-section">
+      <h3>Blockers in the current analysis</h3>
+      <table class="support-table"><thead><tr><th>Region</th><th>Why it's blocked</th><th>Create ticket</th></tr></thead>
+      <tbody id="support-blockers-body">${blockersHtml}</tbody></table>
+    </section>
+
+    <section class="support-section">
+      <h3>New ticket</h3>
+      <div class="support-form-grid">
+        <label>Type
+          <select id="sup-kind">
+            <option value="quota">Quota increase</option>
+            <option value="technical">Zonal / SKU access (restriction)</option>
+          </select></label>
+        <label>Subscription <select id="sup-sub">${subOpts}</select></label>
+        <label>Region <select id="sup-region">${regionOpts}</select></label>
+        <label>SKU family <select id="sup-family">${familyOpts}</select></label>
+        <label id="sup-limit-wrap">New vCPU limit <input type="number" id="sup-limit" min="1" value="100" /></label>
+        <label id="sup-zones-wrap" class="hidden">Zones (comma-sep) <input type="text" id="sup-zones" placeholder="1,2,3" /></label>
+        <label>Severity <select id="sup-sev">${sevOpts}</select></label>
+      </div>
+      <div class="support-form-actions">
+        <button type="button" class="btn" id="sup-preview">Preview (dry-run)</button>
+        <button type="button" class="btn btn--accent" id="sup-submit" ${demo ? "disabled title='Disabled in demo mode'" : ""}>Submit to Azure</button>
+      </div>
+      <pre class="support-preview hidden" id="sup-preview-box"></pre>
+    </section>
+
+    <section class="support-section">
+      <h3>Tracked tickets</h3>
+      <table class="support-table"><thead><tr>
+        <th>Type</th><th>Title</th><th>Region</th><th>Severity</th><th>Status</th><th>Created</th><th></th>
+      </tr></thead><tbody id="support-tickets-body">${ticketsHtml}</tbody></table>
+    </section>
+
+    <section class="support-section">
+      <h3>Support contact settings</h3>
+      <p class="muted">Used as defaults on every ticket. Azure requires a contact name, email, and country.</p>
+      <div class="support-form-grid">
+        <label>First name <input type="text" id="set-first" value="${escapeHtml(s.contact_first_name || "")}" /></label>
+        <label>Last name <input type="text" id="set-last" value="${escapeHtml(s.contact_last_name || "")}" /></label>
+        <label>Email <input type="email" id="set-email" value="${escapeHtml(s.primary_email || "")}" /></label>
+        <label>Additional emails (CC) <input type="text" id="set-cc" value="${escapeHtml(s.additional_emails || "")}" /></label>
+        <label>Phone <input type="text" id="set-phone" value="${escapeHtml(s.phone || "")}" /></label>
+        <label>Country <input type="text" id="set-country" value="${escapeHtml(s.country || "US")}" /></label>
+        <label>Time zone <input type="text" id="set-tz" value="${escapeHtml(s.preferred_timezone || "Pacific Standard Time")}" /></label>
+        <label>Default severity <select id="set-sev">${sevOpts}</select></label>
+      </div>
+      <div class="support-form-actions">
+        <button type="button" class="btn btn--accent" id="set-save">Save settings</button>
+        <span class="support-settings-status" id="set-status"></span>
+      </div>
+    </section>
+
+    <section class="support-section support-danger">
+      <h3>Danger zone</h3>
+      <p class="muted">Delete all local snapshots and analysis history (support contact settings are kept). Does not touch Azure.</p>
+      <button type="button" class="btn btn--danger" id="sup-wipe">Wipe local state</button>
+    </section>
+  </div>`;
+}
+
+function _supportTicketRow(t) {
+  const statusPill = _supportStatusPill(t);
+  const created = (t.created_at || "").replace("T", " ").replace("Z", "");
+  const canRefresh = !t.dry_run && t.status === "submitted";
+  return `<tr>
+    <td>${escapeHtml(t.kind || "")}</td>
+    <td title="${escapeHtml(t.ticket_name || "")}">${escapeHtml(t.title || "")}</td>
+    <td>${escapeHtml(t.region || "")}</td>
+    <td>${escapeHtml(t.severity || "")}</td>
+    <td>${statusPill}</td>
+    <td>${escapeHtml(created)}</td>
+    <td class="support-ticket-actions">
+      <button type="button" class="btn btn--sm" data-ticket-view="${escapeHtml(t.ticket_name || "")}">Payload</button>
+      ${canRefresh ? `<button type="button" class="btn btn--sm" data-ticket-refresh="${escapeHtml(t.ticket_name || "")}">Refresh</button>` : ""}
+    </td></tr>`;
+}
+
+function _supportStatusPill(t) {
+  if (t.dry_run) return `<span class="pill pill-muted">Preview</span>`;
+  const az = (t.azure_status || "").toLowerCase();
+  if (t.status === "failed") return `<span class="pill pill-fail">Failed</span>`;
+  if (az === "closed") return `<span class="pill pill-ok">Closed</span>`;
+  if (t.status === "submitted") return `<span class="pill pill-warn">Open${t.azure_status ? " · " + escapeHtml(t.azure_status) : ""}</span>`;
+  return `<span class="pill pill-muted">${escapeHtml(t.status || "—")}</span>`;
+}
+
+function _supportSyncKindFields() {
+  const kind = (document.getElementById("sup-kind") || {}).value;
+  const limitWrap = document.getElementById("sup-limit-wrap");
+  const zonesWrap = document.getElementById("sup-zones-wrap");
+  if (limitWrap) limitWrap.classList.toggle("hidden", kind !== "quota");
+  if (zonesWrap) zonesWrap.classList.toggle("hidden", kind !== "technical");
+}
+
+function _supportGatherForm() {
+  const kind = (document.getElementById("sup-kind") || {}).value || "quota";
+  const familySel = document.getElementById("sup-family");
+  const opt = familySel && familySel.selectedOptions[0];
+  const body = {
+    kind,
+    subscription_id: (document.getElementById("sup-sub") || {}).value || "",
+    region: (document.getElementById("sup-region") || {}).value || "",
+    family: (document.getElementById("sup-family") || {}).value || "",
+    family_label: opt ? opt.getAttribute("data-label") : "",
+    severity: (document.getElementById("sup-sev") || {}).value || "moderate",
+  };
+  if (kind === "quota") {
+    body.new_limit = parseInt((document.getElementById("sup-limit") || {}).value || "0", 10);
+  } else {
+    const z = ((document.getElementById("sup-zones") || {}).value || "").split(",").map(x => x.trim()).filter(Boolean);
+    if (z.length) body.zones = z;
+  }
+  if (STATE.activeBomId) body.bom_id = STATE.activeBomId;
+  return body;
+}
+
+async function _supportCreate(dryRun) {
+  const body = _supportGatherForm();
+  body.dry_run = dryRun;
+  if (!body.subscription_id) { showToast("Pick a subscription first.", "warning"); return; }
+  if (!body.region) { showToast("Pick a region first.", "warning"); return; }
+  if (!body.family) { showToast("Pick a SKU family first.", "warning"); return; }
+  if (!dryRun && !confirm(`Submit a real ${body.kind} support ticket to Azure for ${body.region}?`)) return;
+  const box = document.getElementById("sup-preview-box");
+  try {
+    const res = await apiJson("/api/support/tickets", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    const ticket = res.ticket;
+    if (dryRun) {
+      SUPPORT.lastPreview = ticket;
+      if (box) { box.textContent = JSON.stringify(ticket.payload, null, 2); box.classList.remove("hidden"); }
+      showToast("Preview built (no Azure call).", "success");
+    } else {
+      showToast(`Ticket submitted: ${ticket.azure_ticket_id || ticket.ticket_name}`, "success");
+    }
+    await _supportReloadTickets();
+  } catch (e) {
+    showToast(`Ticket failed: ${e.message}`, "error");
+    if (box && e.body) { box.textContent = JSON.stringify(e.body, null, 2); box.classList.remove("hidden"); }
+  }
+}
+
+async function _supportReloadTickets() {
+  try {
+    const t = await apiJson("/api/support/tickets");
+    SUPPORT.tickets = t.tickets || [];
+    const body = document.getElementById("support-tickets-body");
+    if (body) body.innerHTML = (SUPPORT.tickets.length ? SUPPORT.tickets.map(_supportTicketRow).join("") : `<tr><td colspan="7" class="muted">No tickets yet.</td></tr>`);
+    _updateSupportBadge();
+  } catch (e) { /* ignore */ }
+}
+
+async function _supportSaveSettings() {
+  const status = document.getElementById("set-status");
+  const body = {
+    contact_first_name: (document.getElementById("set-first") || {}).value || "",
+    contact_last_name: (document.getElementById("set-last") || {}).value || "",
+    primary_email: (document.getElementById("set-email") || {}).value || "",
+    additional_emails: (document.getElementById("set-cc") || {}).value || "",
+    phone: (document.getElementById("set-phone") || {}).value || "",
+    country: (document.getElementById("set-country") || {}).value || "US",
+    preferred_timezone: (document.getElementById("set-tz") || {}).value || "",
+    default_severity: (document.getElementById("set-sev") || {}).value || "moderate",
+  };
+  if (status) status.textContent = "Saving…";
+  try {
+    const res = await apiJson("/api/support/settings", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    SUPPORT.settings = res.settings;
+    APP_CONFIG.support_configured = res.configured;
+    if (status) status.textContent = res.configured ? "✓ Saved" : "Saved (email + name needed to submit)";
+    showToast("Support settings saved.", "success");
+  } catch (e) {
+    if (status) status.textContent = `❌ ${e.message}`;
+  }
+}
+
+async function _supportViewPayload(name) {
+  const box = document.getElementById("sup-preview-box");
+  try {
+    const res = await apiJson(`/api/support/tickets/${encodeURIComponent(name)}`);
+    if (box) { box.textContent = JSON.stringify(res.ticket.payload, null, 2); box.classList.remove("hidden"); box.scrollIntoView({ behavior: "smooth", block: "nearest" }); }
+  } catch (e) { showToast(e.message, "error"); }
+}
+
+async function _supportRefreshTicket(name) {
+  try {
+    await apiJson(`/api/support/tickets/${encodeURIComponent(name)}`, { method: "POST" });
+    await _supportReloadTickets();
+    showToast("Ticket status refreshed.", "success");
+  } catch (e) { showToast(e.message, "error"); }
+}
+
+async function _supportWipe() {
+  if (!confirm("Delete ALL local snapshots and analysis history? Support settings are kept. This cannot be undone.")) return;
+  try {
+    const r = await apiJson("/api/local-state/wipe", { method: "POST" });
+    showToast(`Wiped ${r.snapshots_removed} snapshot(s).`, "success");
+    location.reload();
+  } catch (e) { showToast(e.message, "error"); }
+}
+
+function _supportPrefill(kind, regionShort, opts) {
+  opts = opts || {};
+  switchView("support");
+  setTimeout(() => {
+    const kindSel = document.getElementById("sup-kind");
+    const regionSel = document.getElementById("sup-region");
+    if (kindSel) kindSel.value = kind;
+    if (regionSel) regionSel.value = regionShort;
+    _supportSyncKindFields();
+    const familySel = document.getElementById("sup-family");
+    if (familySel && opts.family) {
+      const has = Array.from(familySel.options).some(o => o.value === opts.family);
+      if (has) familySel.value = opts.family;
+    }
+    const limitInput = document.getElementById("sup-limit");
+    if (limitInput && opts.newLimit != null && Number.isFinite(Number(opts.newLimit))) {
+      limitInput.value = String(Math.round(Number(opts.newLimit)));
+    }
+    const box = document.getElementById("sup-create") || document.querySelector(".support-form-grid");
+    if (box) box.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, 60);
+}
+
+function _wireSupportTab(view) {
+  _supportSyncKindFields();
+  const kindSel = view.querySelector("#sup-kind");
+  if (kindSel) kindSel.addEventListener("change", _supportSyncKindFields);
+  const prev = view.querySelector("#sup-preview");
+  if (prev) prev.addEventListener("click", () => _supportCreate(true));
+  const sub = view.querySelector("#sup-submit");
+  if (sub) sub.addEventListener("click", () => _supportCreate(false));
+  const save = view.querySelector("#set-save");
+  if (save) save.addEventListener("click", _supportSaveSettings);
+  const wipe = view.querySelector("#sup-wipe");
+  if (wipe) wipe.addEventListener("click", _supportWipe);
+
+  view.querySelector("#support-blockers-body").addEventListener("click", (ev) => {
+    const btn = ev.target.closest("[data-prefill]");
+    if (!btn) return;
+    _supportPrefill(btn.getAttribute("data-prefill"), btn.getAttribute("data-region"));
+  });
+  view.querySelector("#support-tickets-body").addEventListener("click", (ev) => {
+    const v = ev.target.closest("[data-ticket-view]");
+    const r = ev.target.closest("[data-ticket-refresh]");
+    if (v) _supportViewPayload(v.getAttribute("data-ticket-view"));
+    else if (r) _supportRefreshTicket(r.getAttribute("data-ticket-refresh"));
+  });
+}
+
 // ---------------------------------------------------------------- Wiring
 
 function init() {
@@ -5152,6 +6318,14 @@ function init() {
   });
 
   document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => switchView(t.dataset.view)));
+  document.querySelectorAll(".region-subtab").forEach(t => t.addEventListener("click", () => switchRegionsSub(t.dataset.sub)));
+  const openSettingsBtn = document.getElementById("open-settings");
+  if (openSettingsBtn) openSettingsBtn.addEventListener("click", () => switchView("settings"));
+  const ownerSaveBtn = document.getElementById("owner-save");
+  if (ownerSaveBtn) ownerSaveBtn.addEventListener("click", saveOwnerSettings);
+  document.querySelectorAll("[data-settings-tab]").forEach(btn => {
+    btn.addEventListener("click", () => switchSettingsTab(btn.getAttribute("data-settings-tab")));
+  });
   document.getElementById("btn-export-csv").addEventListener("click", exportCsv);
   document.getElementById("btn-export-xlsx").addEventListener("click", exportXlsx);
   document.getElementById("drilldown-overlay").addEventListener("click", closeDrilldown);
@@ -5221,6 +6395,16 @@ function init() {
   document.getElementById("bom-cancel").addEventListener("click", closeBomModal);
   document.getElementById("bom-overlay").addEventListener("click", closeBomModal);
   document.getElementById("bom-save").addEventListener("click", saveBom);
+  document.getElementById("bom-wizard-back").addEventListener("click", bomWizardBack);
+  document.getElementById("bom-wizard-next").addEventListener("click", bomWizardNext);
+  document.querySelectorAll("#bom-wizard-nav .bom-wizard-tab").forEach(tab => {
+    tab.addEventListener("click", () => {
+      const target = parseInt(tab.getAttribute("data-wstep"), 10) || 1;
+      // Only allow jumping forward if step 1 validates.
+      if (target > 1 && !bomWizardValidateStep(1)) return;
+      bomWizardGoTo(target);
+    });
+  });
   document.getElementById("bom-skus-add").addEventListener("click", () => { addBomSkuRow(); renderBomSkuFamilyOptions(); });
   const skuRefreshBtn = document.getElementById("bom-skus-refresh");
   if (skuRefreshBtn) {
@@ -5294,10 +6478,12 @@ function init() {
   }
 
   (async () => {
+    await loadAppConfig();
     await loadSubscriptions();
     await loadSnapshotsList();
     const picker = document.getElementById("snapshot-picker");
     await loadSnapshot(picker.value || null);
+    maybeShowSettingsCoach();
     // Restore quota request history from SQLite
     await _restoreQuotaRequestsFromDb();
     // Populate the header sign-in chip (silent — never opens a browser).
@@ -5309,3 +6495,76 @@ function init() {
 }
 
 document.addEventListener("DOMContentLoaded", init);
+
+// ---------------------------------------------------------------- Coachmark
+// First-run "Start here" pointer at the Settings gear, nudging the user to set
+// their support contact and refresh region / latency / SKU data *before*
+// building a BOM. Shows once, then remembers dismissal in localStorage. It is
+// also dismissed the moment the user opens Settings by any means.
+const COACH_KEY = "coach_settings_done";
+
+function _coachDone() {
+  try { return localStorage.getItem(COACH_KEY) === "1"; } catch (e) { return false; }
+}
+
+function dismissSettingsCoach(remember) {
+  const el = document.getElementById("settings-coach");
+  if (el) el.remove();
+  const gear = document.getElementById("open-settings");
+  if (gear) gear.classList.remove("coach-pulse");
+  if (window.__coachReposition) {
+    window.removeEventListener("resize", window.__coachReposition);
+    window.removeEventListener("scroll", window.__coachReposition, true);
+    window.__coachReposition = null;
+  }
+  if (remember) { try { localStorage.setItem(COACH_KEY, "1"); } catch (e) {} }
+}
+
+function maybeShowSettingsCoach() {
+  if (_coachDone()) return;
+  const gear = document.getElementById("open-settings");
+  if (!gear || document.getElementById("settings-coach")) return;
+
+  const coach = document.createElement("div");
+  coach.id = "settings-coach";
+  coach.className = "coach";
+  coach.setAttribute("role", "dialog");
+  coach.setAttribute("aria-label", "Getting started");
+  coach.innerHTML = `
+    <div class="coach-arrow" aria-hidden="true"></div>
+    <div class="coach-body">
+      <div class="coach-title">👋 Start here</div>
+      <p class="coach-text">Open <strong>Settings</strong> to set your support contact and
+        <strong>refresh your region, latency &amp; SKU data from Azure</strong> before building your first BOM.</p>
+      <div class="coach-actions">
+        <button type="button" class="btn btn--accent btn--sm" data-coach="open">Open Settings</button>
+        <button type="button" class="link-btn" data-coach="dismiss">Maybe later</button>
+      </div>
+    </div>`;
+  document.body.appendChild(coach);
+  gear.classList.add("coach-pulse");
+
+  const place = () => {
+    const r = gear.getBoundingClientRect();
+    coach.style.top = Math.round(r.bottom + 12) + "px";
+    const rightGap = Math.max(12, Math.round(window.innerWidth - r.right - 2));
+    coach.style.right = rightGap + "px";
+    // Point the arrow up at the gear's horizontal centre.
+    coach.style.setProperty("--coach-arrow-right",
+      Math.round(gear.offsetWidth / 2 - 6) + "px");
+  };
+  place();
+  window.__coachReposition = place;
+  window.addEventListener("resize", place);
+  window.addEventListener("scroll", place, true);
+
+  const openBtn = coach.querySelector('[data-coach="open"]');
+  if (openBtn) openBtn.addEventListener("click", () => {
+    dismissSettingsCoach(true);
+    switchView("settings");
+  });
+  const dismissBtn = coach.querySelector('[data-coach="dismiss"]');
+  if (dismissBtn) dismissBtn.addEventListener("click", () => dismissSettingsCoach(true));
+  // Any click that opens Settings should also retire the coachmark.
+  gear.addEventListener("click", () => dismissSettingsCoach(true), { once: true });
+}

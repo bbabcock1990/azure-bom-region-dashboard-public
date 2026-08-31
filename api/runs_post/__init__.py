@@ -597,6 +597,11 @@ def _main(req: func.HttpRequest) -> func.HttpResponse:
     )
     if progress_token:
         run_progress.complete(progress_token, status="succeeded", run_id=run_id)
+    try:
+        from .._shared import snapshot_store
+        snapshot_store.prune_snapshots(bom_id)
+    except Exception:
+        log.debug("snapshot pruning skipped", exc_info=True)
     log.info("run %s done in %.1fs (arm_availability=%s, "
              "skus_source=%s, families=%d)",
              run_id, time.time() - t0, True,

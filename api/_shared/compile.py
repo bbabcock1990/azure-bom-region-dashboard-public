@@ -1409,7 +1409,8 @@ def _read_bom_xlsx_bytes(blob: bytes) -> Tuple[List[str], List[Dict], Optional[L
 
 
 def _load_latency() -> Dict:
-    path = os.path.join(DATA_DIR, "azure_region_latency.csv")
+    from . import dataset_store
+    path = dataset_store.resolve_path("latency")
     return pipeline_sources.read_latency_csv(path)
 
 

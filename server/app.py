@@ -65,6 +65,17 @@ ROUTES = [
     ("activity_log/clear", ["POST"], "activity_log_clear"),
     ("activity_log", ["GET"], "activity_log_list"),
     ("donor-quota-scan", ["POST"], "donor_quota_scan"),
+    ("app-config", ["GET"], "app_config"),
+    ("support/settings", ["GET", "POST"], "support_settings"),
+    ("support/tickets/{ticket_name}", ["GET", "POST"], "support_ticket_get"),
+    ("support/tickets", ["GET"], "support_tickets_list"),
+    ("support/tickets", ["POST"], "support_ticket_create"),
+    ("datasets/{dataset_id}/refresh", ["POST"], "datasets"),
+    ("datasets/{dataset_id}/source", ["POST", "DELETE"], "datasets"),
+    ("datasets/{dataset_id}", ["GET", "POST", "DELETE"], "datasets"),
+    ("datasets", ["GET"], "datasets"),
+    ("local-state/wipe", ["POST"], "local_state_wipe"),
+    ("demo/seed", ["POST"], "demo_seed"),
 ]
 
 
@@ -151,6 +162,16 @@ def create_app() -> FastAPI:
 
     # Static frontend last, so /api/* routes take precedence.
     app.mount("/", StaticFiles(directory=str(APP_DIR), html=True), name="static")
+
+    # In demo mode, seed a sample BOM + snapshot so the dashboard is populated
+    # on first launch (before any Azure sign-in). Best-effort; never fatal.
+    try:
+        from api._shared import demo_seed
+        if demo_seed.seed_if_empty():
+            print("==> Demo mode: seeded sample BOM + analysis snapshot")
+    except Exception:  # pragma: no cover - defensive
+        pass
+
     return app
 
 

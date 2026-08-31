@@ -187,6 +187,57 @@ def _validate_customer_name(name: Optional[str]) -> Optional[str]:
     return s
 
 
+# Per-BOM support-contact override. Mirrors the global support_settings fields
+# so each BOM can carry its own ticket owner + contact profile, initialized from
+# the global defaults but independently editable. Stored as a compact JSON blob.
+_SUPPORT_OVERRIDE_FIELDS = (
+    "contact_first_name",
+    "contact_last_name",
+    "primary_email",
+    "additional_emails",
+    "phone",
+    "country",
+    "preferred_timezone",
+    "preferred_contact_method",
+    "preferred_language",
+    "default_severity",
+)
+_VALID_SEVERITIES = ("minimal", "moderate", "critical")
+MAX_SUPPORT_FIELD_LEN = 200
+
+
+def _validate_support_override(obj) -> Dict[str, str]:
+    """Return a cleaned per-BOM support override dict.
+
+    Only known fields are kept (unknown keys dropped), every value is coerced to
+    a trimmed string, severity is constrained to the accepted set, and empty
+    fields are omitted so the blob only carries genuine overrides. Non-dict
+    input yields an empty override (BOM simply inherits the global profile).
+    """
+    if not isinstance(obj, dict):
+        return {}
+    cleaned: Dict[str, str] = {}
+    for key in _SUPPORT_OVERRIDE_FIELDS:
+        if key not in obj or obj[key] is None:
+            continue
+        val = str(obj[key]).strip()
+        if not val:
+            continue
+        if key == "default_severity":
+            val = val.lower()
+            if val not in _VALID_SEVERITIES:
+                continue
+        if len(val) > MAX_SUPPORT_FIELD_LEN:
+            raise BomStorageError(
+                "bad_support_override",
+                f"support_override.{key} is too long ({len(val)} chars; "
+                f"max {MAX_SUPPORT_FIELD_LEN}).",
+                400,
+            )
+        cleaned[key] = val
+    return cleaned
+
+
 def _validate_segments(segments_csv: Optional[str]) -> str:
     """Returns a normalized uppercase CSV. Empty / None becomes the
     default "EA,ANY"."""
@@ -390,6 +441,14 @@ def _entity_to_record(e: Dict) -> Dict:
     if not subscription_ids:
         primary_sub = e.get("subscription_id") or e.get("RowKey")
         subscription_ids = [primary_sub] if primary_sub else []
+    try:
+        support_override = json.loads(e.get("support_override_json") or "{}")
+        if not isinstance(support_override, dict):
+            support_override = {}
+    except Exception:
+        log.warning("subscription_metadata: support_override_json corrupt for %s",
+                    e.get("RowKey"))
+        support_override = {}
     return {
         "bom_id": e.get("RowKey"),
         "subscription_id": subscription_ids[0] if subscription_ids else (e.get("subscription_id") or e.get("RowKey")),
@@ -400,6 +459,7 @@ def _entity_to_record(e: Dict) -> Dict:
         "required_skus": required_skus,
         "services": services,
         "regions": regions,
+        "support_override": support_override,
         "bom_updated_at": e.get("bom_updated_at") or None,
         "bom_updated_by": e.get("bom_updated_by") or None,
     }
@@ -444,6 +504,7 @@ def create(
     required_skus: Optional[List[Dict]] = None,
     services: Optional[List[Dict]] = None,
     regions: Optional[List] = None,
+    support_override: Optional[Dict] = None,
     updated_by: str,
 ) -> Dict:
     """Create a brand-new BOM with a freshly allocated bom_id. The same
@@ -458,6 +519,7 @@ def create(
         required_skus=required_skus or [],
         services=services or [],
         regions=regions or [],
+        support_override=support_override,
         updated_by=updated_by,
     )
 
@@ -473,6 +535,7 @@ def upsert(
     required_skus: List[Dict],
     services: List[Dict],
     regions: Optional[List] = None,
+    support_override: Optional[Dict] = None,
     updated_by: str,
 ) -> Dict:
     """Validate, persist, and return the saved record keyed by ``bom_id``.
@@ -487,14 +550,17 @@ def upsert(
     cleaned_skus = _validate_required_skus(required_skus or [])
     cleaned_services = _validate_services(services or [])
     cleaned_regions = _validate_regions(regions or [])
+    cleaned_override = _validate_support_override(support_override or {})
 
     skus_json = json.dumps(cleaned_skus, ensure_ascii=False)
     services_json = json.dumps(cleaned_services, ensure_ascii=False)
     regions_json = json.dumps(cleaned_regions, ensure_ascii=False)
     subscription_ids_json = json.dumps(normalized_sub_ids, ensure_ascii=False)
+    support_override_json = json.dumps(cleaned_override, ensure_ascii=False)
     _ensure_json_size(skus_json, what="required_skus")
     _ensure_json_size(services_json, what="services")
     _ensure_json_size(regions_json, what="regions")
+    _ensure_json_size(support_override_json, what="support_override")
 
     entity = {
         "PartitionKey": PARTITION,
@@ -507,6 +573,7 @@ def upsert(
         "required_skus_json": skus_json,
         "services_json": services_json,
         "regions_json": regions_json,
+        "support_override_json": support_override_json,
         "bom_updated_at": _now_iso(),
         "bom_updated_by": (updated_by or "")[:80],
     }

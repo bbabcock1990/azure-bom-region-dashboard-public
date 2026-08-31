@@ -22,7 +22,7 @@
        Order matters: this must run before the <link> below. -->
   <script src="preinit.js?v=2026061503"></script>
 
-  <link rel="stylesheet" href="styles.css?v=2026062910" />
+  <link rel="stylesheet" href="styles.css?v=2026082616" />
 </head>
 <body>
 
@@ -43,11 +43,16 @@
     <button type="button" id="open-guide" class="theme-toggle-btn" title="Getting Started guide" aria-label="Open the Getting Started guide">
       <span class="theme-toggle-icon" aria-hidden="true">?</span>
     </button>
+    <button type="button" id="open-settings" class="theme-toggle-btn" title="Settings &amp; activity log" aria-label="Open settings and activity log">
+      <span class="theme-toggle-icon" aria-hidden="true">⚙</span>
+    </button>
     <button type="button" id="theme-toggle" class="theme-toggle-btn" title="Toggle light/dark theme" aria-label="Toggle theme">
       <span class="theme-toggle-icon" aria-hidden="true">☾</span>
     </button>
   </div>
 </header>
+
+<div id="demo-banner" class="demo-banner hidden"></div>
 
 <div class="layout" id="layout">
 
@@ -101,19 +106,25 @@
 
     <div class="tabs">
       <div class="tab active" data-view="overview">Overview</div>
-      <div class="tab" data-view="table">Table</div>
-      <div class="tab" data-view="map">Map</div>
-      <div class="tab" data-view="latency">Latency Chart</div>
-      <div class="tab" data-view="compare">Compare</div>
-      <div class="tab" data-view="quota">Quota per Region <span id="quota-tab-badge" class="tab-badge hidden">0</span></div>
-      <div class="tab" data-view="settings" id="tab-settings">Settings</div>
+      <div class="tab" data-view="regions">Regions</div>
+      <div class="tab" data-view="quota">Quota <span id="quota-tab-badge" class="tab-badge hidden">0</span></div>
+      <div class="tab" data-view="support">Tickets <span id="support-tab-badge" class="tab-badge hidden">0</span></div>
       <div class="tabs-actions">
         <button id="btn-export-csv" class="btn btn--sm">Export CSV</button>
         <button id="btn-export-xlsx" class="btn btn--sm">Export Excel</button>
       </div>
     </div>
 
+    <div class="region-subtabs hidden" id="region-subtabs">
+      <button type="button" class="region-subtab active" data-sub="table">Table</button>
+      <button type="button" class="region-subtab" data-sub="map">Map</button>
+      <button type="button" class="region-subtab" data-sub="latency">Latency Chart</button>
+      <button type="button" class="region-subtab" data-sub="compare">Compare</button>
+    </div>
+
     <div class="view" id="view-overview">
+
+      <div class="reco-banner hidden" id="overview-reco"></div>
 
       <section class="overview-blade" id="overview-blade">
         <div class="overview-card">
@@ -250,64 +261,128 @@
       </div>
     </div>
     <div class="view hidden" id="view-settings">
-      <div class="settings-wrap">
-        <section id="settings-activity" class="settings-section">
-          <h2>Activity Log</h2>
-          <p class="muted">
-            Audit trail of every Azure API call, quota request, BOM change, and user action. Use this to track all dashboard activity.
-          </p>
-          <div class="activity-controls">
-            <label class="activity-control">
-              <span>Subscription</span>
-              <select id="activity-filter-sub">
-                <option value="">All</option>
-              </select>
-            </label>
-            <label class="activity-control">
-              <span>Event type</span>
-              <select id="activity-filter-event">
-                <option value="">All</option>
-              </select>
-            </label>
-            <label class="activity-control">
-              <span>Limit</span>
-              <select id="activity-filter-limit">
-                <option value="100">100</option>
-                <option value="200" selected>200</option>
-                <option value="500">500</option>
-                <option value="1000">1000</option>
-              </select>
-            </label>
-            <label class="activity-control">
-              <span>Lookback</span>
-              <select id="activity-filter-days">
-                <option value="1">1 day</option>
-                <option value="3">3 days</option>
-                <option value="7" selected>7 days</option>
-                <option value="30">30 days</option>
-              </select>
-            </label>
-            <button type="button" id="activity-refresh" class="btn btn--primary">Refresh</button>
-            <button type="button" id="activity-clear" class="link-btn danger">Clear log</button>
-            <span class="muted" id="activity-status"></span>
+      <div class="settings-shell">
+        <header class="settings-header">
+          <h1>Settings</h1>
+          <p class="muted">Manage your default support contact, the model's reference data, and the activity log.</p>
+        </header>
+        <div class="settings-layout">
+          <nav class="settings-nav" role="tablist" aria-label="Settings sections">
+            <button type="button" class="settings-nav-item is-active" data-settings-tab="owner" role="tab" aria-selected="true">
+              <span class="settings-nav-icon" aria-hidden="true">👤</span>
+              <span class="settings-nav-text"><strong>Ticket owner</strong><small>Default Azure support contact</small></span>
+            </button>
+            <button type="button" class="settings-nav-item" data-settings-tab="datasets" role="tab" aria-selected="false">
+              <span class="settings-nav-icon" aria-hidden="true">🗂️</span>
+              <span class="settings-nav-text"><strong>Model datasets</strong><small>Latency, regions &amp; catalogs</small></span>
+            </button>
+            <button type="button" class="settings-nav-item" data-settings-tab="activity" role="tab" aria-selected="false">
+              <span class="settings-nav-icon" aria-hidden="true">📜</span>
+              <span class="settings-nav-text"><strong>Activity log</strong><small>Audit trail of all actions</small></span>
+            </button>
+          </nav>
+          <div class="settings-panels">
+            <section id="settings-owner" class="settings-panel is-active" data-settings-panel="owner">
+              <h2>Ticket owner</h2>
+              <p class="muted">
+                The Azure support contact that tickets created from this dashboard are filed under.
+                Additional contact logistics (phone, country, time zone, CC list) live in the <strong>Tickets</strong> tab.
+              </p>
+              <div class="settings-owner-grid">
+                <label>First name <input type="text" id="owner-first" maxlength="60" autocomplete="off" /></label>
+                <label>Last name <input type="text" id="owner-last" maxlength="60" autocomplete="off" /></label>
+                <label>Email <input type="email" id="owner-email" maxlength="120" autocomplete="off" /></label>
+                <label>Default severity
+                  <select id="owner-sev">
+                    <option value="minimal">Minimal</option>
+                    <option value="moderate">Moderate</option>
+                    <option value="critical">Critical</option>
+                  </select>
+                </label>
+              </div>
+              <div class="support-form-actions">
+                <button type="button" class="btn btn--accent" id="owner-save">Save owner</button>
+                <span class="muted" id="owner-status"></span>
+              </div>
+            </section>
+            <section id="settings-datasets" class="settings-panel" data-settings-panel="datasets">
+              <h2>Model datasets</h2>
+              <p class="muted">
+                The reference data the analysis is built on — the region latency
+                matrix, region &amp; service catalogs, and the default region / SKU
+                seed lists. These stay current automatically: pull the region
+                catalog and SKU families live from your Azure subscription with
+                <strong>Refresh from Azure</strong>, or point a dataset at a file
+                URL (e.g. a GitHub raw link) and <strong>Refresh from URL</strong>.
+                Every refresh is validated, takes effect immediately, and never
+                overwrites the built-in copy — use <strong>Revert</strong> to
+                restore it. <strong>Download</strong> exports the current file.
+              </p>
+              <div id="datasets-list" class="datasets-list">
+                <p class="muted" id="datasets-loading">Loading datasets…</p>
+              </div>
+            </section>
+            <section id="settings-activity" class="settings-panel" data-settings-panel="activity">
+              <h2>Activity log</h2>
+              <p class="muted">
+                Audit trail of every Azure API call, quota request, BOM change, and user action. Use this to track all dashboard activity.
+              </p>
+              <div class="activity-controls">
+                <label class="activity-control">
+                  <span>Subscription</span>
+                  <select id="activity-filter-sub">
+                    <option value="">All</option>
+                  </select>
+                </label>
+                <label class="activity-control">
+                  <span>Event type</span>
+                  <select id="activity-filter-event">
+                    <option value="">All</option>
+                  </select>
+                </label>
+                <label class="activity-control">
+                  <span>Limit</span>
+                  <select id="activity-filter-limit">
+                    <option value="100">100</option>
+                    <option value="200" selected>200</option>
+                    <option value="500">500</option>
+                    <option value="1000">1000</option>
+                  </select>
+                </label>
+                <label class="activity-control">
+                  <span>Lookback</span>
+                  <select id="activity-filter-days">
+                    <option value="1">1 day</option>
+                    <option value="3">3 days</option>
+                    <option value="7" selected>7 days</option>
+                    <option value="30">30 days</option>
+                  </select>
+                </label>
+                <button type="button" id="activity-refresh" class="btn btn--primary">Refresh</button>
+                <button type="button" id="activity-clear" class="link-btn danger">Clear log</button>
+                <span class="muted" id="activity-status"></span>
+              </div>
+              <div class="activity-table-scroll">
+                <table class="activity-table" id="activity-table">
+                  <thead>
+                    <tr>
+                      <th>Time (UTC)</th>
+                      <th>Event</th>
+                      <th>Status</th>
+                      <th>API Scope</th>
+                      <th>Subscription</th>
+                      <th>Run</th>
+                      <th>Actor</th>
+                      <th>Duration</th>
+                      <th>Message</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </section>
           </div>
-          <table class="activity-table" id="activity-table">
-            <thead>
-              <tr>
-                <th>Time (UTC)</th>
-                <th>Event</th>
-                <th>Status</th>
-                <th>API Scope</th>
-                <th>Subscription</th>
-                <th>Run</th>
-                <th>Actor</th>
-                <th>Duration</th>
-                <th>Message</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </section>
+        </div>
       </div>
     </div>
   </main>
@@ -422,7 +497,7 @@
               <ul class="gs-tabs">
                 <li>
                   <strong>BOM Name</strong> — a short, memorable label
-                  (e.g. <code>Avaya-Prod</code>) that shows up in the
+                  (e.g. <code>Contoso-Prod</code>) that shows up in the
                   BOM list so it's easy to tell BOMs apart.
                 </li>
                 <li>
@@ -572,14 +647,59 @@
     <button class="close" id="bom-modal-close" aria-label="Close">&times;</button>
   </header>
   <div class="modal-body">
+    <div class="bom-wizard-nav" id="bom-wizard-nav">
+      <button type="button" class="bom-wizard-tab is-current" data-wstep="1"><span>1</span> Basics</button>
+      <button type="button" class="bom-wizard-tab" data-wstep="2"><span>2</span> Services &amp; Regions</button>
+      <button type="button" class="bom-wizard-tab" data-wstep="3"><span>3</span> SKUs &amp; Capacity</button>
+    </div>
+    <div class="bom-wizard-step is-current" data-wstep="1">
     <div class="run-step">
       <label for="bom-tag">BOM Name</label>
-      <input type="text" id="bom-tag" placeholder="Avaya-Prod, Contoso-Dev, …" autocomplete="off" maxlength="80" />
+      <input type="text" id="bom-tag" placeholder="Contoso-Prod, Contoso-Dev, …" autocomplete="off" maxlength="80" />
       <p class="muted">The name shown in the BOM list (preferred over customer name and subscription ID). Letters, digits, spaces and <code>-._/&amp;:()</code> allowed.</p>
     </div>
     <div class="run-step">
       <label for="bom-customer">Customer name</label>
-      <input type="text" id="bom-customer" placeholder="Avaya, Contoso Health, …" autocomplete="off" maxlength="80" />
+      <input type="text" id="bom-customer" placeholder="Contoso, Contoso Health, …" autocomplete="off" maxlength="80" />
+    </div>
+    <div class="run-step">
+      <label>Support contact for this BOM <span class="muted">(optional)</span></label>
+      <div class="bom-owner-grid">
+        <input type="text" id="bom-owner-first" placeholder="First name" autocomplete="off" maxlength="60" />
+        <input type="text" id="bom-owner-last" placeholder="Last name" autocomplete="off" maxlength="60" />
+        <input type="email" id="bom-owner-email" placeholder="owner@company.com" autocomplete="off" maxlength="120" />
+      </div>
+      <details class="bom-support-advanced">
+        <summary>Additional support details</summary>
+        <div class="settings-owner-grid bom-support-grid">
+          <label>Phone
+            <input type="text" id="bom-owner-phone" placeholder="+1 555 0100" autocomplete="off" maxlength="40" />
+          </label>
+          <label>Country
+            <input type="text" id="bom-owner-country" placeholder="US" autocomplete="off" maxlength="2" />
+          </label>
+          <label>Preferred time zone
+            <input type="text" id="bom-owner-tz" placeholder="Pacific Standard Time" autocomplete="off" maxlength="60" />
+          </label>
+          <label>Preferred contact method
+            <select id="bom-owner-method">
+              <option value="email">Email</option>
+              <option value="phone">Phone</option>
+            </select>
+          </label>
+          <label>Default severity
+            <select id="bom-owner-sev">
+              <option value="minimal">Minimal (Sev C)</option>
+              <option value="moderate">Moderate (Sev B)</option>
+              <option value="critical">Critical (Sev A)</option>
+            </select>
+          </label>
+          <label>Additional emails (CC)
+            <input type="text" id="bom-owner-cc" placeholder="a@x.com, b@y.com" autocomplete="off" maxlength="200" />
+          </label>
+        </div>
+      </details>
+      <p class="muted">Who Azure support tickets for <strong>this BOM</strong> are filed under. Fields default to your global support settings and can be overridden here per BOM. Timezone, phone, contact method, severity and additional contacts live under <strong>Additional support details</strong> — change the global defaults anytime under the <strong>Settings</strong> gear.</p>
     </div>
     <div class="run-step">
       <label for="bom-sub">Subscriptions</label>
@@ -588,6 +708,8 @@
       </select>
       <p class="muted">Select one or more subscriptions to include in the BOM analysis. Hold Ctrl/Cmd to multi-select.</p>
     </div>
+    </div>
+    <div class="bom-wizard-step" data-wstep="2">
     <div class="run-step">
       <label>Services</label>
       <div class="bom-services-toolbar">
@@ -642,6 +764,8 @@
       </details>
       <p class="muted">Regions chosen here scope the analysis run. Leave the default list checked to use all of Azure, or narrow it for a customer that only wants to deploy in specific regions.</p>
     </div>
+    </div>
+    <div class="bom-wizard-step" data-wstep="3">
     <div class="run-step">
       <label>Required SKUs &amp; cores</label>
       <table class="bom-skus-table">
@@ -663,7 +787,8 @@
       </div>
       <p class="muted">Pick a <strong>Family ID</strong> from the dropdown — the list is loaded live from Azure (<code>Microsoft.Compute/skus</code>) so the case-sensitive values (e.g. <code>standardDav6Family</code>, <code>standardDASv5Family</code>) are always exact. You can still type a value if it isn't listed. The dashboard auto-derives the short VM label (e.g. <code>Dav6</code>, <code>Dasv5</code>). Cores must be ≥ 0; required cores drive the <em>Quota Status</em> per region.</p>
     </div>
-    <div class="run-status" id="bom-status"></div>
+          </div>
+          <div class="run-status" id="bom-status"></div>
     <details>
       <summary>Import from xlsx</summary>
       <p class="muted">Prefill the form from a <code>bom_template.xlsx</code> or legacy <code>region_results_*.xlsx</code>. This does <strong>not</strong> save anything — review the prefilled fields, then click <strong>Save BOM</strong>.</p>
@@ -673,7 +798,11 @@
   </div>
   <footer>
     <button type="button" id="bom-cancel" class="btn">Cancel</button>
-    <button type="button" id="bom-save" class="btn btn--primary">Save</button>
+    <div class="bom-wizard-footer-nav">
+      <button type="button" id="bom-wizard-back" class="btn" hidden>← Back</button>
+      <button type="button" id="bom-wizard-next" class="btn btn--accent">Next →</button>
+      <button type="button" id="bom-save" class="btn btn--primary" hidden>Save</button>
+    </div>
   </footer>
 </div>
 
@@ -722,6 +851,6 @@
 
 <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
 
-<script src="app.js?v=2026062910"></script>
+<script src="app.js?v=2026082616"></script>
 </body>
 </html>
