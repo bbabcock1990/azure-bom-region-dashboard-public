@@ -880,6 +880,143 @@ def _quota_tight_message(label: str, required_cores: int, source: Optional[Dict]
     return None
 
 
+# Documentation deep-links surfaced with recommendations.
+_ODCR_DOC_URL = "https://learn.microsoft.com/azure/virtual-machines/capacity-reservation-overview"
+_ZONE_ACCESS_DOC_URL = (
+    "https://learn.microsoft.com/azure/virtual-machines/"
+    "zonal-enablement-request-for-restricted-vm-series"
+)
+_QUOTA_DOC_URL = (
+    "https://learn.microsoft.com/azure/quotas/quickstart-increase-quota-portal"
+)
+
+
+def _build_recommendations(
+    *,
+    blockers: List[Dict],
+    region: Dict,
+    region_display: str,
+    fallback_used: bool,
+    restricted_notes: List[str],
+    constrained_labels: List[str],
+    quota_required: bool,
+) -> List[Dict]:
+    """Map blocker/restriction signals to actionable mitigations.
+
+    The headline recommendation is On-Demand Capacity Reservation (ODCR) for
+    capacity-constrained or restricted regions, where reserving capacity in a
+    specific zone de-risks allocation failures. Other recommendations point the
+    operator at the correct support ticket (zonal access / quota increase),
+    the fallback SKU, or an alternate region.
+    """
+    types = {str(b.get("type") or "") for b in blockers}
+    has_zone_gap = "zone_gap" in types
+    has_sku_unavailable = "sku_unavailable" in types
+    has_quota = "quota_insufficient" in types
+    has_missing_service = "missing_service" in types
+    has_no_access = "no_access" in types
+    is_restricted = bool(restricted_notes)
+    capacity_constrained = has_zone_gap or has_sku_unavailable or is_restricted
+
+    labels = ", ".join(constrained_labels) if constrained_labels else "the required VM series"
+    recs: List[Dict] = []
+
+    # 1) On-Demand Capacity Reservation — the headline recommendation for
+    #    restricted / capacity-constrained regions.
+    if capacity_constrained and not (has_no_access and not is_restricted):
+        detail = (
+            f"{region_display} shows capacity pressure for {labels}. "
+            "Consider an On-Demand Capacity Reservation (ODCR) to guarantee "
+            "allocation for a specific VM size in a specific availability zone "
+            "before you deploy — this is most valuable in restricted or "
+            "high-demand regions where allocation can fail intermittently. "
+            "Note: an ODCR consumes vCPU quota for the reserved cores (raise "
+            "quota first if headroom is tight) and requires the SKU to be "
+            "offered to your subscription in that zone (request zonal access "
+            "first if the zone is restricted)."
+        )
+        recs.append({
+            "type": "odcr",
+            "title": "Reserve capacity with On-Demand Capacity Reservations",
+            "detail": detail,
+            "priority": "high" if (has_zone_gap or has_sku_unavailable) else "medium",
+            "doc_url": _ODCR_DOC_URL,
+        })
+
+    # 2) Zonal access ticket — restricted zones need whitelisting.
+    if has_zone_gap and is_restricted:
+        recs.append({
+            "type": "zonal_access",
+            "title": "Request zonal access for the restricted zone(s)",
+            "detail": (
+                "One or more zones are restricted for this VM series in "
+                f"{region_display}. File a zonal access (SKU restriction) "
+                "request from the Support tab to have the zones whitelisted "
+                "for your subscription."
+            ),
+            "priority": "high",
+            "doc_url": _ZONE_ACCESS_DOC_URL,
+            "ticket_kind": "technical",
+        })
+
+    # 3) Quota increase ticket.
+    if has_quota:
+        recs.append({
+            "type": "quota_increase",
+            "title": "Raise the vCPU quota for the required series",
+            "detail": (
+                "Requested cores exceed the current vCPU limit. Open a quota "
+                "increase from the Support tab — it pre-fills the exact "
+                "shortfall (needed minus current usage) as the new limit."
+            ),
+            "priority": "high",
+            "doc_url": _QUOTA_DOC_URL,
+            "ticket_kind": "quota",
+        })
+
+    # 4) Fallback SKU already covers the region.
+    if fallback_used:
+        recs.append({
+            "type": "fallback_sku",
+            "title": "Standardize on the fallback SKU here",
+            "detail": (
+                "The primary series is thin in this region but the fallback "
+                "series covers all zones. Plan to deploy the fallback SKU in "
+                f"{region_display} (keep the primary where it is fully "
+                "available) to avoid allocation gaps."
+            ),
+            "priority": "medium",
+        })
+
+    # 5) Alternate region when capacity/service can't be secured here.
+    if has_missing_service or (has_sku_unavailable and not fallback_used):
+        recs.append({
+            "type": "alt_region",
+            "title": "Evaluate an alternate region",
+            "detail": (
+                "If capacity or a required service can't be secured in "
+                f"{region_display}, compare the nearest BOM-approved region "
+                "with a Ready verdict as a deployment target or overflow."
+            ),
+            "priority": "medium",
+        })
+
+    # 6) Access / permissions so automated validation can run.
+    if has_no_access:
+        recs.append({
+            "type": "grant_access",
+            "title": "Grant Reader so ARM checks can validate this region",
+            "detail": (
+                "Automated SKU/quota validation could not run for the target "
+                "subscription. Grant at least Reader on the subscription (or "
+                "validate the region manually) to get an authoritative verdict."
+            ),
+            "priority": "high",
+        })
+
+    return recs
+
+
 def _compute_deployment_verdict(
     region: Dict,
     *,
@@ -960,6 +1097,8 @@ def _compute_deployment_verdict(
 
     sku_ready = True
     fallback_used = False
+    restricted_notes: List[str] = []
+    constrained_labels: List[str] = []
     for req in required_families:
         primary_family = str(req.get("primary_family") or "").strip()
         if not primary_family:
@@ -979,6 +1118,9 @@ def _compute_deployment_verdict(
             per_sub_results=per_sub_results,
         ) if alt_family else {"zones": None, "any_access": primary["any_access"], "found": False, "notes": []}
 
+        for note in list(primary.get("notes") or []) + list(alt.get("notes") or []):
+            _append_unique_message(restricted_notes, str(note))
+
         primary_zones = primary.get("zones")
         alt_zones = alt.get("zones")
         primary_all = bool(primary_zones) and all(primary_zones)
@@ -986,6 +1128,7 @@ def _compute_deployment_verdict(
 
         if primary_all:
             continue
+        _append_unique_message(constrained_labels, primary_label)
         if alt_all and alt_label:
             fallback_used = True
             if primary_zones:
@@ -1124,11 +1267,25 @@ def _compute_deployment_verdict(
         pass  # constraints list speaks for itself
     # For negative verdicts, don't add summary reasons — blockers explain why
 
+    region_display = str(
+        region.get("display") or region.get("name") or region_short or "This region"
+    ).strip()
+    recommendations = _build_recommendations(
+        blockers=blockers,
+        region=region,
+        region_display=region_display,
+        fallback_used=fallback_used,
+        restricted_notes=restricted_notes,
+        constrained_labels=constrained_labels,
+        quota_required=quota_required,
+    )
+
     return {
         "verdict": verdict,
         "reasons": reasons,
         "blockers": blockers,
         "constraints": constraints,
+        "recommendations": recommendations,
     }
 
 

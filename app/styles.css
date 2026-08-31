@@ -2542,6 +2542,67 @@ html.filters-collapsed-init .filters-body { display: none; }
 #drilldown .dd-blocker-group.is-critical .dd-readiness-subtitle { color: #f4b3b3; }
 #drilldown .dd-blocker-group.is-warning .dd-readiness-subtitle { color: #f4d4a3; }
 
+/* Recommendations — actionable mitigations (ODCR, tickets, fallback, etc.) */
+#drilldown .dd-recs-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+#drilldown .dd-rec {
+  border: 1px solid var(--panel-border, rgba(255,255,255,0.12));
+  border-left-width: 3px;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: rgba(255,255,255,0.03);
+}
+#drilldown .dd-rec.is-high { border-left-color: #4fd18b; }
+#drilldown .dd-rec.is-medium { border-left-color: #f0c24a; }
+#drilldown .dd-rec.is-low { border-left-color: var(--panel-text-muted, #9aa4b2); }
+#drilldown .dd-rec-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+#drilldown .dd-rec-prio {
+  flex: none;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  padding: 2px 7px;
+  border-radius: 999px;
+  color: #0b1a12;
+}
+#drilldown .dd-rec.is-high .dd-rec-prio { background: #4fd18b; }
+#drilldown .dd-rec.is-medium .dd-rec-prio { background: #f0c24a; }
+#drilldown .dd-rec.is-low .dd-rec-prio { background: #9aa4b2; }
+#drilldown .dd-rec-title {
+  font-weight: 700;
+  color: var(--panel-text-strong);
+}
+#drilldown .dd-rec-detail {
+  color: var(--panel-text);
+  font-size: .88rem;
+  line-height: 1.4;
+}
+#drilldown .dd-rec-links {
+  margin-top: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+#drilldown .dd-rec-link {
+  color: #6fb2ff;
+  font-size: .85rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+#drilldown .dd-rec-link:hover { text-decoration: underline; }
+
 /* The drilldown's nested quota table sits on a dark panel, so its pills
    need the dark color palette instead. */
 #drilldown .dd-quota-table .pill.pill-ok    { background: #103a25; color: #b6e8c7; }

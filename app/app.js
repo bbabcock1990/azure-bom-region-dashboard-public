@@ -1037,6 +1037,18 @@ function openDrilldown(r) {
     body.addEventListener("click", _handleQuotaRequestInteraction);
     body._quotaRequestBound = true;
   }
+  if (!body._recTicketBound) {
+    body.addEventListener("click", (ev) => {
+      const link = ev.target.closest("[data-rec-ticket]");
+      if (!link) return;
+      ev.preventDefault();
+      const kind = link.getAttribute("data-rec-ticket");
+      const regionShort = STATE.activeDrilldownRegion || "";
+      closeDrilldown();
+      _supportPrefill(kind, regionShort);
+    });
+    body._recTicketBound = true;
+  }
   document.getElementById("drilldown").classList.remove("hidden");
   document.getElementById("drilldown-overlay").classList.add("open");
 }
@@ -1162,6 +1174,48 @@ function renderDeploymentReadinessSection(region, deployment) {
   // Show constraints for ready_with_constraints
   if (constraints.length) {
     html += `<div class="dd-readiness-subtitle">⚙️ Constraints</div>${renderList(constraints)}`;
+  }
+
+  // Recommendations — actionable mitigations (ODCR, tickets, fallback, etc.)
+  const recommendations = Array.isArray(region && region.deployment_verdict && region.deployment_verdict.recommendations)
+    ? region.deployment_verdict.recommendations
+    : [];
+  if (recommendations.length) {
+    const prioRank = { high: 0, medium: 1, low: 2 };
+    const prioMeta = {
+      high: { cls: "is-high", label: "High" },
+      medium: { cls: "is-medium", label: "Medium" },
+      low: { cls: "is-low", label: "Low" },
+    };
+    const sorted = recommendations.slice().sort(
+      (a, b) => (prioRank[a && a.priority] ?? 1) - (prioRank[b && b.priority] ?? 1)
+    );
+    html += `<div class="dd-readiness-subtitle">💡 Recommendations</div>`;
+    html += `<ul class="dd-recs-list">`;
+    for (const rec of sorted) {
+      if (!rec) continue;
+      const prio = prioMeta[rec.priority] || prioMeta.medium;
+      const links = [];
+      if (rec.ticket_kind === "quota" || rec.ticket_kind === "technical") {
+        links.push(
+          `<a href="#" class="dd-rec-link" data-rec-ticket="${escapeHtml(rec.ticket_kind)}">Open a ticket →</a>`
+        );
+      }
+      if (rec.doc_url) {
+        links.push(
+          `<a href="${escapeHtml(rec.doc_url)}" target="_blank" rel="noopener noreferrer" class="dd-rec-link">Learn more →</a>`
+        );
+      }
+      html += `<li class="dd-rec ${prio.cls}">
+        <div class="dd-rec-head">
+          <span class="dd-rec-prio">${escapeHtml(prio.label)}</span>
+          <span class="dd-rec-title">${escapeHtml(rec.title || "")}</span>
+        </div>
+        <div class="dd-rec-detail">${escapeHtml(rec.detail || "")}</div>
+        ${links.length ? `<div class="dd-rec-links">${links.join("")}</div>` : ""}
+      </li>`;
+    }
+    html += `</ul>`;
   }
 
   // Only show positive reasons for "ready" verdict
