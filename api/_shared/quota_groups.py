@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import httpx
 
@@ -15,6 +16,12 @@ log = logging.getLogger(__name__)
 
 ARM_BASE = "https://management.azure.com"
 API_VERSION = "2023-06-01-preview"
+# Group Quotas live at management-group scope. groupQuotaLimits/{location}
+# returns per-family limit + availableLimit (allocatable headroom).
+GROUP_QUOTA_API_VERSION = "2025-09-01"
+MGMT_GROUP_API_VERSION = "2020-05-01"
+GROUP_QUOTA_RP = "Microsoft.Compute"
+MAX_MGMT_GROUPS_SCANNED = 25
 COMPUTE_USAGES_API_VERSION = "2023-03-01"
 DEFAULT_TIMEOUT_S = 20.0
 MAX_PARALLEL_REGIONS = 8
@@ -287,6 +294,263 @@ def _parse_subscription_usages(
     }
 
 
+def _discovery_enabled() -> bool:
+    """Management-group scanning is heavy and usually 403s for subscription-scoped
+    tokens, so it's opt-in. Explicit AZURE_QUOTA_MGMT_GROUP_ID/NAME always work."""
+    return str(os.getenv("AZURE_QUOTA_GROUP_DISCOVERY") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_group_quota_targets() -> List[Tuple[str, str]]:
+    """Explicit (managementGroupId, groupQuotaName) pairs from configuration.
+
+    Discovery of a subscription's quota group requires management-group reads
+    that a subscription-scoped token may not have. Operators can short-circuit
+    discovery by setting AZURE_QUOTA_MGMT_GROUP_ID and AZURE_QUOTA_GROUP_NAME
+    (comma-separated, positionally paired) so real group limits are used.
+    """
+    mgs = [s.strip() for s in str(os.getenv("AZURE_QUOTA_MGMT_GROUP_ID") or "").split(",") if s.strip()]
+    groups = [s.strip() for s in str(os.getenv("AZURE_QUOTA_GROUP_NAME") or "").split(",") if s.strip()]
+    if not mgs or not groups:
+        return []
+    if len(groups) == 1 and len(mgs) > 1:
+        groups = groups * len(mgs)
+    if len(mgs) == 1 and len(groups) > 1:
+        mgs = mgs * len(groups)
+    return list(zip(mgs, groups))
+
+
+def _parse_group_quota_limits(payload, want_families: set) -> Dict[str, Dict]:
+    """Parse a groupQuotaLimits/{location} response into per-family rows.
+
+    Returns ``{family_lower: {family, limit, available, allocated, usage}}`` where
+    ``usage = limit - available`` so downstream headroom math (limit - usage)
+    yields the group's allocatable ``availableLimit``.
+    """
+    out: Dict[str, Dict] = {}
+    if not isinstance(payload, dict):
+        return out
+    props = payload.get("properties") if isinstance(payload.get("properties"), dict) else payload
+    values = props.get("value") if isinstance(props, dict) else None
+    if not isinstance(values, list):
+        return out
+    for entry in values:
+        if not isinstance(entry, dict):
+            continue
+        ep = entry.get("properties") if isinstance(entry.get("properties"), dict) else entry
+        if not isinstance(ep, dict):
+            continue
+        name = ep.get("name")
+        family = None
+        if isinstance(name, dict):
+            family = name.get("value") or name.get("localizedValue")
+        family = family or ep.get("resourceName") or ep.get("family")
+        family = _norm_family(family)
+        if not family:
+            continue
+        if want_families and family not in want_families:
+            continue
+        limit = _clean_num(ep.get("limit"))
+        available = _clean_num(ep.get("availableLimit"))
+        allocated = None
+        if limit is not None and available is not None:
+            allocated = limit - available
+        else:
+            # Fall back to summing per-subscription allocations if present.
+            alloc_block = ep.get("allocatedToSubscriptions")
+            alloc_values = alloc_block.get("value") if isinstance(alloc_block, dict) else None
+            if isinstance(alloc_values, list):
+                total = 0.0
+                seen = False
+                for a in alloc_values:
+                    if isinstance(a, dict):
+                        q = _num(a.get("quotaAllocated"))
+                        if q is not None:
+                            total += q
+                            seen = True
+                if seen:
+                    allocated = int(total) if float(total).is_integer() else total
+        usage = allocated
+        if usage is None and limit is not None and available is not None:
+            usage = limit - available
+        out[family] = {
+            "family": ep.get("resourceName") or family,
+            "limit": limit,
+            "available": available,
+            "allocated": allocated,
+            "usage": usage,
+        }
+    return out
+
+
+def _get_group_quota_limits(
+    client: httpx.Client,
+    *,
+    management_group_id: str,
+    group_quota_name: str,
+    region: str,
+    headers: Dict[str, str],
+) -> Dict:
+    """GET groupQuotaLimits for one (group, region); parse per-family limits."""
+    url = (
+        f"{ARM_BASE}/providers/Microsoft.Management/managementGroups/"
+        f"{management_group_id}/providers/Microsoft.Quota/groupQuotas/"
+        f"{group_quota_name}/resourceProviders/{GROUP_QUOTA_RP}/"
+        f"groupQuotaLimits/{region}"
+    )
+    params = {"api-version": GROUP_QUOTA_API_VERSION}
+    collected: Dict[str, Dict] = {}
+    want_all: set = set()
+    while True:
+        resp = _get_with_retries(client, url, params=params, headers=headers)
+        if resp.status_code in (401, 403):
+            return {"status": "no_access", "families": {}}
+        if resp.status_code == 404:
+            return {"status": "no_quota_group", "families": {}}
+        if resp.status_code >= 400:
+            return {"status": "error", "families": {}, "error": f"HTTP {resp.status_code}"}
+        try:
+            payload = resp.json()
+        except Exception as ex:
+            return {"status": "error", "families": {}, "error": f"bad JSON: {ex!r}"}
+        collected.update(_parse_group_quota_limits(payload, want_all))
+        props = payload.get("properties") if isinstance(payload, dict) else None
+        next_link = props.get("nextLink") if isinstance(props, dict) else None
+        if not next_link:
+            break
+        url = next_link
+        params = None
+    return {"status": "ok", "families": collected}
+
+
+def _discover_group_quota_targets(
+    client: httpx.Client,
+    *,
+    subscription_id: str,
+    headers: Dict[str, str],
+) -> List[Tuple[str, str]]:
+    """Best-effort: find (managementGroupId, groupQuotaName) pairs the given
+    subscription belongs to. Requires management-group + Microsoft.Quota reads;
+    returns [] on any missing permission (non-fatal)."""
+    targets: List[Tuple[str, str]] = []
+    # 1) Enumerate management groups the token can see.
+    mg_url = f"{ARM_BASE}/providers/Microsoft.Management/managementGroups"
+    try:
+        resp = _get_with_retries(
+            client, mg_url, params={"api-version": MGMT_GROUP_API_VERSION}, headers=headers
+        )
+    except Exception:
+        return targets
+    if resp.status_code >= 400:
+        return targets
+    try:
+        mgs = [m.get("name") for m in (resp.json().get("value") or []) if isinstance(m, dict) and m.get("name")]
+    except Exception:
+        return targets
+    sub_lower = str(subscription_id or "").lower()
+    for mg in mgs[:MAX_MGMT_GROUPS_SCANNED]:
+        # 2) List group quotas under this management group.
+        gq_url = (
+            f"{ARM_BASE}/providers/Microsoft.Management/managementGroups/{mg}"
+            f"/providers/Microsoft.Quota/groupQuotas"
+        )
+        try:
+            gq_resp = _get_with_retries(
+                client, gq_url, params={"api-version": GROUP_QUOTA_API_VERSION}, headers=headers
+            )
+        except Exception:
+            continue
+        if gq_resp.status_code >= 400:
+            continue
+        try:
+            groups = [g for g in (gq_resp.json().get("value") or []) if isinstance(g, dict)]
+        except Exception:
+            continue
+        for g in groups:
+            gname = g.get("name") or (g.get("properties") or {}).get("displayName")
+            if not gname:
+                continue
+            # 3) Confirm the subscription is a member of this group quota.
+            if _subscription_in_group(client, mg, gname, sub_lower, headers):
+                targets.append((mg, gname))
+    return targets
+
+
+def _subscription_in_group(
+    client: httpx.Client,
+    management_group_id: str,
+    group_quota_name: str,
+    subscription_id_lower: str,
+    headers: Dict[str, str],
+) -> bool:
+    url = (
+        f"{ARM_BASE}/providers/Microsoft.Management/managementGroups/"
+        f"{management_group_id}/providers/Microsoft.Quota/groupQuotas/"
+        f"{group_quota_name}/subscriptions"
+    )
+    try:
+        resp = _get_with_retries(
+            client, url, params={"api-version": GROUP_QUOTA_API_VERSION}, headers=headers
+        )
+    except Exception:
+        return False
+    if resp.status_code >= 400:
+        return False
+    try:
+        members = resp.json().get("value") or []
+    except Exception:
+        return False
+    for m in members:
+        if not isinstance(m, dict):
+            continue
+        candidate = (
+            m.get("name")
+            or (m.get("properties") or {}).get("subscriptionId")
+            or str(m.get("id") or "").rstrip("/").split("/")[-1]
+        )
+        if str(candidate or "").lower() == subscription_id_lower:
+            return True
+    return False
+
+
+def _group_quotas_via_limits(
+    client: httpx.Client,
+    *,
+    subscription_id: str,
+    targets: List[Tuple[str, str]],
+    want_regions: set,
+    want_families: set,
+    headers: Dict[str, str],
+) -> List[Dict]:
+    """Build the ``groups`` list from real groupQuotaLimits for each target."""
+    parsed_groups: List[Dict] = []
+    for mg, group in targets:
+        for region in sorted(want_regions):
+            limits = _get_group_quota_limits(
+                client, management_group_id=mg, group_quota_name=group,
+                region=region, headers=headers,
+            )
+            if limits.get("status") != "ok":
+                continue
+            fam_rows: List[Dict] = []
+            for fam_lower, info in (limits.get("families") or {}).items():
+                if want_families and fam_lower not in want_families:
+                    continue
+                fam_rows.append({
+                    "family": info.get("family") or fam_lower,
+                    "limit": info.get("limit"),
+                    "usage": info.get("usage"),
+                    "available": info.get("available"),
+                })
+            if fam_rows:
+                parsed_groups.append({
+                    "name": group,
+                    "management_group_id": mg,
+                    "region": region,
+                    "families": fam_rows,
+                })
+    return parsed_groups
+
+
 def check_quota_groups(
     arm_token,
     subscription_id: str,
@@ -294,10 +558,20 @@ def check_quota_groups(
     families: Iterable[str],
     *,
     timeout_s: float = DEFAULT_TIMEOUT_S,
+    management_group_targets: Optional[List[Tuple[str, str]]] = None,
 ) -> Dict:
     """Return best-effort quota group information for a subscription.
 
-    404 means the subscription simply has no quota groups. 401/403 are treated
+    Group quotas are management-group scoped: the real per-family limits live in
+    the ``groupQuotaLimits/{location}`` sub-resource. We resolve the
+    subscription's (managementGroup, groupQuota) targets from configuration
+    (AZURE_QUOTA_MGMT_GROUP_ID / AZURE_QUOTA_GROUP_NAME) or best-effort
+    discovery, fetch real limits, and expose the group's allocatable headroom
+    (``availableLimit``) so BOM tier-2 logic can cover a shortfall from the
+    group. If no real targets resolve, we fall back to the legacy
+    subscription-scoped attempt.
+
+    404/empty means the subscription has no quota groups. 401/403 are treated
     as non-fatal "no access" results.
     """
     clean = _strip_bearer(arm_token)
@@ -322,6 +596,41 @@ def check_quota_groups(
         "accept": "application/json",
         "user-agent": "azure-bom-region-dashboard/1.0",
     }
+    # ── Real group limits via management-group scope (config or discovery) ──
+    targets = list(management_group_targets or []) or _env_group_quota_targets()
+    if want_regions:
+        try:
+            with httpx.Client(timeout=timeout_s, http2=False) as _client:
+                if not targets:
+                    if _discovery_enabled():
+                        try:
+                            targets = _discover_group_quota_targets(
+                                _client, subscription_id=subscription_id, headers=headers
+                            )
+                        except Exception as ex:
+                            log.debug("quota group discovery failed: %r", ex)
+                            targets = []
+                if targets:
+                    parsed_real = _group_quotas_via_limits(
+                        _client,
+                        subscription_id=subscription_id,
+                        targets=targets,
+                        want_regions=want_regions,
+                        want_families=want_families,
+                        headers=headers,
+                    )
+                    if parsed_real:
+                        result["has_quota_groups"] = True
+                        result["groups"] = parsed_real
+                        result["status"] = "ok"
+                        result["targets"] = [
+                            {"management_group_id": mg, "group": g} for mg, g in targets
+                        ]
+                        return result
+        except Exception as ex:
+            log.debug("group quota limits path failed: %r", ex)
+
+    # ── Legacy subscription-scoped fallback (metadata only) ─────────────────
     try:
         with httpx.Client(timeout=timeout_s, http2=False) as client:
             resp = client.get(url, headers=headers)
