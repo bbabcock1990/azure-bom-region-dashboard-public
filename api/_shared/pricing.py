@@ -99,15 +99,21 @@ def anchor_size_for(family: str, vcpus: int) -> Optional[str]:
 _EQUIVALENCE_GROUPS: Tuple[Tuple[str, ...], ...] = (
     # General purpose — 4 GiB / vCPU (D-series).
     (
-        "Dsv3", "Dsv4", "Dsv5", "Ddsv4", "Ddsv5",
-        "Dasv4", "Dasv5", "Dasv6", "Dadsv5", "Dadsv6",
-        "Dpsv5", "Dpsv6", "Dpdsv5", "Dpdsv6",
+        "Dsv3", "Dsv4", "Dsv5", "Dsv6", "Dsv7",
+        "Ddsv4", "Ddsv5", "Ddsv6",
+        "Dasv4", "Dasv5", "Dasv6", "Dasv7",
+        "Dadsv5", "Dadsv6",
+        "Dpsv5", "Dpsv6", "Dpsv7",
+        "Dpdsv5", "Dpdsv6",
     ),
     # Memory optimized — 8 GiB / vCPU (E-series).
     (
-        "Esv3", "Esv4", "Esv5", "Edsv4", "Edsv5",
-        "Easv4", "Easv5", "Easv6", "Eadsv5", "Eadsv6",
-        "Epsv5", "Epsv6", "Epdsv5", "Epdsv6",
+        "Esv3", "Esv4", "Esv5", "Esv6", "Esv7",
+        "Edsv4", "Edsv5", "Edsv6",
+        "Easv4", "Easv5", "Easv6", "Easv7",
+        "Eadsv5", "Eadsv6",
+        "Epsv5", "Epsv6", "Epsv7",
+        "Epdsv5", "Epdsv6",
     ),
     # Compute optimized — 2 GiB / vCPU (F-series).
     (

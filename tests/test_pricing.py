@@ -255,6 +255,14 @@ def test_equivalents_handles_canonical_family_id():
     assert "dasv6" in eqs
 
 
+def test_equivalents_newer_generation_family():
+    # Newest Intel gens (Dsv7/Esv7) must still map to cheaper AMD/ARM peers.
+    dq = {e.lower() for e in pricing_mod.equivalents("Dsv7")}
+    assert "dasv6" in dq and "dpsv6" in dq
+    eq = {e.lower() for e in pricing_mod.equivalents("Esv7")}
+    assert "easv6" in eq and "epsv6" in eq
+
+
 def test_equivalents_unknown_series_empty():
     assert pricing_mod.equivalents("NCadsA100v4") == []
     assert pricing_mod.equivalents("") == []
