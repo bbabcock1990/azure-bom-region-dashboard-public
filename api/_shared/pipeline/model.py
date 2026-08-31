@@ -152,6 +152,36 @@ def extract_missing_services(rec: Dict, header: List[str]) -> List[Dict[str, str
     return out
 
 
+def extract_registration_required(rec: Dict, header: List[str]) -> List[Dict[str, str]]:
+    """Return [{service, detail, provider}] for any ⚠️ registration-required
+    service in this record.
+
+    These are BOM services whose Azure resource provider is not registered on
+    the subscription. Availability is unknown until the provider is registered,
+    so they are surfaced as an amber warning (with a one-click / CLI register
+    hand-off) rather than a red "not available" that fails the BOM.
+    The provider namespace is parsed from the trailing ``(Microsoft.X)``.
+    """
+    out = []
+    for key in header[3:]:
+        if not key:
+            continue
+        val = rec.get(key)
+        if val is None:
+            continue
+        v = str(val)
+        if v.startswith("\u26a0") or "requires provider registration" in v.lower():
+            short = re.sub(r"^[\u26a0\ufe0f]+\s*", "", v).strip()
+            m = re.search(r"\(([A-Za-z0-9.]+)\)", short)
+            provider = m.group(1) if m else ""
+            out.append({
+                "service": str(key),
+                "detail": short,
+                "provider": provider,
+            })
+    return out
+
+
 # ---- Per-region SKU analysis ------------------------------------------------
 
 def _zone_state(zones: Optional[List[bool]]) -> str:
@@ -541,6 +571,7 @@ def build_model(raw: Dict,
         zone_constraint_blocks = [not z for z in zone_ok]
 
         missing_services = extract_missing_services(rec, bom_header)
+        registration_required = extract_registration_required(rec, bom_header)
 
         is_supported = "SUPPORTED" in overall_status and "UNSUPPORTED" not in overall_status
         # Any ❌ service in the BOM is a deal-breaker even if Overall Status
@@ -585,6 +616,7 @@ def build_model(raw: Dict,
             "sku_blockers": sku_blockers,
             "sku_fallbacks": sku_fallbacks,
             "missing_services": missing_services,
+            "registration_required": registration_required,
             # Generic primary/fallback flags (tier-agnostic — work for v6/v5,
             # v5/v4, or any other primary+alt pair the user puts in their BOM).
             "primary_used": primary_viable,

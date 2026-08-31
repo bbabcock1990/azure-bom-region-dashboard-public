@@ -909,6 +909,16 @@ def _compute_deployment_verdict(
     else:
         _append_unique_message(reasons, "All required services available")
 
+    registration_required = list(region.get("registration_required") or [])
+    for item in registration_required:
+        service = str(item.get("service") or "Required service").strip()
+        provider = str(item.get("provider") or "").strip()
+        prov_note = f" — register {provider}" if provider else ""
+        _append_unique_message(
+            constraints,
+            f"{service} requires resource-provider registration{prov_note}",
+        )
+
     target_sub_id = (
         snapshot_meta.get("target_subscription_id")
         or snapshot_meta.get("subscription_id")

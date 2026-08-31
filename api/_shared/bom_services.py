@@ -578,12 +578,24 @@ def check_services_availability(
                 )
                 if matched:
                     services_result[svc_name] = {"available": True, "detail": ""}
+                elif absent:
+                    # Provider namespace is not registered on this
+                    # subscription. ARM won't report a regional footprint
+                    # until the provider is registered, so availability is
+                    # UNKNOWN — not a "no regions" verdict. Treat as an amber
+                    # "registration required" warning that does NOT fail the
+                    # BOM; the user can register the provider and re-run.
+                    services_result[svc_name] = {
+                        "available": False,
+                        "status": "registration_required",
+                        "provider": svc["provider"],
+                        "detail": (
+                            "requires provider registration "
+                            f"({svc['provider']})"
+                        ),
+                    }
                 else:
-                    if absent:
-                        # Provider namespace unknown to this subscription — a
-                        # tenant/registration gap, not a per-region verdict.
-                        detail = "not available (provider not registered in this subscription)"
-                    elif not available_locs:
+                    if not available_locs:
                         detail = "not available in any region"
                     else:
                         detail = f"not available in {display}"
@@ -641,6 +653,15 @@ def synthesize_bom_records(
             detail = svc_result.get("detail") or ""
             if available is True:
                 rec[name] = f"✅ {detail}" if detail else "✅ Available"
+            elif svc_result.get("status") == "registration_required":
+                # ⚠️ marker — deliberately NOT "❌" and NOT containing "not
+                # available", so extract_missing_services() ignores it and it
+                # does not fail the region. extract_registration_required()
+                # picks it up for the amber warning + one-click register.
+                rec[name] = (
+                    f"⚠️ {detail}" if detail
+                    else "⚠️ requires provider registration"
+                )
             else:
                 rec[name] = f"❌ {detail}" if detail else "❌ Not available"
         records.append(rec)

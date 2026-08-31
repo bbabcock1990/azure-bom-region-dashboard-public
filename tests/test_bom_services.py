@@ -259,8 +259,8 @@ def test_check_services_availability_marks_missing_regions_fail():
 
 def test_check_services_availability_absent_provider_labeled_distinctly():
     """A provider ARM doesn't recognize (404) is labelled as a
-    subscription/registration gap, distinct from a per-region miss, in every
-    region."""
+    registration-required warning, distinct from a per-region miss, and does
+    NOT fail the region (availability is unknown until registered)."""
     svc = [{"name": "Azure Container Storage",
             "provider": "Microsoft.ContainerStorage",
             "resource_type": "pools", "zone_check": False}]
@@ -279,7 +279,11 @@ def test_check_services_availability_absent_provider_labeled_distinctly():
     for r in out:
         sr = r["services"]["Azure Container Storage"]
         assert sr["available"] is False
-        assert "not registered in this subscription" in sr["detail"]
+        assert sr["status"] == "registration_required"
+        assert sr["provider"] == "Microsoft.ContainerStorage"
+        assert "requires provider registration" in sr["detail"]
+        # Amber warning — the region is NOT failed by an unregistered provider.
+        assert r["overall"] == "PASS"
 
 
 def test_check_services_availability_ssdv2_needs_three_zones():
@@ -438,6 +442,41 @@ def test_synthesized_records_with_services_flag_only_failing_ones():
     missing_names = [m["service"] if isinstance(m, dict) else m for m in missing]
     assert "Azure Firewall" in missing_names
     assert "Azure Automation" not in missing_names
+
+
+def test_registration_required_service_is_warning_not_missing():
+    """A registration-required (⚠️) service must NOT be reported as a missing
+    service, but MUST be surfaced by extract_registration_required with its
+    provider namespace — so the UI shows an amber 'register' warning that does
+    not fail the BOM."""
+    svc = [{"name": "Azure Container Storage"}, {"name": "Azure Automation"}]
+    results = [{
+        "region": "eastus", "display_name": "East US", "overall": "PASS",
+        "services": {
+            "Azure Container Storage": {
+                "available": False,
+                "status": "registration_required",
+                "provider": "Microsoft.ContainerStorage",
+                "detail": "requires provider registration (Microsoft.ContainerStorage)",
+            },
+            "Azure Automation": {"available": True, "detail": ""},
+        },
+    }]
+    header, records = bom_services.synthesize_bom_records(svc, results)
+    # Cell is an amber warning, not a ❌.
+    assert records[0]["Azure Container Storage"].startswith("\u26a0")
+    # Region stays SUPPORTED — an unregistered provider does not fail the BOM.
+    assert "UNSUPPORTED" not in records[0]["Overall Status"]
+
+    missing = pipeline_model.extract_missing_services(records[0], header)
+    missing_names = [m["service"] if isinstance(m, dict) else m for m in missing]
+    assert "Azure Container Storage" not in missing_names
+
+    reg = pipeline_model.extract_registration_required(records[0], header)
+    reg_by_name = {r["service"]: r for r in reg}
+    assert "Azure Container Storage" in reg_by_name
+    assert reg_by_name["Azure Container Storage"]["provider"] == "Microsoft.ContainerStorage"
+    assert "Azure Automation" not in reg_by_name
 
 
 # ─── build_region_specs ── display-name cascade ──────────────

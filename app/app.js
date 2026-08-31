@@ -1003,6 +1003,11 @@ function openDrilldown(r) {
     }
   }
 
+  if (r.registration_required && r.registration_required.length) {
+    html += `<h4>Registration Required</h4>`;
+    html += _registrationRequiredHtml(r.registration_required);
+  }
+
   if (r.alt_regions && r.alt_regions.length) {
     html += `<h4>Alternative Regions</h4>`;
     for (const a of r.alt_regions) {
@@ -2403,6 +2408,94 @@ function _renderQuotaActionCell(row) {
   return `${_renderQuotaRequestAction(row)}${_quotaTicketEscalationHtml(row)}`;
 }
 
+function _registrationRequiredHtml(list, opts = {}) {
+  // Dedupe by provider namespace — one register action per provider.
+  const byProvider = new Map();
+  for (const item of list) {
+    const prov = item.provider || "";
+    if (!byProvider.has(prov)) byProvider.set(prov, []);
+    byProvider.get(prov).push(item.service);
+  }
+  let html = "";
+  for (const [prov, services] of byProvider.entries()) {
+    const svcList = services.map(escapeHtml).join(", ");
+    const provLabel = prov ? escapeHtml(prov) : "provider";
+    const btn = prov
+      ? `<button class="btn-register-provider" data-register-provider="${escapeHtml(prov)}" ` +
+        `style="margin-top:6px;font-size:11px;padding:3px 10px;border:1px solid #f4a726;` +
+        `background:rgba(244,167,38,0.15);color:#f4a726;border-radius:4px;cursor:pointer">` +
+        `Register ${provLabel}</button>`
+      : "";
+    html +=
+      `<div style="font-size:12px;padding:6px 8px;margin:3px 0;background:rgba(244,167,38,0.10);` +
+      `border-left:3px solid #f4a726;color:#f4a726;border-radius:4px">` +
+      `<div><strong>${svcList}</strong></div>` +
+      `<div style="font-size:11px;opacity:0.9;margin-top:2px">Provider <code>${provLabel}</code> ` +
+      `isn't registered on this subscription, so availability is unknown. ` +
+      `Registering is free and self-service — after it shows Registered, re-run the analysis.</div>` +
+      btn +
+      `</div>`;
+  }
+  return html;
+}
+
+async function registerBomProvider(provider, btnEl) {
+  if (!provider) return;
+  const subscriptionId = focusedSubscriptionId() || "";
+  const cli = `az provider register --namespace ${provider}` +
+    (subscriptionId ? ` --subscription ${subscriptionId}` : "");
+  if (!subscriptionId) {
+    showToast("No subscription selected to register the provider against.", "error");
+    return;
+  }
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = "Registering…"; }
+  try {
+    await apiJson("/api/providers/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subscription_id: subscriptionId, provider }),
+    });
+    showToast(
+      `✓ Registering ${provider}. This can take a few minutes — re-run analysis once it shows Registered.`,
+      "success",
+    );
+    if (btnEl) { btnEl.textContent = "Registration started ✓"; }
+  } catch (err) {
+    const cliCmd = (err && err.body && err.body.cli_command) || cli;
+    const forbidden = err && (err.status === 403 || (err.body && err.body.error === "forbidden"));
+    const reason = forbidden
+      ? "You don't have permission to register providers on this subscription."
+      : ((err && err.message) || String(err));
+    let copied = false;
+    try { await navigator.clipboard.writeText(cliCmd); copied = true; } catch (_) {}
+    showToast(
+      `✗ Couldn't auto-register ${provider}: ${reason} ` +
+      (copied ? "Register command copied to clipboard." : `Run: ${cliCmd}`),
+      "error",
+    );
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.textContent = "Copy register command";
+      btnEl.dataset.cliFallback = cliCmd;
+    }
+  }
+}
+
+function _handleRegisterProviderInteraction(ev) {
+  const btn = ev.target.closest("[data-register-provider]");
+  if (!btn) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  if (btn.dataset.cliFallback) {
+    navigator.clipboard.writeText(btn.dataset.cliFallback).then(
+      () => showToast("Register command copied to clipboard.", "info"),
+      () => showToast(btn.dataset.cliFallback, "info"),
+    );
+    return;
+  }
+  registerBomProvider(btn.dataset.registerProvider, btn);
+}
+
 function _handleQuotaRequestInteraction(ev) {
   const openTicketBtn = ev.target.closest("[data-open-ticket]");
   if (openTicketBtn) {
@@ -3513,6 +3606,10 @@ function renderCompareSlot(slot) {
     for (const ms of r.missing_services) {
       bomHtml += `<div style="font-size:12px;padding:4px 8px;margin:2px 0;background:rgba(255,183,77,0.12);border-left:3px solid #f4a726;color:#f4a726;border-radius:4px">${escapeHtml(ms.service)}: ${escapeHtml(ms.detail || "not available")}</div>`;
     }
+  }
+  if (r.registration_required && r.registration_required.length) {
+    bomHtml += `<div style="margin-top:10px"><strong>Registration Required:</strong></div>`;
+    bomHtml += _registrationRequiredHtml(r.registration_required);
   }
 
   content.innerHTML = `
@@ -6494,6 +6591,7 @@ function init() {
   document.getElementById("btn-export-csv").addEventListener("click", exportCsv);
   document.getElementById("btn-export-xlsx").addEventListener("click", exportXlsx);
   document.getElementById("drilldown-overlay").addEventListener("click", closeDrilldown);
+  document.addEventListener("click", _handleRegisterProviderInteraction);
   document.getElementById("latency-source").addEventListener("change", refreshLatencyChart);
   document.getElementById("snapshot-compare-toggle").addEventListener("click", toggleSnapshotComparePicker);
   document.getElementById("snapshot-compare-picker").addEventListener("change", (ev) => {
