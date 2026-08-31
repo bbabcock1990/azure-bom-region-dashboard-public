@@ -1909,6 +1909,17 @@ html.filters-collapsed-init .filters-body { display: none; }
 .bom-skus-actions { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; margin-top: .35rem; }
 .bom-skus-actions .muted.small { margin-left: auto; }
 
+/* Service tiers (step 3) — one dropdown per selected tiered service. */
+.bom-service-tiers { display: flex; flex-direction: column; gap: .4rem; margin-top: .35rem; }
+.bom-tier-row { display: flex; align-items: center; gap: .75rem; }
+.bom-tier-row .bom-tier-name { flex: 0 0 40%; font-size: .85rem; color: var(--panel-text); }
+.bom-tier-row select { flex: 1 1 auto; padding: 4px 6px; background: var(--panel-input-bg, #1b1f2a);
+  color: var(--panel-text); border: 1px solid var(--panel-border-divider); border-radius: 4px; }
+.tier-zr-note { color: var(--good, #7ee0a2); font-weight: 600; }
+.svc-tier-chip { display: inline-block; margin-left: .4rem; padding: 0 .4rem; font-size: .7rem;
+  border: 1px solid var(--panel-border-divider); border-radius: 999px; color: var(--panel-text-dim);
+  background: var(--panel-input-bg, #1b1f2a); vertical-align: middle; }
+
 /* Regions picker — reuses .bom-services-list grid, adds AZ chip + delete-custom. */
 .bom-regions-toolbar { display: flex; align-items: center; gap: .5rem;
   margin-bottom: .35rem; flex-wrap: wrap; }

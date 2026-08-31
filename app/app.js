@@ -815,6 +815,26 @@ function _bomServiceNames(snap) {
   return svcs.map(s => String((s && (s.name || s)) || "")).filter(Boolean);
 }
 
+// Map of service name → selected tier id from the snapshot's BOM (or {}).
+function _bomServiceTiers(snap) {
+  const meta = (snap && snap.meta) || {};
+  const svcs = Array.isArray(meta.services) ? meta.services : [];
+  const out = {};
+  for (const s of svcs) {
+    if (s && s.name && s.tier) out[String(s.name)] = String(s.tier);
+  }
+  return out;
+}
+
+// Friendly label for a service tier id: prefer the catalog label, else prettify.
+function _tierLabel(serviceName, tierId) {
+  if (!tierId) return "";
+  const tiers = _catalogTiersFor(serviceName);
+  const hit = tiers.find(t => t.id === tierId);
+  if (hit) return hit.label.replace(/\s*\(.*\)$/, "");
+  return tierId.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+}
+
 // Build the estimate request from the current snapshot (all regions + BOM cores + services).
 function _pricingRequestBody() {
   const snap = STATE.snapshot;
@@ -1165,13 +1185,18 @@ function _renderServiceEstimateInputs(estimates) {
   const wrap = document.getElementById("pricing-services");
   if (!wrap) return;
   const names = _bomServiceNames(STATE.snapshot);
+  const tiers = _bomServiceTiers(STATE.snapshot);
   if (!names.length) {
     wrap.innerHTML = `<p class="muted">No non-compute services in the current BOM.</p>`;
     return;
   }
   wrap.innerHTML = names.map(n => {
     const v = (estimates && estimates[n] != null) ? estimates[n] : "";
-    return `<label class="pricing-svc-row"><span>${escapeHtml(n)}</span>
+    const tierId = tiers[n];
+    const tierChip = tierId
+      ? ` <span class="svc-tier-chip">${escapeHtml(_tierLabel(n, tierId))}</span>`
+      : "";
+    return `<label class="pricing-svc-row"><span>${escapeHtml(n)}${tierChip}</span>
       <input type="number" min="0" step="1" data-service="${escapeHtml(n)}" value="${escapeHtml(String(v))}" placeholder="0" /><small class="muted">$/mo</small></label>`;
   }).join("");
 }
@@ -4771,6 +4796,7 @@ const BOM_EDIT = {
   skuFamiliesSource: "",   // "arm+builtin" | "builtin"
   skuFamiliesLoaded: false,
   current: null,           // { subscription_id, tag, ... } from API, or null when new
+  serviceTiers: {},        // { "Azure SQL Database": "business_critical", ... }
 };
 
 async function ensureBomCatalog(force = false) {
@@ -4882,6 +4908,7 @@ async function openBomModal(bomId, opts = {}) {
   document.getElementById("bom-skus-tbody").innerHTML = "";
   document.getElementById("bom-import-file").value = "";
   BOM_EDIT.current = null;
+  BOM_EDIT.serviceTiers = {};
 
   // Prefill the ticket owner independently of the catalog loads below: those
   // can reject in a signed-out/empty environment, and owner prefill must not
@@ -4944,6 +4971,7 @@ function bomWizardGoTo(step) {
   // When editing an existing BOM, Save is always available (users often tweak a
   // single field). When creating, Save appears only on the final step.
   if (save) save.hidden = BOM_WIZARD.editing ? false : !last;
+  if (step === 3) renderBomServiceTiers();
 }
 
 // Validate the given step before advancing. Only step 1 (Basics) has required
@@ -5199,7 +5227,61 @@ function setBomSelectedServices(names) {
 
 function getBomSelectedServices() {
   return Array.from(document.querySelectorAll('#bom-services-list input[data-bom-svc]:checked'))
-    .map(cb => ({ name: cb.value }));
+    .map(cb => {
+      const rec = { name: cb.value };
+      const tiers = _catalogTiersFor(cb.value);
+      if (tiers.length) {
+        const chosen = BOM_EDIT.serviceTiers[cb.value];
+        if (chosen && tiers.some(t => t.id === chosen)) rec.tier = chosen;
+      }
+      return rec;
+    });
+}
+
+// Return the catalog tier list ([{id,label,zone_redundant}]) for a service
+// name, or [] when the service has no tiers.
+function _catalogTiersFor(name) {
+  const entry = (BOM_EDIT.catalog || []).find(s => s.name === name);
+  return (entry && Array.isArray(entry.tiers)) ? entry.tiers : [];
+}
+
+// Render the step-3 "Service tiers" section: one dropdown per selected
+// service that has catalog tiers. Selections persist in BOM_EDIT.serviceTiers
+// so they survive step navigation and feed the save payload.
+function renderBomServiceTiers() {
+  const step = document.getElementById("bom-service-tiers-step");
+  const list = document.getElementById("bom-service-tiers-list");
+  if (!step || !list) return;
+  const selected = getBomSelectedServices();
+  const tiered = selected.filter(s => _catalogTiersFor(s.name).length);
+  if (!tiered.length) {
+    step.hidden = true;
+    list.innerHTML = "";
+    return;
+  }
+  step.hidden = false;
+  list.innerHTML = "";
+  for (const svc of tiered) {
+    const tiers = _catalogTiersFor(svc.name);
+    const cur = BOM_EDIT.serviceTiers[svc.name] || "";
+    const row = document.createElement("div");
+    row.className = "bom-tier-row";
+    const opts = ['<option value="">— not specified —</option>']
+      .concat(tiers.map(t => {
+        const zr = t.zone_redundant ? " · zone-redundant capable" : "";
+        return `<option value="${escapeHtml(t.id)}"${t.id === cur ? " selected" : ""}>${escapeHtml(t.label)}${zr}</option>`;
+      }))
+      .join("");
+    row.innerHTML = `
+      <span class="bom-tier-name">${escapeHtml(svc.name)}</span>
+      <select data-tier-svc="${escapeHtml(svc.name)}">${opts}</select>`;
+    const sel = row.querySelector("select");
+    sel.addEventListener("change", () => {
+      if (sel.value) BOM_EDIT.serviceTiers[svc.name] = sel.value;
+      else delete BOM_EDIT.serviceTiers[svc.name];
+    });
+    list.appendChild(row);
+  }
 }
 
 function filterBomServices(query) {
@@ -5544,6 +5626,12 @@ function applyBomToForm(meta) {
   document.getElementById("bom-tag").value = meta.tag || "";
   document.getElementById("bom-customer").value = meta.customer_name || "";
   setBomSelectedServices((meta.services || []).map(s => s.name));
+  // Seed per-service tier selections from the saved BOM so the step-3
+  // tier pickers reflect what was chosen previously.
+  BOM_EDIT.serviceTiers = {};
+  for (const s of (meta.services || [])) {
+    if (s && s.name && s.tier) BOM_EDIT.serviceTiers[s.name] = s.tier;
+  }
   // Regions: empty saved list means "default — all known regions
   // selected" so the user sees the implicit default rather than an
   // empty grid that quietly means the same thing.

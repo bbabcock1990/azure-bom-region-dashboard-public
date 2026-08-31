@@ -146,14 +146,26 @@
       "provider": "Microsoft.Sql",
       "resource_type": "servers",
       "zone_check": false,
-      "category": "Databases"
+      "category": "Databases",
+      "tiers": [
+        {"id": "basic", "label": "Basic (DTU)", "zone_redundant": false},
+        {"id": "standard", "label": "Standard (DTU)", "zone_redundant": false},
+        {"id": "premium", "label": "Premium (DTU)", "zone_redundant": true},
+        {"id": "general_purpose", "label": "General Purpose (vCore)", "zone_redundant": true},
+        {"id": "business_critical", "label": "Business Critical (vCore)", "zone_redundant": true},
+        {"id": "hyperscale", "label": "Hyperscale (vCore)", "zone_redundant": true}
+      ]
     },
     {
       "name": "Azure SQL Managed Instance",
       "provider": "Microsoft.Sql",
       "resource_type": "managedInstances",
       "zone_check": false,
-      "category": "Databases"
+      "category": "Databases",
+      "tiers": [
+        {"id": "general_purpose", "label": "General Purpose", "zone_redundant": true},
+        {"id": "business_critical", "label": "Business Critical", "zone_redundant": true}
+      ]
     },
     {
       "name": "SQL Server on Azure VMs",
@@ -174,14 +186,24 @@
       "provider": "Microsoft.DBforMySQL",
       "resource_type": "flexibleServers",
       "zone_check": false,
-      "category": "Databases"
+      "category": "Databases",
+      "tiers": [
+        {"id": "burstable", "label": "Burstable", "zone_redundant": false},
+        {"id": "general_purpose", "label": "General Purpose", "zone_redundant": true},
+        {"id": "memory_optimized", "label": "Business Critical (Memory Optimized)", "zone_redundant": true}
+      ]
     },
     {
       "name": "Azure Database for PostgreSQL",
       "provider": "Microsoft.DBforPostgreSQL",
       "resource_type": "flexibleServers",
       "zone_check": false,
-      "category": "Databases"
+      "category": "Databases",
+      "tiers": [
+        {"id": "burstable", "label": "Burstable", "zone_redundant": false},
+        {"id": "general_purpose", "label": "General Purpose", "zone_redundant": true},
+        {"id": "memory_optimized", "label": "Memory Optimized", "zone_redundant": true}
+      ]
     },
     {
       "name": "Azure Database for MariaDB",
@@ -195,7 +217,14 @@
       "provider": "Microsoft.Cache",
       "resource_type": "redis",
       "zone_check": false,
-      "category": "Databases"
+      "category": "Databases",
+      "tiers": [
+        {"id": "basic", "label": "Basic", "zone_redundant": false},
+        {"id": "standard", "label": "Standard", "zone_redundant": false},
+        {"id": "premium", "label": "Premium", "zone_redundant": true},
+        {"id": "enterprise", "label": "Enterprise", "zone_redundant": true},
+        {"id": "enterprise_flash", "label": "Enterprise Flash", "zone_redundant": true}
+      ]
     },
     {
       "name": "Azure Blob Storage",

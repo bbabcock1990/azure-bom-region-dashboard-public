@@ -867,6 +867,11 @@
       </div>
       <p class="muted">Pick a <strong>Family ID</strong> from the dropdown — the list is loaded live from Azure (<code>Microsoft.Compute/skus</code>) so the case-sensitive values (e.g. <code>standardDav6Family</code>, <code>standardDASv5Family</code>) are always exact. You can still type a value if it isn't listed. The dashboard auto-derives the short VM label (e.g. <code>Dav6</code>, <code>Dasv5</code>). Cores must be ≥ 0; required cores drive the <em>Quota Status</em> per region.</p>
     </div>
+    <div class="run-step" id="bom-service-tiers-step" hidden>
+      <label>Service tiers</label>
+      <p class="muted">Some selected services offer <strong>service tiers</strong> (e.g. Azure SQL: Basic / Standard / Premium, or General Purpose / Business Critical / Hyperscale). Choose a tier where it matters — tiers marked <span class="tier-zr-note">zone-redundant capable</span> can be made resilient across Availability Zones, which the region readiness check will validate.</p>
+      <div id="bom-service-tiers-list" class="bom-service-tiers"></div>
+    </div>
           </div>
           <div class="run-status" id="bom-status"></div>
     <details>

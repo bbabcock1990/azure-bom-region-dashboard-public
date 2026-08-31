@@ -68,6 +68,44 @@ class BomServicesError(Exception):
 
 # ─── Catalog ─────────────────────────────────────────────────────────────────
 
+def _normalize_tiers(raw) -> List[Dict]:
+    """Normalize an optional ``tiers`` array on a catalog entry.
+
+    Each tier is ``{"id": str, "label": str, "zone_redundant": bool}``.
+    ``id`` is the stable machine key we persist on a BOM service and
+    validate against; ``label`` is display text; ``zone_redundant`` seeds
+    the future ZRS (zone-redundant storage/HA) readiness check. Malformed
+    tiers are dropped defensively so a bad catalog edit can't break load.
+    """
+    if not isinstance(raw, list):
+        return []
+    out: List[Dict] = []
+    seen: set = set()
+    for t in raw:
+        if not isinstance(t, dict):
+            continue
+        tid = str(t.get("id") or "").strip()
+        if not tid or tid.lower() in seen:
+            continue
+        seen.add(tid.lower())
+        out.append({
+            "id": tid,
+            "label": str(t.get("label") or tid).strip(),
+            "zone_redundant": bool(t.get("zone_redundant", False)),
+        })
+    return out
+
+
+def tiers_for_service(name: str) -> List[Dict]:
+    """Return the normalized tier list for a service name (or [])."""
+    if not name:
+        return []
+    entry = catalog_by_name().get(str(name).strip())
+    if not entry:
+        return []
+    return list(entry.get("tiers") or [])
+
+
 def load_builtin_catalog() -> List[Dict]:
     """Return the static service catalog from the JSON seed file.
 
@@ -90,6 +128,7 @@ def load_builtin_catalog() -> List[Dict]:
                 "zone_check": bool(s.get("zone_check", False)),
                 "category": (str(s.get("category")).strip()
                              if s.get("category") else "Other"),
+                "tiers": _normalize_tiers(s.get("tiers")),
             }
             for s in services
             if s.get("name") and s.get("provider") and s.get("resource_type")

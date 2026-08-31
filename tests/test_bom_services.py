@@ -20,6 +20,28 @@ def test_catalog_loads_and_has_expected_shape():
         assert isinstance(entry["zone_check"], bool)
 
 
+def test_catalog_exposes_service_tiers():
+    cat = {s["name"]: s for s in bom_services.load_catalog()}
+    sql = cat.get("Azure SQL Database")
+    assert sql is not None
+    tiers = sql.get("tiers") or []
+    ids = {t["id"] for t in tiers}
+    assert {"basic", "business_critical", "hyperscale"} <= ids
+    for t in tiers:
+        assert set(t.keys()) >= {"id", "label", "zone_redundant"}
+        assert isinstance(t["zone_redundant"], bool)
+    # Business Critical is zone-redundant capable; Basic is not.
+    by_id = {t["id"]: t for t in tiers}
+    assert by_id["business_critical"]["zone_redundant"] is True
+    assert by_id["basic"]["zone_redundant"] is False
+
+
+def test_tiers_for_service_returns_empty_for_untiered():
+    assert bom_services.tiers_for_service("Azure Automation") == []
+    assert bom_services.tiers_for_service("") == []
+    assert len(bom_services.tiers_for_service("Azure Cache for Redis")) >= 3
+
+
 def test_resolve_services_returns_catalog_entries():
     out = bom_services.resolve_services(["Azure Automation", "Premium SSD v2"])
     names = [s["name"] for s in out]

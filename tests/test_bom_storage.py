@@ -97,6 +97,36 @@ def test_validate_services_empty_list_allowed():
     assert bom_storage._validate_services([]) == []
 
 
+def test_validate_services_persists_valid_tier():
+    from _shared import bom_services
+    out = bom_storage._validate_services([
+        {"name": "Azure SQL Database", "tier": "Business_Critical"},
+        {"name": "Azure Automation"},  # no tiers → no tier key
+    ])
+    assert out[0]["name"] == "Azure SQL Database"
+    # Normalizes to the catalog's canonical id casing.
+    assert out[0]["tier"] == "business_critical"
+    valid_ids = {t["id"] for t in bom_services.tiers_for_service("Azure SQL Database")}
+    assert out[0]["tier"] in valid_ids
+    assert "tier" not in out[1]
+
+
+def test_validate_services_rejects_invalid_tier():
+    with pytest.raises(bom_storage.BomStorageError) as ex:
+        bom_storage._validate_services([
+            {"name": "Azure SQL Database", "tier": "does-not-exist"},
+        ])
+    assert ex.value.code == "bad_services"
+
+
+def test_validate_services_rejects_tier_on_non_tiered_service():
+    with pytest.raises(bom_storage.BomStorageError) as ex:
+        bom_storage._validate_services([
+            {"name": "Azure Automation", "tier": "premium"},
+        ])
+    assert ex.value.code == "bad_services"
+
+
 def test_validate_required_skus_normalizes_via_compile_validator():
     skus = [{
         "primary_family": "standardDav6Family",

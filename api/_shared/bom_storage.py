@@ -325,11 +325,14 @@ def _validate_services(items: List[Dict]) -> List[Dict]:
         )
     names: List[str] = []
     seen: set = set()
+    tiers: Dict[str, str] = {}
     for i, item in enumerate(items):
+        tier = ""
         if isinstance(item, str):
             name = item.strip()
         elif isinstance(item, dict):
             name = str(item.get("name") or "").strip()
+            tier = str(item.get("tier") or "").strip()
         else:
             raise BomStorageError(
                 "bad_services",
@@ -343,16 +346,38 @@ def _validate_services(items: List[Dict]) -> List[Dict]:
             continue
         seen.add(name)
         names.append(name)
+        if tier:
+            tiers[name] = tier
     if not names:
         return []
     try:
         resolved = bom_services.resolve_services(names)
     except bom_services.BomServicesError as ex:
         raise BomStorageError(ex.code, ex.message, ex.status)
-    # Preserve the user's order; emit minimal records (just name) since
-    # provider/resource_type/zone_check are looked up from the catalog
-    # at every run anyway.
-    return [{"name": s["name"]} for s in resolved]
+    # Preserve the user's order; emit minimal records (name + optional tier).
+    # provider/resource_type/zone_check/tiers are looked up from the catalog
+    # at every run anyway. A tier is only persisted when it's valid for that
+    # service's catalog tier list, so stale/invalid tiers are dropped loudly-safe.
+    out: List[Dict] = []
+    for s in resolved:
+        rec: Dict = {"name": s["name"]}
+        want = tiers.get(s["name"])
+        if want:
+            valid_ids = {t["id"].lower() for t in bom_services.tiers_for_service(s["name"])}
+            if want.lower() in valid_ids:
+                # Normalize to the catalog's canonical id casing.
+                for t in bom_services.tiers_for_service(s["name"]):
+                    if t["id"].lower() == want.lower():
+                        rec["tier"] = t["id"]
+                        break
+            else:
+                raise BomStorageError(
+                    "bad_services",
+                    f"Service '{s['name']}' has no tier '{want}'.",
+                    400,
+                )
+        out.append(rec)
+    return out
 
 
 def _validate_regions(items) -> List[str]:
