@@ -6588,32 +6588,42 @@ function _supportHtml() {
     </section>
 
     <section class="support-section">
-      <h3>Tracked tickets</h3>
-      <p class="muted">Tickets created or previewed from this dashboard.</p>
-      <table class="support-table"><thead><tr>
-        <th>Type</th><th>Title</th><th>Region</th><th>Severity</th><th>Status</th><th>Created</th><th></th>
-      </tr></thead><tbody id="support-tickets-body">${ticketsHtml}</tbody></table>
-    </section>
-
-    <section class="support-section">
       <div class="support-section-head">
         <h3>Active Azure tickets on this subscription</h3>
-        <button type="button" class="btn btn--sm" id="sup-azure-refresh">↻ Refresh</button>
+        <div class="support-section-head-tools">
+          <label class="support-inline-filter">Show
+            <select id="sup-azure-filter">
+              <option value="open" selected>Open only</option>
+              <option value="closed">Closed only</option>
+              <option value="all">All</option>
+            </select>
+          </label>
+          <button type="button" class="btn btn--sm" id="sup-azure-refresh">↻ Refresh</button>
+        </div>
       </div>
-      <p class="muted">Pulled live from Azure — open support tickets already on your BOM subscription(s), excluding the ones created here.</p>
+      <p class="muted">Pulled live from Azure — support tickets already on your BOM subscription(s), excluding the ones created here.</p>
       <table class="support-table"><thead><tr>
         <th>Type</th><th>Title</th><th>Severity</th><th>Status</th><th>Created</th>
       </tr></thead><tbody id="support-azure-tickets-body">
         <tr><td colspan="5" class="muted">Loading live tickets from Azure…</td></tr>
       </tbody></table>
     </section>
+
+    <section class="support-section">
+      <h3>Tracked tickets</h3>
+      <p class="muted">Tickets created or previewed from this dashboard.</p>
+      <table class="support-table"><thead><tr>
+        <th>Type</th><th>Title</th><th>Region</th><th>Severity</th><th>Status</th><th>Created</th><th></th>
+      </tr></thead><tbody id="support-tickets-body">${ticketsHtml}</tbody></table>
+    </section>
   </div>`;
 }
 
 function _supportAzureTicketRow(t) {
   const created = (t.created_at || "").replace("T", " ").replace("Z", "").slice(0, 19);
-  const statusPill = t.azure_status
-    ? `<span class="pill pill-warn">${escapeHtml(t.azure_status)}</span>`
+  const status = String(t.azure_status || "");
+  const statusPill = status
+    ? `<span class="pill ${status.toLowerCase() === "closed" ? "pill-ok" : "pill-warn"}">${escapeHtml(status)}</span>`
     : `<span class="pill pill-muted">—</span>`;
   return `<tr>
     <td>${escapeHtml(t.kind || "support")}</td>
@@ -6629,6 +6639,8 @@ function _supportAzureTicketRow(t) {
 async function _supportLoadAzureTickets() {
   const body = document.getElementById("support-azure-tickets-body");
   if (!body) return;
+  const filterSel = document.getElementById("sup-azure-filter");
+  const filter = (filterSel && filterSel.value) || "open";
   const subs = _activeBomSubs().filter(Boolean);
   if (!subs.length) {
     body.innerHTML = `<tr><td colspan="5" class="muted">Sign in and select a BOM to see live tickets.</td></tr>`;
@@ -6646,9 +6658,11 @@ async function _supportLoadAzureTickets() {
   const seen = new Set();
   const collected = [];
   const errors = [];
+  // Always fetch every ticket (open + closed) so the client-side filter can
+  // switch between Open / Closed / All without re-hitting Azure.
   await Promise.all(subs.map(async (subId) => {
     try {
-      const res = await apiJson(`/api/support/azure-tickets?subscription_id=${encodeURIComponent(subId)}`);
+      const res = await apiJson(`/api/support/azure-tickets?subscription_id=${encodeURIComponent(subId)}&open_only=false`);
       for (const t of (res.tickets || [])) {
         const key = String(t.ticket_name || t.azure_ticket_id || "").toLowerCase();
         if (!key || seen.has(key) || ours.has(key)) continue;
@@ -6662,14 +6676,22 @@ async function _supportLoadAzureTickets() {
 
   collected.sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
 
-  if (!collected.length) {
-    const note = errors.length
+  const isClosed = (t) => String(t.azure_status || "").toLowerCase() === "closed";
+  const filtered = collected.filter(t => {
+    if (filter === "closed") return isClosed(t);
+    if (filter === "all") return true;
+    return !isClosed(t);
+  });
+
+  if (!filtered.length) {
+    const label = filter === "closed" ? "closed" : filter === "all" ? "" : "active";
+    const note = errors.length && !collected.length
       ? `Could not load tickets for ${errors.length} subscription(s): ${escapeHtml(errors[0].message)}`
-      : "No other active Azure support tickets on this subscription.";
+      : `No other ${label ? label + " " : ""}Azure support tickets on this subscription.`;
     body.innerHTML = `<tr><td colspan="5" class="muted">${note}</td></tr>`;
     return;
   }
-  let html = collected.map(_supportAzureTicketRow).join("");
+  let html = filtered.map(_supportAzureTicketRow).join("");
   if (errors.length) {
     html += `<tr><td colspan="5" class="muted">Note: ${errors.length} subscription(s) could not be read (${escapeHtml(errors[0].message)}).</td></tr>`;
   }
@@ -6760,7 +6782,7 @@ function _supportUpdateQuotaMath(opts) {
   if (current != null && required != null) {
     const shortfall = Math.max(0, required - current);
     info.innerHTML = shortfall > 0
-      ? `Current limit <strong>${_formatQuotaNumber(current)}</strong> · BOM needs <strong>${_formatQuotaNumber(required)}</strong> → shortfall <strong>${_formatQuotaNumber(shortfall)}</strong>. Prefilled new limit <strong>${_formatQuotaNumber(Math.round(recommended))}</strong> (editable).`
+      ? `Current limit <strong>${_formatQuotaNumber(current)}</strong> · BOM needs <strong>${_formatQuotaNumber(required)}</strong> → shortfall <strong>${_formatQuotaNumber(shortfall)}</strong>. New limit is the target ceiling, not the increase: <strong>${_formatQuotaNumber(current)}</strong> + <strong>${_formatQuotaNumber(shortfall)}</strong> = <strong>${_formatQuotaNumber(Math.round(recommended))}</strong> (editable).`
       : `Current limit <strong>${_formatQuotaNumber(current)}</strong> already covers the BOM need of <strong>${_formatQuotaNumber(required)}</strong>. Prefilled <strong>${_formatQuotaNumber(Math.round(recommended))}</strong> for extra headroom (editable).`;
   } else if (required != null) {
     info.innerHTML = `BOM needs <strong>${_formatQuotaNumber(required)}</strong> vCPU for this SKU. Prefilled new limit <strong>${_formatQuotaNumber(Math.round(recommended))}</strong> (editable).`;
@@ -6930,6 +6952,8 @@ function _wireSupportTab(view) {
   if (blockerFilter) blockerFilter.addEventListener("change", () => _applyBlockerFilter(blockerFilter.value));
   const azureRefresh = view.querySelector("#sup-azure-refresh");
   if (azureRefresh) azureRefresh.addEventListener("click", _supportLoadAzureTickets);
+  const azureFilter = view.querySelector("#sup-azure-filter");
+  if (azureFilter) azureFilter.addEventListener("change", _supportLoadAzureTickets);
   _supportLoadAzureTickets();
   const prev = view.querySelector("#sup-preview");
   if (prev) prev.addEventListener("click", () => _supportCreate(true));

@@ -743,8 +743,8 @@ main {
   white-space: nowrap;
   flex-shrink: 0;
 }
-.qd-donor-badge--ok { background: rgba(16,124,16,0.18); color: #22c55e; }
-.qd-donor-badge--partial { background: rgba(216,149,1,0.20); color: #f59e0b; }
+.qd-donor-badge--ok { background: rgba(76, 175, 80, 0.15); color: #4caf50; border: 1px solid rgba(76, 175, 80, 0.3); }
+.qd-donor-badge--partial { background: rgba(255, 193, 7, 0.12); color: #ffc107; border: 1px solid rgba(255, 193, 7, 0.3); }
 .qd-donor-chips {
   display: flex;
   flex-wrap: wrap;
@@ -2754,6 +2754,21 @@ html.filters-collapsed-init .filters-body { display: none; }
   color: var(--text-secondary);
 }
 .support-blocker-filter select { min-width: 180px; }
+.support-section-head-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.support-inline-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.support-inline-filter select { min-width: 130px; }
 .sup-limit-info {
   display: block;
   margin-top: 4px;
