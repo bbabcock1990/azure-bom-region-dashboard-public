@@ -103,6 +103,64 @@ def test_fetch_provider_locations_treats_global_sentinel():
     assert out["Microsoft.Automation/automationAccounts"] == ["*"]
 
 
+def test_fetch_provider_locations_global_provider_wildcard_available_everywhere():
+    """A registered provider whose resource types report NO regional
+    locations (e.g. Azure Advisor) is a global/control-plane service — with a
+    ``*`` resource type it must resolve to ``["*"]`` (available everywhere),
+    not to an empty list that marks every region red."""
+    body = {
+        "resourceTypes": [
+            {"resourceType": "recommendations", "locations": []},
+            {"resourceType": "assessments", "locations": []},
+        ],
+    }
+    with patch("_shared.bom_services.httpx.Client") as MC:
+        client = MC.return_value.__enter__.return_value
+        client.get.return_value = _arm_response(200, body)
+        out = bom_services.fetch_provider_locations(
+            [{"name": "Azure Advisor", "provider": "Microsoft.Advisor",
+              "resource_type": "*"}],
+            arm_token="t",
+        )
+    assert out["Microsoft.Advisor/*"] == ["*"]
+
+
+def test_fetch_provider_locations_wildcard_unions_regional_locations():
+    """A ``*`` provider that DOES report regional locations unions them across
+    resource types (ignoring the ``global`` pseudo-location)."""
+    body = {
+        "resourceTypes": [
+            {"resourceType": "operations", "locations": []},
+            {"resourceType": "alertRules", "locations": ["West Europe"]},
+            {"resourceType": "cases", "locations": ["global", "UK South"]},
+        ],
+    }
+    with patch("_shared.bom_services.httpx.Client") as MC:
+        client = MC.return_value.__enter__.return_value
+        client.get.return_value = _arm_response(200, body)
+        out = bom_services.fetch_provider_locations(
+            [{"name": "Microsoft Sentinel",
+              "provider": "Microsoft.SecurityInsights", "resource_type": "*"}],
+            arm_token="t",
+        )
+    assert out["Microsoft.SecurityInsights/*"] == ["UK South", "West Europe"]
+
+
+def test_fetch_provider_locations_404_marks_unavailable_not_raise():
+    """A 404 InvalidResourceNamespace (provider not valid in this tenant) is
+    surfaced as unavailable (empty list), not a fatal error."""
+    with patch("_shared.bom_services.httpx.Client") as MC:
+        client = MC.return_value.__enter__.return_value
+        client.get.return_value = _arm_response(
+            404, {"error": {"code": "InvalidResourceNamespace"}})
+        out = bom_services.fetch_provider_locations(
+            [{"name": "Azure Container Storage",
+              "provider": "Microsoft.ContainerStorage", "resource_type": "*"}],
+            arm_token="t",
+        )
+    assert out["Microsoft.ContainerStorage/*"] == []
+
+
 def test_fetch_provider_locations_401_raises():
     with patch("_shared.bom_services.httpx.Client") as MC:
         client = MC.return_value.__enter__.return_value

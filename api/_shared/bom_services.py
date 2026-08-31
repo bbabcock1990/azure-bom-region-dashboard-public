@@ -280,23 +280,24 @@ def _fetch_provider_locations_one(
         )
     resource_types = data.get("resourceTypes") or []
 
-    # ``*`` means "the whole provider" — union the locations across every
-    # resource type it exposes. Used by the auto-pulled, provider-level catalog
-    # entries so a service is "available" wherever the provider offers anything.
+    # ``*`` means "the whole provider" — union the regional locations across
+    # every resource type it exposes. Used by the auto-pulled, provider-level
+    # catalog entries so a service is "available" wherever the provider offers
+    # anything.
     if resource_type == "*":
         regional: set = set()
-        saw_global = False
         for rt in resource_types:
             for loc in rt.get("locations") or []:
-                if not loc:
-                    continue
-                if str(loc).lower() == "global":
-                    saw_global = True
-                else:
+                if loc and str(loc).lower() != "global":
                     regional.add(str(loc))
         if regional:
             return sorted(regional)
-        return ["*"] if saw_global else []
+        # The provider is registered and exposes resource types, but none of
+        # them report a regional location. That's the signature of a global /
+        # control-plane service (e.g. Azure Advisor, whose resource types all
+        # have locations: []) — it isn't tied to any region, so treat it as
+        # available everywhere rather than nowhere.
+        return ["*"] if resource_types else []
 
     for rt in resource_types:
         if rt.get("resourceType", "").lower() == resource_type.lower():
