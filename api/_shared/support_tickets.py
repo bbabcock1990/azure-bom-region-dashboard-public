@@ -59,6 +59,72 @@ GUID_RE = re.compile(
 TABLE_NAME = "supporttickets"
 _PK = "tickets"
 
+# Azure Support's contactDetails.country requires an ISO 3166-1 **alpha-3** code
+# (e.g. "USA"), but users and the rest of the app commonly use alpha-2 ("US").
+# Map the common alpha-2 codes to alpha-3 so submissions don't 400 with
+# "Use the standard ISO 3166-1 alpha-3 code for Country".
+_ISO_ALPHA2_TO_ALPHA3 = {
+    "AF": "AFG", "AL": "ALB", "DZ": "DZA", "AD": "AND", "AO": "AGO", "AR": "ARG",
+    "AM": "ARM", "AU": "AUS", "AT": "AUT", "AZ": "AZE", "BS": "BHS", "BH": "BHR",
+    "BD": "BGD", "BB": "BRB", "BY": "BLR", "BE": "BEL", "BZ": "BLZ", "BJ": "BEN",
+    "BM": "BMU", "BT": "BTN", "BO": "BOL", "BA": "BIH", "BW": "BWA", "BR": "BRA",
+    "BN": "BRN", "BG": "BGR", "BF": "BFA", "BI": "BDI", "KH": "KHM", "CM": "CMR",
+    "CA": "CAN", "CV": "CPV", "KY": "CYM", "CF": "CAF", "TD": "TCD", "CL": "CHL",
+    "CN": "CHN", "CO": "COL", "KM": "COM", "CG": "COG", "CD": "COD", "CR": "CRI",
+    "CI": "CIV", "HR": "HRV", "CU": "CUB", "CY": "CYP", "CZ": "CZE", "DK": "DNK",
+    "DJ": "DJI", "DM": "DMA", "DO": "DOM", "EC": "ECU", "EG": "EGY", "SV": "SLV",
+    "GQ": "GNQ", "ER": "ERI", "EE": "EST", "SZ": "SWZ", "ET": "ETH", "FJ": "FJI",
+    "FI": "FIN", "FR": "FRA", "GA": "GAB", "GM": "GMB", "GE": "GEO", "DE": "DEU",
+    "GH": "GHA", "GR": "GRC", "GL": "GRL", "GD": "GRD", "GT": "GTM", "GN": "GIN",
+    "GW": "GNB", "GY": "GUY", "HT": "HTI", "HN": "HND", "HK": "HKG", "HU": "HUN",
+    "IS": "ISL", "IN": "IND", "ID": "IDN", "IR": "IRN", "IQ": "IRQ", "IE": "IRL",
+    "IL": "ISR", "IT": "ITA", "JM": "JAM", "JP": "JPN", "JO": "JOR", "KZ": "KAZ",
+    "KE": "KEN", "KI": "KIR", "KP": "PRK", "KR": "KOR", "KW": "KWT", "KG": "KGZ",
+    "LA": "LAO", "LV": "LVA", "LB": "LBN", "LS": "LSO", "LR": "LBR", "LY": "LBY",
+    "LI": "LIE", "LT": "LTU", "LU": "LUX", "MO": "MAC", "MG": "MDG", "MW": "MWI",
+    "MY": "MYS", "MV": "MDV", "ML": "MLI", "MT": "MLT", "MH": "MHL", "MR": "MRT",
+    "MU": "MUS", "MX": "MEX", "FM": "FSM", "MD": "MDA", "MC": "MCO", "MN": "MNG",
+    "ME": "MNE", "MA": "MAR", "MZ": "MOZ", "MM": "MMR", "NA": "NAM", "NR": "NRU",
+    "NP": "NPL", "NL": "NLD", "NZ": "NZL", "NI": "NIC", "NE": "NER", "NG": "NGA",
+    "MK": "MKD", "NO": "NOR", "OM": "OMN", "PK": "PAK", "PW": "PLW", "PS": "PSE",
+    "PA": "PAN", "PG": "PNG", "PY": "PRY", "PE": "PER", "PH": "PHL", "PL": "POL",
+    "PT": "PRT", "PR": "PRI", "QA": "QAT", "RO": "ROU", "RU": "RUS", "RW": "RWA",
+    "SA": "SAU", "SN": "SEN", "RS": "SRB", "SC": "SYC", "SL": "SLE", "SG": "SGP",
+    "SK": "SVK", "SI": "SVN", "SB": "SLB", "SO": "SOM", "ZA": "ZAF", "SS": "SSD",
+    "ES": "ESP", "LK": "LKA", "SD": "SDN", "SR": "SUR", "SE": "SWE", "CH": "CHE",
+    "SY": "SYR", "TW": "TWN", "TJ": "TJK", "TZ": "TZA", "TH": "THA", "TL": "TLS",
+    "TG": "TGO", "TO": "TON", "TT": "TTO", "TN": "TUN", "TR": "TUR", "TM": "TKM",
+    "UG": "UGA", "UA": "UKR", "AE": "ARE", "GB": "GBR", "US": "USA", "UY": "URY",
+    "UZ": "UZB", "VU": "VUT", "VE": "VEN", "VN": "VNM", "YE": "YEM", "ZM": "ZMB",
+    "ZW": "ZWE",
+}
+# A few common full names / variants users might type.
+_COUNTRY_NAME_TO_ALPHA3 = {
+    "UNITED STATES": "USA", "UNITED STATES OF AMERICA": "USA", "USA": "USA",
+    "UNITED KINGDOM": "GBR", "GREAT BRITAIN": "GBR", "UK": "GBR",
+    "CANADA": "CAN", "AUSTRALIA": "AUS", "INDIA": "IND", "GERMANY": "DEU",
+    "FRANCE": "FRA", "JAPAN": "JPN", "BRAZIL": "BRA", "IRELAND": "IRL",
+    "NETHERLANDS": "NLD", "SPAIN": "ESP", "ITALY": "ITA", "MEXICO": "MEX",
+}
+
+
+def _iso3_country(value: Any, default: str = "USA") -> str:
+    """Normalize a country value to an ISO 3166-1 alpha-3 code for Azure Support.
+
+    Accepts alpha-2 ("US"), alpha-3 ("USA"), or a common country name and always
+    returns an alpha-3 code. Falls back to ``default`` when it can't be resolved.
+    """
+    text = str(value or "").strip().upper()
+    if not text:
+        return default
+    if len(text) == 3 and text.isalpha():
+        return text
+    if len(text) == 2 and text in _ISO_ALPHA2_TO_ALPHA3:
+        return _ISO_ALPHA2_TO_ALPHA3[text]
+    if text in _COUNTRY_NAME_TO_ALPHA3:
+        return _COUNTRY_NAME_TO_ALPHA3[text]
+    return default
+
 VALID_SEVERITIES = ("minimal", "moderate", "critical")
 
 
@@ -127,7 +193,7 @@ def _contact_details(settings: Dict[str, Any]) -> Dict[str, Any]:
         "primaryEmailAddress": settings.get("primary_email") or "",
         "preferredContactMethod": (settings.get("preferred_contact_method") or "email").lower(),
         "preferredTimeZone": settings.get("preferred_timezone") or "Pacific Standard Time",
-        "country": (settings.get("country") or "US").upper(),
+        "country": _iso3_country(settings.get("country")),
         "preferredSupportLanguage": settings.get("preferred_language") or "en-us",
     }
     if settings.get("phone"):

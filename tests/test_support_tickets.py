@@ -51,6 +51,19 @@ def test_build_quota_ticket_payload_shape(isolated_storage):
     assert props["serviceId"].endswith(support_tickets.QUOTA_SERVICE_GUID)
     assert props["severity"] == "moderate"
     assert props["quotaTicketDetails"]["quotaChangeRequests"][0]["region"] == "eastus"
+    # Azure Support requires ISO 3166-1 alpha-3 for country ("US" -> "USA").
+    assert props["contactDetails"]["country"] == "USA"
+
+
+def test_iso3_country_normalization():
+    from _shared import support_tickets as st
+    assert st._iso3_country("US") == "USA"
+    assert st._iso3_country("us") == "USA"
+    assert st._iso3_country("USA") == "USA"      # already alpha-3
+    assert st._iso3_country("GB") == "GBR"
+    assert st._iso3_country("United States") == "USA"
+    assert st._iso3_country("") == "USA"          # default
+    assert st._iso3_country("ZZ") == "USA"        # unknown -> default
 
 
 # ─── dry-run: no network ─────────────────────────────────────────────────────
