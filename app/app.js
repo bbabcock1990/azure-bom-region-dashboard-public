@@ -1024,6 +1024,7 @@ function openDrilldown(r) {
 
   body.innerHTML = html;
   renderSubscriptionSwitcher();
+  _scanRegistrationCards(body);
   if (!body._quotaRequestBound) {
     body.addEventListener("click", _handleQuotaRequestInteraction);
     body._quotaRequestBound = true;
@@ -2409,7 +2410,10 @@ function _renderQuotaActionCell(row) {
 }
 
 function _registrationRequiredHtml(list, opts = {}) {
-  // Dedupe by provider namespace — one register action per provider.
+  // Dedupe by provider namespace — one card per provider. Each card resolves
+  // its true state (registerable / registering / not available on this
+  // subscription) via a live status check, so we never show a "Register"
+  // action that can't actually work.
   const byProvider = new Map();
   for (const item of list) {
     const prov = item.provider || "";
@@ -2420,30 +2424,21 @@ function _registrationRequiredHtml(list, opts = {}) {
   for (const [prov, services] of byProvider.entries()) {
     const svcList = services.map(escapeHtml).join(", ");
     const provLabel = prov ? escapeHtml(prov) : "provider";
-    const btnStyle =
-      "font-size:11px;padding:3px 10px;border:1px solid #f4a726;" +
-      "background:rgba(244,167,38,0.15);color:#f4a726;border-radius:4px;cursor:pointer";
-    const actions = prov
-      ? `<div class="reg-actions" style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">` +
-        `<button data-reg-action="register" data-provider="${escapeHtml(prov)}" style="${btnStyle}">Register ${provLabel}</button>` +
-        `<button data-reg-action="status" data-provider="${escapeHtml(prov)}" style="${btnStyle};opacity:0.85">Check status</button>` +
-        `</div>`
-      : "";
     html +=
       `<div class="reg-provider-block" data-reg-provider="${escapeHtml(prov)}" ` +
       `style="font-size:12px;padding:6px 8px;margin:3px 0;background:rgba(244,167,38,0.10);` +
       `border-left:3px solid #f4a726;color:#f4a726;border-radius:4px">` +
       `<div><strong>${svcList}</strong></div>` +
       `<div style="font-size:11px;opacity:0.9;margin-top:2px">Provider <code>${provLabel}</code> ` +
-      `isn't registered on this subscription, so availability is unknown. ` +
-      `Registering is free and self-service — after it shows Registered, re-run the analysis.</div>` +
-      `<div class="reg-status" data-reg-status style="margin-top:6px;font-size:11px;display:none"></div>` +
+      `isn't registered on this subscription, so its availability can't be confirmed.</div>` +
+      `<div class="reg-status" data-reg-status style="margin-top:6px;font-size:11px;color:#f4a726">` +
+      `Checking availability on this subscription…</div>` +
       `<div class="reg-cli" data-reg-cli style="margin-top:6px;font-size:11px;display:none">` +
       `<div style="opacity:0.9;margin-bottom:3px">Ask a subscription Owner/Contributor to run:</div>` +
       `<code class="reg-cli-text" data-reg-cli-text style="display:block;padding:6px 8px;background:rgba(0,0,0,0.35);` +
       `border-radius:4px;white-space:pre-wrap;word-break:break-all;cursor:pointer" ` +
       `title="Click to copy"></code></div>` +
-      actions +
+      `<div class="reg-actions" data-reg-actions style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap"></div>` +
       `</div>`;
   }
   return html;
@@ -2471,6 +2466,94 @@ function _regShowCli(block, cliCmd) {
   wrap.style.display = "block";
 }
 
+function _regHideCli(block) {
+  if (!block) return;
+  const wrap = block.querySelector("[data-reg-cli]");
+  if (wrap) wrap.style.display = "none";
+}
+
+const _REG_BTN_STYLE =
+  "font-size:11px;padding:3px 10px;border:1px solid #f4a726;" +
+  "background:rgba(244,167,38,0.15);color:#f4a726;border-radius:4px;cursor:pointer";
+
+function _regRenderActions(block, provider, kinds) {
+  if (!block) return;
+  const host = block.querySelector("[data-reg-actions]");
+  if (!host) return;
+  const p = escapeHtml(provider);
+  const labels = {
+    register: `Register ${p}`,
+    recheck: "Recheck",
+    status: "Check status",
+  };
+  host.innerHTML = kinds.map(k =>
+    `<button data-reg-action="${k}" data-provider="${p}" style="${_REG_BTN_STYLE}${k === "register" ? "" : ";opacity:0.85"}">${labels[k] || k}</button>`
+  ).join("");
+}
+
+// Resolve one card's true state via a live status check and render the
+// appropriate message + actions.
+async function _resolveRegistrationCard(provider, block) {
+  if (!provider || !block) return;
+  const subscriptionId = focusedSubscriptionId() || "";
+  const subName = _subNameById ? _subNameById(subscriptionId) : subscriptionId;
+  if (!subscriptionId) {
+    _regSetStatus(block, "⛔ No subscription selected — pick one to check availability.", "#e57373");
+    _regRenderActions(block, provider, ["recheck"]);
+    return;
+  }
+  _regSetStatus(block, `Checking availability on ${subName}…`, "#f4a726");
+  _regRenderActions(block, provider, []);
+  try {
+    const params = new URLSearchParams({ subscription_id: subscriptionId, provider });
+    const data = await apiJson(`/api/providers/status?${params.toString()}`);
+    const state = String((data && data.registration_state) || "Unknown");
+    if (data && data.registered) {
+      _regHideCli(block);
+      _regSetStatus(block,
+        `✅ Registered on ${subName}. Re-run the analysis to see this service's regional availability.`,
+        "#81c784");
+      _regRenderActions(block, provider, ["recheck"]);
+    } else if (data && data.absent) {
+      // Namespace not known to this subscription — cannot be self-registered.
+      _regHideCli(block);
+      _regSetStatus(block,
+        `⛔ Not available on ${subName}. Azure doesn't recognise “${provider}” on this ` +
+        `subscription, so it can't be registered here — the service may not be offered ` +
+        `for this subscription's tenant/offer. Try a different subscription, or open an ` +
+        `Azure support request to have it enabled.`,
+        "#e57373");
+      _regRenderActions(block, provider, ["recheck"]);
+    } else if (state.toLowerCase() === "registering") {
+      _regHideCli(block);
+      _regSetStatus(block, `⏳ Registering on ${subName}… click Recheck in a moment.`, "#f4a726");
+      _regRenderActions(block, provider, ["recheck"]);
+    } else {
+      // Present but NotRegistered → genuinely registerable.
+      _regHideCli(block);
+      _regSetStatus(block,
+        `Not registered yet on ${subName}. Registering is free and self-service.`,
+        "#f4a726");
+      _regRenderActions(block, provider, ["register", "recheck"]);
+    }
+  } catch (err) {
+    _regSetStatus(block, `Couldn't check availability — ${(err && err.message) || String(err)}`, "#e57373");
+    _regRenderActions(block, provider, ["recheck"]);
+  }
+}
+
+// Auto-resolve any registration cards that haven't been resolved yet.
+function _scanRegistrationCards(root) {
+  const scope = root && root.querySelectorAll ? root : document;
+  const blocks = scope.querySelectorAll(".reg-provider-block[data-reg-provider]:not([data-reg-resolved])");
+  blocks.forEach(block => {
+    const provider = block.getAttribute("data-reg-provider");
+    if (!provider) return;
+    block.setAttribute("data-reg-resolved", "1");
+    _resolveRegistrationCard(provider, block);
+  });
+}
+
 async function registerBomProvider(provider, block) {
   if (!provider) return;
   const subscriptionId = focusedSubscriptionId() || "";
@@ -2491,63 +2574,42 @@ async function registerBomProvider(provider, block) {
       body: JSON.stringify({ subscription_id: subscriptionId, provider }),
     });
     const state = (data && data.registration_state) || "Registering";
-    _regSetStatus(
-      block,
+    _regHideCli(block);
+    _regSetStatus(block,
       `✅ Registration started on ${subName} (state: ${state}). Azure usually finishes in 1–5 minutes — ` +
-      `click “Check status”, then re-run the analysis once it shows Registered.`,
-      "#81c784",
-    );
-    if (regBtn) { regBtn.textContent = "Registration started ✓"; regBtn.disabled = true; }
+      `click Recheck, then re-run the analysis once it shows Registered.`,
+      "#81c784");
+    _regRenderActions(block, provider, ["recheck"]);
     showToast(`✓ Registering ${provider} on ${subName}…`, "success");
   } catch (err) {
-    const cliCmd = (err && err.body && err.body.cli_command) || cli;
-    const forbidden = err && (err.status === 403 || (err.body && err.body.error === "forbidden"));
+    const body = err && err.body;
+    const code = body && body.error;
+    if (code === "not_available" || err.status === 404) {
+      // Provider isn't available on this subscription — a register command
+      // would just fail again, so don't offer one.
+      _regHideCli(block);
+      _regSetStatus(block,
+        (body && body.message) ||
+        `⛔ Not available on ${subName}. Azure doesn't recognise “${provider}” on this subscription.`,
+        "#e57373");
+      _regRenderActions(block, provider, ["recheck"]);
+      showToast(`✗ ${provider} isn't available on ${subName}.`, "error");
+      return;
+    }
+    const forbidden = code === "forbidden" || err.status === 403;
+    const cliCmd = (body && body.cli_command) || cli;
     if (forbidden) {
-      _regSetStatus(
-        block,
-        `⛔ Not registered. Your account can’t register providers on ${subName} ` +
+      _regSetStatus(block,
+        `⛔ Not registered. Your account can't register providers on ${subName} ` +
         `(missing “${provider}/register/action” permission).`,
-        "#e57373",
-      );
+        "#e57373");
+      _regShowCli(block, cliCmd);
     } else {
       _regSetStatus(block, `⛔ Not registered — ${(err && err.message) || String(err)}`, "#e57373");
+      _regShowCli(block, cliCmd);
     }
-    _regShowCli(block, cliCmd);
-    if (regBtn) { regBtn.disabled = false; regBtn.textContent = `Register ${provider}`; }
-    showToast(`✗ Couldn’t auto-register ${provider}. See the command in the card.`, "error");
-  }
-}
-
-async function checkProviderRegistration(provider, block) {
-  if (!provider) return;
-  const subscriptionId = focusedSubscriptionId() || "";
-  const subName = _subNameById ? _subNameById(subscriptionId) : subscriptionId;
-  if (!subscriptionId) {
-    _regSetStatus(block, "⛔ No subscription selected.", "#e57373");
-    return;
-  }
-  const statusBtn = block && block.querySelector('[data-reg-action="status"]');
-  if (statusBtn) { statusBtn.disabled = true; statusBtn.textContent = "Checking…"; }
-  _regSetStatus(block, "Checking registration state…", "#f4a726");
-  try {
-    const params = new URLSearchParams({ subscription_id: subscriptionId, provider });
-    const data = await apiJson(`/api/providers/status?${params.toString()}`);
-    const state = (data && data.registration_state) || "Unknown";
-    if (data && data.registered) {
-      _regSetStatus(
-        block,
-        `✅ Registered on ${subName}. Re-run the analysis to see this service’s regional availability.`,
-        "#81c784",
-      );
-    } else if (state.toLowerCase() === "registering") {
-      _regSetStatus(block, `⏳ Registering on ${subName}… check again in a moment.`, "#f4a726");
-    } else {
-      _regSetStatus(block, `Not registered yet on ${subName} (state: ${state}).`, "#f4a726");
-    }
-  } catch (err) {
-    _regSetStatus(block, `Couldn’t read status — ${(err && err.message) || String(err)}`, "#e57373");
-  } finally {
-    if (statusBtn) { statusBtn.disabled = false; statusBtn.textContent = "Check status"; }
+    _regRenderActions(block, provider, ["register", "recheck"]);
+    showToast(`✗ Couldn't auto-register ${provider}. See the card for details.`, "error");
   }
 }
 
@@ -2568,10 +2630,11 @@ function _handleRegisterProviderInteraction(ev) {
   ev.stopPropagation();
   const block = _regBlockFor(btn);
   const provider = btn.dataset.provider;
-  if (btn.dataset.regAction === "status") {
-    checkProviderRegistration(provider, block);
-  } else {
+  if (btn.dataset.regAction === "register") {
     registerBomProvider(provider, block);
+  } else {
+    // recheck / status
+    _resolveRegistrationCard(provider, block);
   }
 }
 
@@ -3706,6 +3769,7 @@ function renderCompareSlot(slot) {
     ${issuesHtml}
     ${altHtml}
   `;
+  _scanRegistrationCards(content);
 }
 
 // ---------------------------------------------------------------- Export

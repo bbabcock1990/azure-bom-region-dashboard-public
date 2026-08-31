@@ -120,6 +120,43 @@ def test_register_provider_403_returns_cli_fallback(monkeypatch, tmp_path):
     )
 
 
+def test_register_provider_404_reports_not_available(monkeypatch, tmp_path):
+    monkeypatch.setenv("LOCAL_STORAGE_DIR", str(tmp_path))
+    monkeypatch.delenv("ALLOWED_ORIGIN", raising=False)
+
+    from api import register_provider as mod
+    from server.app import app
+
+    class _TokenInfo:
+        token = "token-123"
+
+    monkeypatch.setattr(
+        mod.auth_token, "get_arm_token", lambda subscription_id: _TokenInfo(),
+        raising=False,
+    )
+    _install_fake_client(
+        monkeypatch, mod, status=404,
+        payload={"error": {"code": "InvalidResourceNamespace",
+                           "message": "The resource namespace 'Microsoft.ContainerStorage' is invalid."}},
+    )
+
+    client = TestClient(app)
+    res = client.post(
+        "/api/providers/register",
+        json={
+            "subscription_id": "11111111-2222-3333-4444-555555555555",
+            "provider": "Microsoft.ContainerStorage",
+        },
+    )
+
+    assert res.status_code == 404
+    body = res.json()
+    assert body["error"] == "not_available"
+    assert body["provider"] == "Microsoft.ContainerStorage"
+    # A register command that would just fail again must NOT be offered.
+    assert "cli_command" not in body
+
+
 def test_register_provider_rejects_bad_namespace(monkeypatch, tmp_path):
     monkeypatch.setenv("LOCAL_STORAGE_DIR", str(tmp_path))
     monkeypatch.delenv("ALLOWED_ORIGIN", raising=False)

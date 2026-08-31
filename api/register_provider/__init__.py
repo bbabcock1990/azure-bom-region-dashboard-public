@@ -235,28 +235,58 @@ async def main(req: func.HttpRequest) -> func.HttpResponse:
         response_payload = resp.text
 
     if resp.status_code >= 400:
-        # 403 = the identity can't self-register; hand off the CLI command.
-        code = "forbidden" if resp.status_code == 403 else "register_failed"
+        # Classify the failure so the UI can respond honestly:
+        #   403 InvalidAuthenticationTokenTenant / AuthorizationFailed
+        #       -> the identity can't self-register (hand off CLI command).
+        #   404 InvalidResourceNamespace
+        #       -> the provider isn't available on this subscription at all;
+        #          it CANNOT be self-registered here (don't offer a command
+        #          that will always fail — this is a support-worthy blocker).
+        err_code = ""
+        if isinstance(response_payload, dict):
+            err = response_payload.get("error")
+            if isinstance(err, dict):
+                err_code = str(err.get("code") or "")
+        not_available = resp.status_code == 404 or err_code == "InvalidResourceNamespace"
+        if not_available:
+            code = "not_available"
+        elif resp.status_code == 403:
+            code = "forbidden"
+        else:
+            code = "register_failed"
         activity_log.record(
             event_type="provider_register_failed",
             api_scope="subscription",
             subscription_id=subscription_id,
             status="error",
             message=f"Provider registration FAILED: {provider} (HTTP {resp.status_code})",
-            details={"provider": provider, "status_code": resp.status_code},
+            details={"provider": provider, "status_code": resp.status_code,
+                     "arm_code": err_code},
         )
-        return _err(
-            code,
-            _extract_message(
+        if not_available:
+            message = (
+                f"Azure reports the provider '{provider}' is not available on this "
+                "subscription, so it cannot be registered here. The service may not "
+                "be offered for this subscription's tenant/offer, or may require "
+                "enablement by Microsoft."
+            )
+        else:
+            message = _extract_message(
                 response_payload,
                 f"Provider registration failed with status {resp.status_code}.",
-            ),
-            resp.status_code,
-            provider=provider,
-            azure_status_code=resp.status_code,
-            cli_command=cli_command,
-            response=response_payload,
-        )
+            )
+        extra = {
+            "provider": provider,
+            "azure_status_code": resp.status_code,
+            "arm_code": err_code,
+            "response": response_payload,
+        }
+        # Only surface a register command when registration is actually possible
+        # (403 = valid namespace, missing permission). For not_available the
+        # command would just fail again, so omit it.
+        if not not_available:
+            extra["cli_command"] = cli_command
+        return _err(code, message, resp.status_code, **extra)
 
     registration_state = None
     if isinstance(response_payload, dict):
