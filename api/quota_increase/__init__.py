@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 GUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
-API_VERSION = "2023-06-01-preview"
+API_VERSION = "2023-09-01"
 ARM_BASE = "https://management.azure.com"
 
 

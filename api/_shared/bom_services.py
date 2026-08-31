@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -191,6 +192,43 @@ def _strip_bearer(token: str) -> str:
     return t
 
 
+def _arm_get_with_retry(
+    client: httpx.Client,
+    url: str,
+    *,
+    params: Dict[str, str],
+    headers: Dict[str, str],
+    attempts: int = 4,
+) -> httpx.Response:
+    """GET with small exponential backoff on transient failures.
+
+    ARM (and the TLS path to it) occasionally drops a connection mid-flight —
+    ``WinError 10054`` / ``ConnectError`` / ``ReadError`` — especially under a
+    parallel fan-out, and can return 429/502/503/504. Retrying a handful of
+    times turns those blips into a successful call instead of failing the whole
+    run. Deterministic 4xx (401/403/404/etc.) are returned immediately for the
+    caller to interpret."""
+    last_exc: Optional[Exception] = None
+    for i in range(attempts):
+        try:
+            r = client.get(url, params=params, headers=headers)
+        except (httpx.TransportError, httpx.RemoteProtocolError) as ex:
+            last_exc = ex
+            if i == attempts - 1:
+                break
+            time.sleep(0.4 * (2 ** i))
+            continue
+        if r.status_code in (429, 500, 502, 503, 504) and i < attempts - 1:
+            time.sleep(0.4 * (2 ** i))
+            continue
+        return r
+    raise BomServicesError(
+        "arm_provider_show_failed",
+        f"ARM request to {url} failed after {attempts} attempts: {last_exc!r}",
+        502,
+    )
+
+
 def _fetch_provider_locations_one(
     client: httpx.Client,
     *,
@@ -203,7 +241,7 @@ def _fetch_provider_locations_one(
     service is globally available (e.g. Azure DNS zones)."""
     url = f"{ARM_BASE}/providers/{provider}"
     params = {"api-version": PROVIDER_API_VERSION}
-    r = client.get(url, params=params, headers=headers)
+    r = _arm_get_with_retry(client, url, params=params, headers=headers)
     if r.status_code == 401:
         raise BomServicesError(
             "arm_unauthorized",

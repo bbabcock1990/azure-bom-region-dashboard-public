@@ -62,7 +62,8 @@ def test_quota_increase_endpoint_submits_request(monkeypatch, tmp_path):
     assert calls["headers"]["Authorization"] == "Bearer token-123"
     assert calls["url"].endswith(
         "/subscriptions/11111111-2222-3333-4444-555555555555/providers/"
-        "Microsoft.Compute/locations/eastus/quotas/standardDav6Family"
+        "Microsoft.Compute/locations/eastus/providers/Microsoft.Quota/"
+        "quotas/standardDav6Family"
     )
 
 
