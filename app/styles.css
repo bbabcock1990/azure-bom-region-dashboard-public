@@ -1166,6 +1166,40 @@ table.region-table tbody tr.selected td { background: var(--ms-blue-light); }
 }
 #drilldown h4:first-child { margin-top: 0; }
 
+/* Collapsible drilldown sections (collapsed by default to stay compact). */
+#drilldown .dd-section { border-top: 1px solid var(--border, rgba(255,255,255,.08)); }
+#drilldown .dd-section:first-child { border-top: 0; }
+#drilldown .dd-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  padding: 11px 2px;
+  user-select: none;
+}
+#drilldown .dd-section-head:hover { background: rgba(255, 255, 255, .03); }
+#drilldown .dd-section-head:focus-visible { outline: 2px solid var(--accent, #7aa2ff); outline-offset: -2px; border-radius: 4px; }
+#drilldown .dd-caret {
+  font-size: 10px;
+  color: var(--text-secondary);
+  transition: transform .15s ease;
+  flex: none;
+}
+#drilldown .dd-section:not(.collapsed) .dd-caret { transform: rotate(90deg); }
+#drilldown .dd-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  letter-spacing: 0.6px;
+}
+#drilldown .dd-section-badge { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; }
+#drilldown .dd-section-badge:empty { display: none; }
+#drilldown .dd-section-body { padding: 0 2px 12px; }
+#drilldown .dd-section.collapsed .dd-section-body { display: none; }
+/* Section headers replace the old <h4>; neutralize h4 top-margins inside. */
+#drilldown .dd-section-body h4 { margin-top: 12px; }
+
 #drilldown .kv {
   display: grid;
   grid-template-columns: 140px 1fr;
@@ -3134,13 +3168,18 @@ html.filters-collapsed-init .filters-body { display: none; }
 #drilldown .alt-swaps { display: flex; flex-direction: column; gap: 6px; }
 #drilldown .alt-swap {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  flex-direction: column;
+  gap: 6px;
   padding: 7px 10px;
   border-radius: 8px;
   background: rgba(143, 227, 176, .07);
   border: 1px solid rgba(143, 227, 176, .18);
+}
+#drilldown .alt-swap-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
 }
 #drilldown .alt-swap-main { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
 #drilldown .alt-from { opacity: .75; text-decoration: line-through; }
@@ -3148,6 +3187,31 @@ html.filters-collapsed-init .filters-body { display: none; }
 #drilldown .alt-arrow { opacity: .6; }
 #drilldown .alt-swap-save { color: #8fe3b0; font-weight: 600; white-space: nowrap; }
 #drilldown .alt-note { margin-top: 8px; font-size: .78rem; line-height: 1.4; }
+
+/* Live availability/quota validation badges on each suggested swap. */
+#drilldown .alt-swap-valid {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: .78rem;
+  border-top: 1px dashed rgba(255, 255, 255, .12);
+  padding-top: 5px;
+}
+#drilldown .alt-valid { font-weight: 600; }
+#drilldown .alt-valid.ok { color: #8fe3b0; }
+#drilldown .alt-valid.warn { color: #f4d4a3; }
+#drilldown .alt-valid.danger { color: #f4b3b3; }
+#drilldown .alt-valid.muted { color: var(--muted); font-weight: 500; }
+#drilldown .alt-valid.checking { color: var(--muted); font-weight: 500; font-style: italic; }
+#drilldown .alt-ticket-link {
+  font-size: .76rem;
+  font-weight: 600;
+  color: var(--accent, #7aa2ff);
+  text-decoration: none;
+  white-space: nowrap;
+}
+#drilldown .alt-ticket-link:hover { text-decoration: underline; }
 
 .alt-vendor {
   font-size: .68em;

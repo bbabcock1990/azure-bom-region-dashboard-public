@@ -794,7 +794,7 @@ function updateStats() {
 
 // ---------------------------------------------------------------- Cost estimate (pricing)
 
-const PRICING = { settings: null, estimate: null, loading: false, reqKey: "" };
+const PRICING = { settings: null, estimate: null, loading: false, reqKey: "", altValidation: {} };
 const PRICING_DISCLAIMER = "Estimate only — list price anchored to a representative VM size, not a quote. Excludes storage, egress, licensing & negotiated terms.";
 
 function _fmtMoney(n, currency, opts) {
@@ -921,31 +921,126 @@ function _costCellHtml(r) {
 }
 
 // Cheaper size-equivalent SKU suggestions block for the drilldown cost section.
-function _altSavingsBlock(info, cur) {
+function _altSavingsBlock(info, cur, regionShort) {
   const c = info.compute || {};
   const swaps = c.swaps || [];
   if (!swaps.length) return "";
   const rows = swaps.map(s => {
     const vend = s.vendor ? `<span class="alt-vendor alt-vendor--${s.vendor.toLowerCase()}" title="${escapeHtml(s.note || "")}">${escapeHtml(s.vendor)}</span>` : "";
     return `<div class="alt-swap">
-      <div class="alt-swap-main">
-        <span class="alt-from">${escapeHtml(s.from_label)}</span>
-        <span class="alt-arrow">→</span>
-        <span class="alt-to">${escapeHtml(s.to_label)}</span> ${vend}
+      <div class="alt-swap-top">
+        <div class="alt-swap-main">
+          <span class="alt-from">${escapeHtml(s.from_label)}</span>
+          <span class="alt-arrow">→</span>
+          <span class="alt-to">${escapeHtml(s.to_label)}</span> ${vend}
+        </div>
+        <div class="alt-swap-save">−${_fmtMoney(s.savings_monthly_net, cur)}/mo <span class="muted">(${s.savings_pct}%)</span></div>
       </div>
-      <div class="alt-swap-save">−${_fmtMoney(s.savings_monthly_net, cur)}/mo <span class="muted">(${s.savings_pct}%)</span></div>
+      <div class="alt-swap-valid" data-alt-fam="${escapeHtml(s.to_family)}"><span class="alt-valid checking">checking availability &amp; quota…</span></div>
     </div>`;
   }).join("");
   const total = `Save up to ${_fmtMoney(c.alt_savings_monthly_net, cur)}/mo (${c.alt_savings_pct}%) → optimized ${_fmtMoney(c.optimized_monthly_net, cur)}/mo`;
   return `
     <div class="dd-readiness-subtitle alt-title">💡 Cheaper size-equivalent SKUs</div>
     <div class="alt-headline">${total}</div>
-    <div class="alt-swaps">${rows}</div>
-    <div class="note muted alt-note">Same vCPU &amp; memory, different CPU vendor/generation. Priced in this region via the public price list — <strong>verify per-AZ availability, quota, and image/CPU-architecture compatibility</strong> before switching.</div>`;
+    <div class="alt-swaps" data-alt-region="${escapeHtml(regionShort || "")}">${rows}</div>
+    <div class="note muted alt-note">Same vCPU &amp; memory, different CPU vendor/generation. <strong>Availability, subscription restrictions and regional vCPU quota are validated live against Azure</strong> for this region &amp; subscription (badges above). ARM SKUs additionally require an ARM64-compatible OS image.</div>`;
+}
+
+// Live validation badge for one suggested alternative family.
+function _altValidBadge(v, regionShort) {
+  if (!v) return `<span class="alt-valid muted">not validated — verify manually</span>`;
+  const title = escapeHtml(v.message || "");
+  const region = escapeHtml(regionShort || "");
+  const armFam = escapeHtml(v.arm_family || "");
+  const cores = Number(v.required_cores || 0);
+  const ticketLink = (kind, label) =>
+    `<a href="#" class="alt-ticket-link" data-alt-ticket="${kind}" data-alt-region="${region}" data-alt-family="${armFam}" data-alt-cores="${cores}">${label}</a>`;
+  switch (v.verdict) {
+    case "ok":
+      return `<span class="alt-valid ok" title="${title}">✅ Available · quota OK</span>`;
+    case "quota": {
+      const need = v.quota && v.quota.shortfall != null ? Math.round(v.quota.shortfall) : null;
+      return `<span class="alt-valid warn" title="${title}">⚠️ Quota short${need != null ? ` ${need} vCPU` : ""}</span> ${ticketLink("quota", "Request quota →")}`;
+    }
+    case "restricted":
+      return `<span class="alt-valid danger" title="${title}">⛔ Restricted</span> ${ticketLink("technical", "Request access →")}`;
+    case "unavailable":
+      return `<span class="alt-valid danger" title="${title}">⛔ Not offered in region</span>`;
+    default:
+      return `<span class="alt-valid muted" title="${title}">ℹ️ ${escapeHtml(v.message || "Verify availability & quota manually")}</span>`;
+  }
+}
+
+// Patch the validation slots in the currently-rendered cost section.
+function _patchAltValidation(regionShort, entry) {
+  const slots = document.querySelectorAll(".alt-swap-valid[data-alt-fam]");
+  slots.forEach((slot) => {
+    const fam = slot.getAttribute("data-alt-fam");
+    let badge;
+    if (!entry || entry.status === "loading") {
+      badge = `<span class="alt-valid checking">checking availability &amp; quota…</span>`;
+    } else if (entry.status === "error") {
+      badge = `<span class="alt-valid muted">validation unavailable — verify manually</span>`;
+    } else {
+      badge = _altValidBadge((entry.results || {})[fam], regionShort);
+    }
+    slot.innerHTML = badge;
+  });
+}
+
+// Kick off (or reuse a cached) live availability/quota validation for the
+// cheaper-SKU swaps in this region, then paint the result into the drilldown.
+async function _validateAltsForRegion(r) {
+  if (!r) return;
+  const info = _pricingRegionInfo(r.short);
+  const swaps = (info && info.compute && info.compute.swaps) || [];
+  if (!swaps.length) return;
+  const sub = focusedSubscriptionId() || "";
+  const key = `${String(r.short).toLowerCase()}|${sub}`;
+
+  const cached = PRICING.altValidation[key];
+  if (cached && (cached.status === "done" || cached.status === "error")) {
+    _patchAltValidation(r.short, cached);
+    return;
+  }
+  if (cached && cached.status === "loading") {
+    _patchAltValidation(r.short, cached);
+    return;
+  }
+
+  const entry = { status: "loading", results: {} };
+  PRICING.altValidation[key] = entry;
+  _patchAltValidation(r.short, entry);
+
+  try {
+    const resp = await apiJson("/api/pricing/validate-alternatives", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        subscription_id: sub,
+        region: r.short,
+        alternatives: swaps.map((s) => ({ family: s.to_family, required_cores: s.required_cores })),
+      }),
+    });
+    entry.status = "done";
+    entry.results = resp.results || {};
+    entry.quota_status = resp.quota_status;
+  } catch (e) {
+    entry.status = "error";
+    entry.error = e;
+  }
+  // Only repaint if the user is still looking at this region.
+  if (String(STATE.activeDrilldownRegion || "").toLowerCase() === String(r.short).toLowerCase()) {
+    _patchAltValidation(r.short, entry);
+  }
 }
 
 // Drilldown cost section body (compute families + non-compute + total).
-function _costBody(r) {
+// Returns the inner content only — the collapsible section header is added by
+// renderCostEstimateSection so _refreshDrilldownCost can swap the body without
+// disturbing the section's collapse state.
+function _costBodyInner(r) {
   const est = PRICING.estimate;
   const info = _pricingRegionInfo(r.short);
   let inner;
@@ -970,7 +1065,7 @@ function _costBody(r) {
       </div>
       <div class="dd-readiness-subtitle">Compute — ${_fmtMoney(c.monthly_net, cur)}/mo</div>
       <div class="kv">${famRows || '<div class="muted">none</div>'}</div>
-      ${_altSavingsBlock(info, cur)}
+      ${_altSavingsBlock(info, cur, r.short)}
       <div class="dd-readiness-subtitle">Non-compute — ${_fmtMoney(nc.monthly_net, cur)}/mo</div>
       <div class="kv">
         ${svcRows}
@@ -978,21 +1073,46 @@ function _costBody(r) {
       </div>`;
   }
   const meta = est ? `OS: ${escapeHtml(est.os)} · ${est.hours_per_month} h/mo` : "OS: linux · 730 h/mo";
-  return `<h4>Cost estimate <span class="badge-est" title="${escapeHtml(PRICING_DISCLAIMER)}">Estimate</span></h4>
-    <div class="cost-estimate">${inner}</div>
+  return `<div class="cost-estimate">${inner}</div>
     <div class="note muted cost-disclaimer">${escapeHtml(PRICING_DISCLAIMER)}<br>${meta}.</div>`;
+}
+
+// Collapsible drilldown section. Each region-drilldown block is wrapped in one
+// of these; collapsed by default to keep the panel compact. `title` and `badge`
+// may contain trusted HTML (callers escape their own dynamic text).
+function _ddSection(title, bodyHtml, opts = {}) {
+  if (bodyHtml == null || String(bodyHtml).trim() === "") return "";
+  const collapsed = opts.collapsed !== false; // default: collapsed
+  const badge = opts.badge || "";
+  const cls = opts.cls ? ` ${opts.cls}` : "";
+  return `<section class="dd-section${collapsed ? " collapsed" : ""}${cls}" data-dd-section>
+    <div class="dd-section-head" role="button" tabindex="0" aria-expanded="${collapsed ? "false" : "true"}">
+      <span class="dd-caret" aria-hidden="true">▸</span>
+      <span class="dd-section-title">${title}</span>
+      <span class="dd-section-badge">${badge}</span>
+    </div>
+    <div class="dd-section-body">${bodyHtml}</div>
+  </section>`;
+}
+
+function _toggleDdSection(head) {
+  const section = head.closest(".dd-section");
+  if (!section) return;
+  const collapsed = section.classList.toggle("collapsed");
+  head.setAttribute("aria-expanded", collapsed ? "false" : "true");
 }
 
 function renderCostEstimateSection(r) {
   if (!snapshotHasCoresRequirements(STATE.snapshot)) return "";
-  return `<div id="dd-cost-wrap">${_costBody(r)}</div>`;
+  const badge = `<span class="badge-est" title="${escapeHtml(PRICING_DISCLAIMER)}">Estimate</span>`;
+  return _ddSection("Cost estimate", `<div id="dd-cost-wrap">${_costBodyInner(r)}</div>`, { badge });
 }
 
 function _refreshDrilldownCost(short) {
   const wrap = document.getElementById("dd-cost-wrap");
   if (!wrap) return;
   const r = _findRegionByShort(short);
-  if (r) wrap.innerHTML = _costBody(r);
+  if (r) { wrap.innerHTML = _costBodyInner(r); _validateAltsForRegion(r); }
 }
 
 // -------- Cost & pricing settings (gear → Settings → Cost & pricing) --------
@@ -1222,17 +1342,20 @@ function openDrilldown(r) {
   const body = document.getElementById("dd-body");
   let html = "";
   const deployment = getDeploymentVerdictInfo(r);
-  html += renderDeploymentReadinessSection(r, deployment);
+  const deploymentPill = `<span class="pill ${deployment.cls}" title="${escapeHtml(deployment.title)}">${escapeHtml(deployment.text)}</span>`;
+  // Deployment Readiness is the headline verdict — leave it expanded by default.
+  html += _ddSection("Deployment Readiness", renderDeploymentReadinessSection(r, deployment),
+    { badge: deploymentPill, collapsed: false });
 
   const ddVerdict = getRegionQuotaVerdictForSubscription(STATE.snapshot, r.short, focusedSubscriptionId());
   const ddVerdictPill = _regionQuotaVerdictLabel(ddVerdict);
   const ddVerdictHtml = `<span class="pill ${ddVerdictPill.cls}" title="${escapeHtml(ddVerdictPill.title)}">${escapeHtml(ddVerdictPill.text)}</span>`;
-  html += `<h4>Summary</h4>
-    <div class="kv">
-      <div class="key">Status</div><div><span class="status-pill ${statusClass(r.status)}">${escapeHtml(r.status)}</span></div>
+  const statusPill = `<span class="status-pill ${statusClass(r.status)}">${escapeHtml(r.status)}</span>`;
+  html += _ddSection("Summary", `<div class="kv">
+      <div class="key">Status</div><div>${statusPill}</div>
       <div class="key">Region (short)</div><div>${escapeHtml(r.short)}</div>
       <div class="key">Quota</div><div>${ddVerdictHtml}</div>
-    </div>`;
+    </div>`, { badge: statusPill });
 
   html += renderCostEstimateSection(r);
 
@@ -1240,9 +1363,7 @@ function openDrilldown(r) {
     // Determine which SKU families are BOM primary vs fallback
     const reqs = _getCoresRequirements(STATE.snapshot || {});
     const primaryLabels = new Set(reqs.map(rq => (rq.primary_label || "").toLowerCase()));
-    // Unified zone + SKU availability section
-    html += `<h4>Zone &amp; SKU Availability</h4>
-      <div class="kv">`;
+    let zoneHtml = `<div class="kv">`;
     for (const [sku, zones] of Object.entries(r.sku_zone_detail)) {
       const cells = zones.map((z, i) =>
         `<span class="zone-cell ${z ? "green" : "red"}" style="margin-right:2px">${i + 1}</span>`
@@ -1255,74 +1376,87 @@ function openDrilldown(r) {
         tag = ` <span class="sku-tag sku-tag--fallback">Fallback</span>`;
       }
       const label = isPrimary ? `<strong>${escapeHtml(sku)}</strong>${tag}` : `${escapeHtml(sku)}${tag}`;
-      html += `<div class="key">${label}</div><div>${cells}</div>`;
+      zoneHtml += `<div class="key">${label}</div><div>${cells}</div>`;
     }
-    html += `</div>`;
+    zoneHtml += `</div>`;
     // Show SKU blockers summary (zone grid already shows per-AZ red/green)
     const skuBlockers = r.sku_blockers || [];
     if (skuBlockers.length) {
-      html += `<div class="drilldown-zone-restrictions">`;
+      zoneHtml += `<div class="drilldown-zone-restrictions">`;
       for (const issue of skuBlockers) {
-        html += `<div class="note danger">${escapeHtml(issue)}</div>`;
+        zoneHtml += `<div class="note danger">${escapeHtml(issue)}</div>`;
       }
-      html += `</div>`;
+      zoneHtml += `</div>`;
     }
+    html += _ddSection("Zone &amp; SKU Availability", zoneHtml);
   } else {
     // Fallback: just show zone health if no SKU detail available
-    html += `<h4>Zone Health</h4>
-      <div class="kv">`;
+    let zhHtml = `<div class="kv">`;
     for (let i = 0; i < 3; i++) {
       const z = r.zone_health[i];
       const restriction = r.zone_restrictions[i] || "(none reported)";
-      html += `<div class="key">AZ ${i + 1}</div>
+      zhHtml += `<div class="key">AZ ${i + 1}</div>
         <div><span class="zone-cell ${z}" style="margin-right:6px">${i + 1}</span> ${escapeHtml(restriction)}</div>`;
     }
-    html += `</div>`;
+    zhHtml += `</div>`;
+    html += _ddSection("Zone Health", zhHtml);
   }
 
   if (r.chosen_skus && r.chosen_skus.length && !(r.sku_zone_detail && Object.keys(r.sku_zone_detail).length)) {
-    html += `<h4>Recommended SKUs</h4>`;
-    for (const sku of r.chosen_skus) {
-      html += `<div class="note">${escapeHtml(sku)}</div>`;
-    }
+    html += _ddSection("Recommended SKUs",
+      r.chosen_skus.map(sku => `<div class="note">${escapeHtml(sku)}</div>`).join(""));
   }
 
   if (r.sku_fallbacks && r.sku_fallbacks.length) {
-    html += `<h4>v5 Fallbacks</h4>`;
-    for (const f of r.sku_fallbacks) {
-      html += `<div class="note warn">${escapeHtml(f)}</div>`;
-    }
+    html += _ddSection("v5 Fallbacks",
+      r.sku_fallbacks.map(f => `<div class="note warn">${escapeHtml(f)}</div>`).join(""));
   }
 
   if (r.missing_services && r.missing_services.length) {
-    html += `<h4>Missing BOM Services</h4>`;
-    for (const ms of r.missing_services) {
-      html += `<div class="note danger"><strong>${escapeHtml(ms.service)}</strong>: ${escapeHtml(ms.detail)}</div>`;
-    }
+    html += _ddSection("Missing BOM Services",
+      r.missing_services.map(ms => `<div class="note danger"><strong>${escapeHtml(ms.service)}</strong>: ${escapeHtml(ms.detail)}</div>`).join(""));
   }
 
   if (r.registration_required && r.registration_required.length) {
-    html += `<h4>Registration Required</h4>`;
-    html += _registrationRequiredHtml(r.registration_required);
+    html += _ddSection("Registration Required", _registrationRequiredHtml(r.registration_required));
   }
 
   if (r.alt_regions && r.alt_regions.length) {
-    html += `<h4>Alternative regions based on health and latency</h4>`;
-    for (const a of r.alt_regions) {
+    const altHtml = r.alt_regions.map(a => {
       const ms = a.latency_ms != null ? `${a.latency_ms} ms` : "geo proximity";
-      html += `<div class="alt-row"><span>${escapeHtml(a.region)}</span><span class="ms">${ms}</span></div>`;
-    }
+      return `<div class="alt-row"><span>${escapeHtml(a.region)}</span><span class="ms">${ms}</span></div>`;
+    }).join("");
+    html += _ddSection("Alternative regions based on health and latency", altHtml);
   }
 
   const quotaResult = buildQuotaGroupRowsForRegion(STATE.snapshot, r.short);
   const quotaPill = _quotaGroupStatusLabel(_deriveQuotaRegionStatus(quotaResult.rows, r.quota_status || "unknown"));
   if (quotaResult.rows.length) {
-    html += renderDrilldownQuotaSection(r, quotaResult, quotaPill);
+    const subName = focusedSubscriptionName();
+    const quotaBadge = `<span class="pill ${quotaPill.cls}">${escapeHtml(quotaPill.text)}</span>${subName ? `<span class="dd-sub-context">Focused sub: ${escapeHtml(subName)}</span>` : ""}`;
+    html += _ddSection("Quota", renderDrilldownQuotaSection(r, quotaResult, quotaPill), { badge: quotaBadge });
   }
 
   body.innerHTML = html;
   renderSubscriptionSwitcher();
   _scanRegistrationCards(body);
+  _validateAltsForRegion(r);
+  if (!body._ddSectionBound) {
+    body.addEventListener("click", (ev) => {
+      const head = ev.target.closest(".dd-section-head");
+      if (!head || !body.contains(head)) return;
+      if (ev.target.closest("a, button, [data-rec-ticket], [data-alt-ticket]")) return;
+      _toggleDdSection(head);
+    });
+    body.addEventListener("keydown", (ev) => {
+      if (ev.key !== "Enter" && ev.key !== " ") return;
+      const head = ev.target.closest(".dd-section-head");
+      if (!head || !body.contains(head)) return;
+      ev.preventDefault();
+      _toggleDdSection(head);
+    });
+    body._ddSectionBound = true;
+  }
   if (!body._quotaRequestBound) {
     body.addEventListener("click", _handleQuotaRequestInteraction);
     body._quotaRequestBound = true;
@@ -1338,6 +1472,20 @@ function openDrilldown(r) {
       _supportPrefill(kind, regionShort);
     });
     body._recTicketBound = true;
+  }
+  if (!body._altTicketBound) {
+    body.addEventListener("click", (ev) => {
+      const link = ev.target.closest("[data-alt-ticket]");
+      if (!link) return;
+      ev.preventDefault();
+      const kind = link.getAttribute("data-alt-ticket");
+      const regionShort = link.getAttribute("data-alt-region") || STATE.activeDrilldownRegion || "";
+      const family = link.getAttribute("data-alt-family") || "";
+      const cores = Number(link.getAttribute("data-alt-cores") || 0);
+      closeDrilldown();
+      _supportPrefill(kind, regionShort, { family, newLimit: cores > 0 ? cores : undefined });
+    });
+    body._altTicketBound = true;
   }
   document.getElementById("drilldown").classList.remove("hidden");
   document.getElementById("drilldown-overlay").classList.add("open");
@@ -1443,8 +1591,7 @@ function renderDeploymentReadinessSection(region, deployment) {
     needs_validation: "Automated checks could not fully validate this region.",
   };
 
-  let html = `<h4>Deployment Readiness</h4>
-    <div class="deployment-readiness">
+  let html = `<div class="deployment-readiness">
       <div class="deployment-readiness-header">
         <span class="pill pill-lg ${deployment.cls}" title="${escapeHtml(deployment.title)}">${escapeHtml(deployment.text)}</span>
         <span class="dd-verdict-desc">${escapeHtml(verdictDesc[deployment.verdict] || "")}</span>
@@ -3051,10 +3198,8 @@ function _renderDrilldownQuotaCard(row) {
 }
 
 function renderDrilldownQuotaSection(region, quotaResult, quotaPill) {
-  const subName = focusedSubscriptionName();
   const cards = quotaResult.rows.map((row) => _renderDrilldownQuotaCard(row)).join("");
-  return `<h4>Quota <span class="pill ${quotaPill.cls}" style="margin-left:.5rem;font-size:.7rem;vertical-align:middle;">${escapeHtml(quotaPill.text)}</span>${subName ? `<span class="dd-sub-context">Focused sub: ${escapeHtml(subName)}</span>` : ""}</h4>
-    <div class="quota-cards" data-region="${escapeHtml(region.short || "")}">${cards}</div>`;
+  return `<div class="quota-cards" data-region="${escapeHtml(region.short || "")}">${cards}</div>`;
 }
 
 function _deriveQuotaRegionStatus(rows, fallbackStatus = "unknown") {

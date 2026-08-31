@@ -76,6 +76,7 @@ ROUTES = [
     ("support/tickets", ["POST"], "support_ticket_create"),
     ("pricing/settings", ["GET", "POST"], "pricing_settings"),
     ("pricing/estimate", ["POST"], "pricing_estimate"),
+    ("pricing/validate-alternatives", ["POST"], "pricing_validate_alt"),
     ("datasets/{dataset_id}/refresh", ["POST"], "datasets"),
     ("datasets/{dataset_id}/source", ["POST", "DELETE"], "datasets"),
     ("datasets/{dataset_id}", ["GET", "POST", "DELETE"], "datasets"),
