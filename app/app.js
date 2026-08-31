@@ -1343,9 +1343,9 @@ function openDrilldown(r) {
   let html = "";
   const deployment = getDeploymentVerdictInfo(r);
   const deploymentPill = `<span class="pill ${deployment.cls}" title="${escapeHtml(deployment.title)}">${escapeHtml(deployment.text)}</span>`;
-  // Deployment Readiness is the headline verdict — leave it expanded by default.
+  // All drilldown sections start collapsed so the panel opens compact.
   html += _ddSection("Deployment Readiness", renderDeploymentReadinessSection(r, deployment),
-    { badge: deploymentPill, collapsed: false });
+    { badge: deploymentPill });
 
   const ddVerdict = getRegionQuotaVerdictForSubscription(STATE.snapshot, r.short, focusedSubscriptionId());
   const ddVerdictPill = _regionQuotaVerdictLabel(ddVerdict);
