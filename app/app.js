@@ -6548,10 +6548,12 @@ function _supportHtml() {
       }).join("")
     : `<tr><td colspan="3" class="muted">No blocked regions in the current analysis 🎉</td></tr>`;
 
+  const sortedBlocked = blocked.slice().sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  const defaultBlockerRegion = sortedBlocked.length ? (sortedBlocked[0].short || "") : "";
   const blockerFilterOpts = blocked.length
-    ? `<option value="">All blocked regions (${blocked.length})</option>` + blocked
-        .slice().sort((a, b) => (a.name || "").localeCompare(b.name || ""))
-        .map(r => `<option value="${escapeHtml(r.short || "")}">${escapeHtml(r.name || r.short || "")}</option>`).join("")
+    ? sortedBlocked
+        .map(r => `<option value="${escapeHtml(r.short || "")}" ${(r.short || "") === defaultBlockerRegion ? "selected" : ""}>${escapeHtml(r.name || r.short || "")}</option>`).join("")
+      + `<option value="">All blocked regions (${blocked.length})</option>`
     : "";
 
   return `
@@ -6972,7 +6974,11 @@ function _wireSupportTab(view) {
   const limitInput = view.querySelector("#sup-limit");
   if (limitInput) limitInput.addEventListener("input", () => { limitInput.dataset.userEdited = "1"; });
   const blockerFilter = view.querySelector("#support-blocker-filter");
-  if (blockerFilter) blockerFilter.addEventListener("change", () => _applyBlockerFilter(blockerFilter.value));
+  if (blockerFilter) {
+    blockerFilter.addEventListener("change", () => _applyBlockerFilter(blockerFilter.value));
+    // Default to a single region so the list doesn't fill the screen.
+    _applyBlockerFilter(blockerFilter.value);
+  }
   const azureRefresh = view.querySelector("#sup-azure-refresh");
   if (azureRefresh) azureRefresh.addEventListener("click", _supportLoadAzureTickets);
   const azureFilter = view.querySelector("#sup-azure-filter");
