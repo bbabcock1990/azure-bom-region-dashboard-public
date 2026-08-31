@@ -273,16 +273,22 @@ def resolve_problem_classification(
     if not items:
         return None
     kw = [k.lower() for k in (keywords or [])]
+    if not kw:
+        return items[0].get("id")
+    # Score each classification by how many keywords appear in its displayName
+    # and pick the best match. Do NOT fall back to an arbitrary classification
+    # (items[0]): submitting a Compute cores payload under an unrelated
+    # classification makes ARM reject the whole request with a generic 400.
     best = None
+    best_score = 0
     for item in items:
         name = str((item.get("properties") or {}).get("displayName") or "").lower()
-        if kw and all(k in name for k in kw):
-            best = item
-            break
-        if kw and any(k in name for k in kw) and best is None:
-            best = item
-    chosen = best or items[0]
-    return chosen.get("id")
+        score = sum(1 for k in kw if k in name)
+        if score > best_score:
+            best, best_score = item, score
+    if best is None:
+        return None
+    return best.get("id")
 
 
 # ─── local tracking store ────────────────────────────────────────────────────
@@ -410,7 +416,7 @@ def create_ticket(
     problem_classification_id: Optional[str] = None
     classification_resolved = False
     if token and not is_preview:
-        keywords = ["quota"] if kind == "quota" else ["region", "sku"]
+        keywords = ["cores", "vcpu"] if kind == "quota" else ["sku", "series"]
         problem_classification_id = resolve_problem_classification(token, service_guid, keywords)
         classification_resolved = problem_classification_id is not None
     if not problem_classification_id:

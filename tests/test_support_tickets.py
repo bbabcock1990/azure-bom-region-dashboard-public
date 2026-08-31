@@ -221,3 +221,34 @@ def test_list_azure_tickets_surfaces_arm_error(isolated_storage):
     assert "support plan" in ex.value.message.lower()
 
 
+# ─── problem-classification resolution ───────────────────────────────────────
+
+@respx.mock
+def test_resolve_classification_picks_best_scoring_match():
+    from _shared import support_tickets
+    respx.get(url__regex=r".*/problemClassifications(\?.*)?$").mock(
+        return_value=httpx.Response(200, json={"value": [
+            {"id": "/x/problemClassifications/batch", "properties": {"displayName": "Batch accounts"}},
+            {"id": "/x/problemClassifications/cores", "properties": {"displayName": "Compute-VM (cores-vCPUs) subscription limit increases"}},
+            {"id": "/x/problemClassifications/storage", "properties": {"displayName": "Storage accounts"}},
+        ]})
+    )
+    pc = support_tickets.resolve_problem_classification("tok", support_tickets.QUOTA_SERVICE_GUID, ["cores", "vcpu"])
+    assert pc == "/x/problemClassifications/cores"
+
+
+@respx.mock
+def test_resolve_classification_returns_none_when_nothing_matches():
+    from _shared import support_tickets
+    # None of these relate to the keywords → must NOT fall back to an arbitrary
+    # (wrong) classification, which would make ARM reject the ticket with a 400.
+    respx.get(url__regex=r".*/problemClassifications(\?.*)?$").mock(
+        return_value=httpx.Response(200, json={"value": [
+            {"id": "/x/problemClassifications/batch", "properties": {"displayName": "Batch accounts"}},
+            {"id": "/x/problemClassifications/storage", "properties": {"displayName": "Storage accounts"}},
+        ]})
+    )
+    pc = support_tickets.resolve_problem_classification("tok", support_tickets.QUOTA_SERVICE_GUID, ["cores", "vcpu"])
+    assert pc is None
+
+

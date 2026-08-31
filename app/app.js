@@ -6598,7 +6598,7 @@ function _supportHtml() {
           <button type="button" class="btn btn--sm" id="sup-azure-refresh">↻ Refresh</button>
         </div>
       </div>
-      <p class="muted">Pulled live from Azure — support tickets already on your BOM subscription(s), excluding the ones created here.</p>
+      <p class="muted">Pulled live from Azure — support tickets on your BOM subscription(s), including any created from this dashboard.</p>
       <table class="support-table"><thead><tr>
         <th>Type</th><th>Title</th><th>Severity</th><th>Status</th><th>Created</th>
       </tr></thead><tbody id="support-azure-tickets-body">
