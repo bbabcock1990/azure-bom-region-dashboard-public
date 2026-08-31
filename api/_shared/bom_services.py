@@ -571,13 +571,18 @@ def check_services_availability(
                 key = f"{svc['provider']}/{svc['resource_type']}"
                 available_locs = provider_locations.get(key, [])
                 absent = available_locs == [PROVIDER_ABSENT]
-                matched = (not absent) and (
-                    "*" in available_locs
-                    or region_name.lower() in [str(loc).lower() for loc in available_locs]
-                    or any(_normalize_region(loc) == norm_name for loc in available_locs)
+                is_global = (not absent) and "*" in available_locs
+                matched = is_global or (
+                    (not absent) and (
+                        region_name.lower() in [str(loc).lower() for loc in available_locs]
+                        or any(_normalize_region(loc) == norm_name for loc in available_locs)
+                    )
                 )
                 if matched:
-                    services_result[svc_name] = {"available": True, "detail": ""}
+                    services_result[svc_name] = {
+                        "available": True,
+                        "detail": "global service (not region-specific)" if is_global else "",
+                    }
                 elif absent:
                     # Provider namespace is not registered on this
                     # subscription. ARM won't report a regional footprint

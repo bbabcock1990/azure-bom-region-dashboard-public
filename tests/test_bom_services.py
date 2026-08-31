@@ -286,6 +286,37 @@ def test_check_services_availability_absent_provider_labeled_distinctly():
         assert r["overall"] == "PASS"
 
 
+def test_check_services_availability_global_service_available_everywhere():
+    """A global/control-plane provider (e.g. Azure Advisor) resolves to the
+    ``*`` sentinel and must be marked available in EVERY region — with a
+    'global service' detail so it's clear it isn't region-bound (not a plain
+    regional match, and never a per-region red)."""
+    svc = [{"name": "Azure Advisor", "provider": "Microsoft.Advisor",
+            "resource_type": "*", "zone_check": False}]
+    regions = [
+        {"name": "eastus", "display_name": "East US"},
+        {"name": "westus3", "display_name": "West US 3"},
+    ]
+    # All resource types report NO regional locations → global service.
+    body = {"resourceTypes": [
+        {"resourceType": "configurations", "locations": []},
+        {"resourceType": "recommendations", "locations": []},
+    ]}
+    with patch("_shared.bom_services.httpx.Client") as MC:
+        client = MC.return_value.__enter__.return_value
+        client.get.return_value = _arm_response(200, body)
+        out = bom_services.check_services_availability(
+            svc, regions, arm_token="t",
+            subscription_id="00000000-0000-0000-0000-000000000000",
+        )
+    assert len(out) == 2
+    for r in out:
+        sr = r["services"]["Azure Advisor"]
+        assert sr["available"] is True
+        assert "global service" in sr["detail"]
+        assert r["overall"] == "PASS"
+
+
 def test_check_services_availability_ssdv2_needs_three_zones():
     svc = [{"name": "Premium SSD v2", "provider": "Microsoft.Compute",
             "resource_type": "disks", "zone_check": True}]
