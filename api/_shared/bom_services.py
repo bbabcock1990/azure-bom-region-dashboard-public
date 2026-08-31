@@ -80,6 +80,8 @@ def load_builtin_catalog() -> List[Dict]:
                 "provider": str(s["provider"]).strip(),
                 "resource_type": str(s["resource_type"]).strip(),
                 "zone_check": bool(s.get("zone_check", False)),
+                "category": (str(s.get("category")).strip()
+                             if s.get("category") else "Other"),
             }
             for s in services
             if s.get("name") and s.get("provider") and s.get("resource_type")
@@ -117,7 +119,7 @@ def load_catalog() -> List[Dict]:
             log.info("bom_services: skipping custom service %s (shadows built-in)",
                      v["name"])
             continue
-        out.append({**v, "is_custom": True})
+        out.append({**v, "is_custom": True, "category": v.get("category") or "Custom services"})
 
     # Stable sort: built-ins first, then customs, each alphabetical.
     out.sort(key=lambda s: (s["is_custom"], s["name"].lower()))
@@ -230,7 +232,27 @@ def _fetch_provider_locations_one(
             f"ARM returned non-JSON for provider show {provider}: {ex}",
             502,
         )
-    for rt in data.get("resourceTypes") or []:
+    resource_types = data.get("resourceTypes") or []
+
+    # ``*`` means "the whole provider" — union the locations across every
+    # resource type it exposes. Used by the auto-pulled, provider-level catalog
+    # entries so a service is "available" wherever the provider offers anything.
+    if resource_type == "*":
+        regional: set = set()
+        saw_global = False
+        for rt in resource_types:
+            for loc in rt.get("locations") or []:
+                if not loc:
+                    continue
+                if str(loc).lower() == "global":
+                    saw_global = True
+                else:
+                    regional.add(str(loc))
+        if regional:
+            return sorted(regional)
+        return ["*"] if saw_global else []
+
+    for rt in resource_types:
         if rt.get("resourceType", "").lower() == resource_type.lower():
             locs = rt.get("locations") or []
             if any((loc or "").lower() == "global" for loc in locs):

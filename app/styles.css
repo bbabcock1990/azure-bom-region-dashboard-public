@@ -1635,6 +1635,30 @@ html.filters-collapsed-init .filters-body { display: none; }
 .bom-services-list label.hidden { display: none; }
 .bom-services-list label span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bom-services-list label .svc-zone { color: var(--panel-text-dim); font-size: .72rem; margin-left: .25rem; }
+/* Services + Regions pickers become accordions of collapsible sections. */
+#bom-services-list, #bom-regions-list { display: block; }
+.bom-services-list .svc-group { border-bottom: 1px solid var(--panel-border-divider); }
+.bom-services-list .svc-group:last-child { border-bottom: 0; }
+.bom-services-list .svc-group.hidden { display: none; }
+.svc-cat-header { display: flex; align-items: center; gap: .5rem; width: 100%;
+  background: transparent; border: 0; cursor: pointer; text-align: left;
+  padding: .5rem .15rem; color: var(--panel-text-soft); font-size: .82rem;
+  font-weight: 600; }
+.svc-cat-header:hover { color: #fff; }
+.svc-cat-chevron { display: inline-block; color: var(--panel-text-dim); font-size: .7rem;
+  transition: transform .12s ease; width: .8em; }
+.svc-group.open .svc-cat-header .svc-cat-chevron { transform: rotate(90deg); }
+.svc-cat-name { flex: 0 1 auto; }
+.svc-cat-count { color: var(--panel-text-dim); font-weight: 400; font-size: .74rem;
+  background: rgba(255,255,255,.06); padding: 0 .4rem; border-radius: 10px; }
+.svc-cat-selected { margin-left: auto; color: #6fcf97; font-weight: 500; font-size: .74rem; }
+.svc-group-items { display: none; grid-template-columns: repeat(2, 1fr);
+  gap: .1rem .8rem; padding: 0 .1rem .5rem 1.35rem; }
+.svc-group.open .svc-group-items { display: grid; }
+@media (min-width: 900px) {
+  #bom-modal .svc-group-items { grid-template-columns: repeat(3, 1fr); }
+}
+.bom-services-list .svc-group-items label .svc-name { color: var(--panel-text-soft); }
 .bom-skus-table { width: 100%; border-collapse: collapse; margin-top: .25rem;
   font-size: .82rem; }
 .bom-skus-table th { text-align: left; padding: 4px 6px; color: var(--panel-text-dim);

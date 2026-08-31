@@ -306,7 +306,9 @@ _REGISTRY: Dict[str, _Dataset] = {
             "service_catalog", filename="bom_service_catalog.json",
             label="Service catalog", kind="json", accept=".json",
             description=("Azure services with their ARM provider / resource "
-                         "type, used for zonal availability checks."),
+                         "type, used for zonal availability checks. Refresh "
+                         "from Azure to pull every service your subscription "
+                         "can use (subscription-wide, not per-region)."),
             validate=_validate_service_catalog,
         ),
         _Dataset(

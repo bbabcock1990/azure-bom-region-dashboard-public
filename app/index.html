@@ -22,7 +22,7 @@
        Order matters: this must run before the <link> below. -->
   <script src="preinit.js?v=2026061503"></script>
 
-  <link rel="stylesheet" href="styles.css?v=2026082616" />
+  <link rel="stylesheet" href="styles.css?v=2026082620" />
 </head>
 <body>
 
@@ -733,7 +733,7 @@
         <p class="muted">Custom services are saved to your local catalog and become selectable below. To manage the <em>built-in</em> list, edit <code>api/_shared/data/bom_service_catalog.json</code> and restart the dashboard.</p>
         <div class="bom-custom-status" id="bom-custom-svc-status"></div>
       </details>
-      <p class="muted">The dashboard will call ARM <code>providers/{namespace}?api-version=2024-07-01</code> for each selected service to compute per-region availability. <code>Premium SSD v2</code> additionally calls <code>Microsoft.Compute/skus</code> for live zone data.</p>
+      <p class="muted">Pick the services in your architecture. The dashboard checks each one's per-region availability when you run the BOM.</p>
     </div>
     <div class="run-step">
       <label>Regions</label>
@@ -851,6 +851,6 @@
 
 <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
 
-<script src="app.js?v=2026082616"></script>
+<script src="app.js?v=2026082620"></script>
 </body>
 </html>

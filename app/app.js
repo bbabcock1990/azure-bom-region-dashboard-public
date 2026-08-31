@@ -4209,26 +4209,89 @@ function renderBomServiceList() {
   const list = document.getElementById("bom-services-list");
   list.innerHTML = "";
   const cat = BOM_EDIT.catalog || [];
+
+  const ORDER = [
+    "Compute", "Containers", "Web", "Databases", "Storage", "Networking",
+    "AI + Machine Learning", "Analytics", "Integration", "Internet of Things",
+    "Security & Identity", "Management & Governance", "Developer Tools",
+    "Migration", "Mixed Reality", "Media & Other",
+  ];
+  const groups = new Map();
   for (const svc of cat) {
-    const id = "bom-svc-" + svc.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
-    const lbl = document.createElement("label");
-    lbl.dataset.name = svc.name.toLowerCase();
-    const zone = svc.zone_check
-      ? '<span class="svc-zone" title="Live zone availability via Microsoft.Compute/skus">(zones)</span>'
-      : "";
-    const delBtn = svc.is_custom
-      ? `<button type="button" class="bom-custom-del" data-del-svc="${escapeHtml(svc.name)}" title="Remove this custom service">&times;</button>`
-      : "";
-    lbl.innerHTML = `<input type="checkbox" id="${id}" value="${escapeHtml(svc.name)}" data-bom-svc /> <span>${escapeHtml(svc.name)} ${zone}</span>${delBtn}`;
-    list.appendChild(lbl);
+    const c = (svc.category || "Other").trim() || "Other";
+    if (!groups.has(c)) groups.set(c, []);
+    groups.get(c).push(svc);
   }
+  const cats = Array.from(groups.keys()).sort((a, b) => {
+    // "Other" always sinks to the bottom (long tail of niche providers).
+    if (a === "Other") return 1;
+    if (b === "Other") return -1;
+    const ia = ORDER.indexOf(a), ib = ORDER.indexOf(b);
+    if (ia !== -1 || ib !== -1) return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+    return a.localeCompare(b);
+  });
+
+  for (const c of cats) {
+    const items = groups.get(c);
+    const group = document.createElement("div");
+    group.className = "svc-group";
+    group.dataset.cat = c.toLowerCase();
+
+    const header = document.createElement("button");
+    header.type = "button";
+    header.className = "svc-cat-header";
+    header.setAttribute("aria-expanded", "false");
+    header.innerHTML =
+      `<span class="svc-cat-chevron" aria-hidden="true">&#9656;</span>` +
+      `<span class="svc-cat-name">${escapeHtml(c)}</span>` +
+      `<span class="svc-cat-count">${items.length}</span>` +
+      `<span class="svc-cat-selected" hidden></span>`;
+    header.addEventListener("click", () => {
+      const open = group.classList.toggle("open");
+      header.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+
+    const body = document.createElement("div");
+    body.className = "svc-group-items";
+    for (const svc of items) {
+      const id = "bom-svc-" + svc.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+      const lbl = document.createElement("label");
+      // Searchable across friendly name, provider namespace and category.
+      lbl.dataset.name = `${svc.name} ${svc.provider || ""} ${c}`.toLowerCase();
+      if (svc.provider) lbl.title = svc.provider;   // namespace on hover, not inline
+      const zone = svc.zone_check
+        ? '<span class="svc-zone" title="Live zone availability via Microsoft.Compute/skus">zones</span>'
+        : "";
+      const delBtn = svc.is_custom
+        ? `<button type="button" class="bom-custom-del" data-del-svc="${escapeHtml(svc.name)}" title="Remove this custom service">&times;</button>`
+        : "";
+      lbl.innerHTML = `<input type="checkbox" id="${id}" value="${escapeHtml(svc.name)}" data-bom-svc /> <span class="svc-name">${escapeHtml(svc.name)} ${zone}</span>${delBtn}`;
+      body.appendChild(lbl);
+    }
+
+    group.appendChild(header);
+    group.appendChild(body);
+    list.appendChild(group);
+  }
+  updateSvcGroupBadges();
   // Re-apply the active filter (if any) so newly-added customs respect it.
   filterBomServices(document.getElementById("bom-services-filter").value);
+}
+
+function updateSvcGroupBadges() {
+  document.querySelectorAll('#bom-services-list .svc-group').forEach(g => {
+    const sel = g.querySelectorAll('input[data-bom-svc]:checked').length;
+    const badge = g.querySelector('.svc-cat-selected');
+    if (!badge) return;
+    if (sel) { badge.textContent = `${sel} selected`; badge.hidden = false; g.classList.add("has-selected"); }
+    else { badge.hidden = true; g.classList.remove("has-selected"); }
+  });
 }
 
 function updateBomServiceCount() {
   const n = document.querySelectorAll('#bom-services-list input[data-bom-svc]:checked').length;
   document.getElementById("bom-edit-services-count").textContent = `${n} selected`;
+  updateSvcGroupBadges();
 }
 
 function setBomSelectedServices(names) {
@@ -4246,40 +4309,130 @@ function getBomSelectedServices() {
 
 function filterBomServices(query) {
   const q = (query || "").trim().toLowerCase();
-  document.querySelectorAll('#bom-services-list label').forEach(lbl => {
-    const hit = !q || lbl.dataset.name.includes(q);
-    lbl.classList.toggle("hidden", !hit);
+  const list = document.getElementById("bom-services-list");
+  list.querySelectorAll('.svc-group').forEach(group => {
+    let anyVisible = false;
+    group.querySelectorAll('label').forEach(lbl => {
+      const hit = !q || (lbl.dataset.name || "").includes(q);
+      lbl.classList.toggle("hidden", !hit);
+      if (hit) anyVisible = true;
+    });
+    // Hide whole category when nothing matches; auto-expand when searching,
+    // collapse back to the tidy default when the filter is cleared.
+    group.classList.toggle("hidden", !anyVisible);
+    if (q) {
+      group.classList.toggle("open", anyVisible);
+    } else {
+      group.classList.remove("open");
+    }
+    const header = group.querySelector('.svc-cat-header');
+    if (header) header.setAttribute("aria-expanded", group.classList.contains("open") ? "true" : "false");
   });
 }
 
 // ---- Regions picker (parallel structure to services) ----
 
+// Classify an Azure region into a geography/continent bucket for grouping.
+// Uses specific location-name tokens (canonical name) so "eastus" ≠ "australia".
+function regionGeo(name) {
+  const n = (name || "").toLowerCase();
+  const MAP = [
+    ["United States", ["centralus", "eastus", "westus", "southcentralus", "northcentralus", "westcentralus", "unitedstates", "usgov", "usdod", "ussec", "usnat"]],
+    ["Canada", ["canada"]],
+    ["South America", ["brazil", "chile"]],
+    ["Mexico", ["mexico"]],
+    ["Europe", ["europe", "uksouth", "ukwest", "france", "germany", "norway", "switzerland", "sweden", "italy", "poland", "spain", "belgium", "austria", "denmark", "ireland", "netherlands", "finland", "greece"]],
+    ["Asia Pacific", ["asia", "india", "japan", "korea", "australia", "newzealand", "zealand", "indonesia", "malaysia", "taiwan", "china", "hongkong", "singapore"]],
+    ["Middle East", ["uae", "qatar", "israel", "saudi", "emirates"]],
+    ["Africa", ["africa"]],
+  ];
+  for (const [geo, keys] of MAP) {
+    if (keys.some(k => n.includes(k))) return geo;
+  }
+  return "Other";
+}
+
+const REGION_GEO_ORDER = [
+  "United States", "Canada", "South America", "Mexico", "Europe",
+  "Asia Pacific", "Middle East", "Africa", "Other",
+];
+
 function renderBomRegionsList() {
   const list = document.getElementById("bom-regions-list");
   list.innerHTML = "";
   const cat = BOM_EDIT.regionsCatalog || [];
+
+  const groups = new Map();
   for (const rg of cat) {
-    const id = "bom-rg-" + rg.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
-    const lbl = document.createElement("label");
-    lbl.dataset.name = rg.name.toLowerCase();
-    lbl.dataset.display = (rg.display_name || rg.name).toLowerCase();
-    lbl.dataset.az = rg.has_az ? "1" : "0";
-    const azChip = rg.has_az
-      ? '<span class="svc-zone" title="Region has Availability Zones">AZ</span>'
-      : '<span class="region-noaz" title="Region does not have AZs">no AZ</span>';
-    const delBtn = rg.is_custom
-      ? `<button type="button" class="bom-custom-del" data-del-rg="${escapeHtml(rg.name)}" title="Remove this custom region">&times;</button>`
-      : "";
-    lbl.innerHTML = `<input type="checkbox" id="${id}" value="${escapeHtml(rg.name)}" data-bom-rg /> <span>${escapeHtml(rg.display_name || rg.name)} <span class="muted">(${escapeHtml(rg.name)})</span> ${azChip}</span>${delBtn}`;
-    list.appendChild(lbl);
+    const g = regionGeo(rg.name);
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(rg);
   }
+  const geos = Array.from(groups.keys()).sort((a, b) => {
+    const ia = REGION_GEO_ORDER.indexOf(a), ib = REGION_GEO_ORDER.indexOf(b);
+    return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib) || a.localeCompare(b);
+  });
+
+  for (const g of geos) {
+    const group = document.createElement("div");
+    group.className = "svc-group";
+    group.dataset.geo = g.toLowerCase();
+
+    const header = document.createElement("button");
+    header.type = "button";
+    header.className = "svc-cat-header";
+    header.setAttribute("aria-expanded", "false");
+    header.innerHTML =
+      `<span class="svc-cat-chevron" aria-hidden="true">&#9656;</span>` +
+      `<span class="svc-cat-name">${escapeHtml(g)}</span>` +
+      `<span class="svc-cat-count">${groups.get(g).length}</span>` +
+      `<span class="svc-cat-selected" hidden></span>`;
+    header.addEventListener("click", () => {
+      const open = group.classList.toggle("open");
+      header.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+
+    const body = document.createElement("div");
+    body.className = "svc-group-items";
+    for (const rg of groups.get(g)) {
+      const id = "bom-rg-" + rg.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+      const lbl = document.createElement("label");
+      lbl.dataset.name = rg.name.toLowerCase();
+      lbl.dataset.display = (rg.display_name || rg.name).toLowerCase();
+      lbl.dataset.az = rg.has_az ? "1" : "0";
+      const azChip = rg.has_az
+        ? '<span class="svc-zone" title="Region has Availability Zones">AZ</span>'
+        : '<span class="region-noaz" title="Region does not have AZs">no AZ</span>';
+      const delBtn = rg.is_custom
+        ? `<button type="button" class="bom-custom-del" data-del-rg="${escapeHtml(rg.name)}" title="Remove this custom region">&times;</button>`
+        : "";
+      lbl.innerHTML = `<input type="checkbox" id="${id}" value="${escapeHtml(rg.name)}" data-bom-rg /> <span>${escapeHtml(rg.display_name || rg.name)} <span class="muted">(${escapeHtml(rg.name)})</span> ${azChip}</span>${delBtn}`;
+      body.appendChild(lbl);
+    }
+
+    group.appendChild(header);
+    group.appendChild(body);
+    list.appendChild(group);
+  }
+  updateRegionGroupBadges();
   filterBomRegions();
+}
+
+function updateRegionGroupBadges() {
+  document.querySelectorAll('#bom-regions-list .svc-group').forEach(g => {
+    const sel = g.querySelectorAll('input[data-bom-rg]:checked').length;
+    const badge = g.querySelector('.svc-cat-selected');
+    if (!badge) return;
+    if (sel) { badge.textContent = `${sel} selected`; badge.hidden = false; g.classList.add("has-selected"); }
+    else { badge.hidden = true; g.classList.remove("has-selected"); }
+  });
 }
 
 function updateBomRegionsCount() {
   const total = document.querySelectorAll('#bom-regions-list input[data-bom-rg]').length;
   const n = document.querySelectorAll('#bom-regions-list input[data-bom-rg]:checked').length;
   document.getElementById("bom-regions-count").textContent = `${n} of ${total} selected`;
+  updateRegionGroupBadges();
 }
 
 function setBomSelectedRegions(names) {
@@ -4301,14 +4454,26 @@ function getBomSelectedRegions() {
 function filterBomRegions() {
   const q = (document.getElementById("bom-regions-search").value || "").trim().toLowerCase();
   const filt = document.getElementById("bom-regions-filter").value || "all";
-  document.querySelectorAll('#bom-regions-list label').forEach(lbl => {
-    let show = true;
-    if (filt === "az" && lbl.dataset.az !== "1") show = false;
-    if (filt === "noaz" && lbl.dataset.az !== "0") show = false;
-    if (show && q) {
-      show = lbl.dataset.name.includes(q) || lbl.dataset.display.includes(q);
-    }
-    lbl.classList.toggle("hidden", !show);
+  const active = !!q || filt !== "all";
+  document.querySelectorAll('#bom-regions-list .svc-group').forEach(group => {
+    let anyVisible = false;
+    group.querySelectorAll('label').forEach(lbl => {
+      let show = true;
+      if (filt === "az" && lbl.dataset.az !== "1") show = false;
+      if (filt === "noaz" && lbl.dataset.az !== "0") show = false;
+      if (show && q) {
+        show = lbl.dataset.name.includes(q) || lbl.dataset.display.includes(q);
+      }
+      lbl.classList.toggle("hidden", !show);
+      if (show) anyVisible = true;
+    });
+    group.classList.toggle("hidden", !anyVisible);
+    // Auto-expand while a search/AZ filter is active; collapse to the tidy
+    // default when nothing is being filtered.
+    if (active) group.classList.toggle("open", anyVisible);
+    else group.classList.remove("open");
+    const header = group.querySelector('.svc-cat-header');
+    if (header) header.setAttribute("aria-expanded", group.classList.contains("open") ? "true" : "false");
   });
 }
 

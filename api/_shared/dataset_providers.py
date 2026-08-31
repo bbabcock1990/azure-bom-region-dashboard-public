@@ -8,20 +8,25 @@ being uploaded by hand as Azure ships new regions and SKUs:
     (``/subscriptions/{sub}/locations``).
   * ``sku_families_seed``  — the canonical VM family ids, from
     ``Microsoft.Compute/skus`` (reuses :mod:`sku_families`).
+  * ``service_catalog``    — one entry per resource provider the subscription
+    can use, from the ARM *Providers* API
+    (``/subscriptions/{sub}/providers``). This is subscription-scoped, so it
+    captures the full set of potential services rather than just what a single
+    region offers.
 
 Each provider returns **bytes in the packaged seed's exact format**, so the
 existing :mod:`dataset_store` validators accept the result unchanged and it
 drops straight into the override layer. A provider never mutates a seed and
 never writes anything itself — :mod:`dataset_store` owns persistence.
 
-Datasets with no ARM equivalent (the latency matrix, the curated service
-catalog) are intentionally absent from :data:`PROVIDERS`; those are kept
-current with the "Link a data URL" mechanism instead.
+The latency matrix has no ARM equivalent, so it stays current with the "Link a
+data URL" mechanism instead.
 """
 from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional
 
@@ -31,6 +36,9 @@ ARM_BASE = "https://management.azure.com"
 # Locations API version that returns `availabilityZoneMappings`, which is our
 # availability-zone signal for a region.
 LOCATIONS_API_VERSION = "2022-12-01"
+# Providers API version used to enumerate every resource provider / resource
+# type available to a subscription.
+PROVIDERS_API_VERSION = "2021-04-01"
 DEFAULT_TIMEOUT_S = 45.0
 
 
@@ -156,10 +164,92 @@ def sku_families_seed_bytes() -> bytes:
     return ("\n".join(fams) + "\n").encode("utf-8")
 
 
+def _load_curated_services() -> List[Dict]:
+    """Read the packaged service-catalog seed — the curated, website-aligned
+    Azure product catalog that a subscription refresh is intersected with."""
+    from . import dataset_store
+    try:
+        with open(dataset_store.packaged_path("service_catalog"), "r",
+                  encoding="utf-8") as f:
+            return (json.load(f) or {}).get("services") or []
+    except Exception:  # pragma: no cover - seed is always present in practice
+        log.warning("dataset_providers: could not read curated service seed",
+                    exc_info=True)
+        return []
+
+
+def service_catalog_bytes() -> bytes:
+    """Intersect the curated Azure **product** catalog with the subscription.
+
+    ``GET /subscriptions/{sub}/providers`` enumerates every resource provider
+    the subscription can access — but that raw list is full of internal /
+    plumbing / partner namespaces (Bare Metal, Compute Bulk Actions, Edge Order
+    Partner, …) that are not real products on azure.microsoft.com/products.
+
+    So rather than dump every namespace, we keep the hand-curated product
+    catalog (the seed, aligned to the Azure products page) and **filter it to
+    the providers the subscription actually exposes**. Products whose namespace
+    the subscription can't access are dropped; nothing outside the catalog is
+    ever added. The result is a clean, product-aligned list grounded in the
+    subscription's real capabilities."""
+    token, sub = _operator_context()
+    url = f"{ARM_BASE}/subscriptions/{sub}/providers"
+    items = _arm_get_all(url, {"api-version": PROVIDERS_API_VERSION}, token)
+
+    # Provider namespaces (lowercased) the subscription can deploy something in.
+    available = set()
+    for it in items:
+        ns = (it.get("namespace") or "").strip().lower()
+        if ns and (it.get("resourceTypes") or []):
+            available.add(ns)
+
+    services: List[Dict] = []
+    used_names = set()
+    for s in _load_curated_services():
+        provider = str(s.get("provider") or "").strip()
+        rtype = str(s.get("resource_type") or "").strip()
+        name = str(s.get("name") or "").strip()
+        if not (provider and rtype and name):
+            continue
+        if provider.lower() not in available:
+            continue  # product's provider isn't available to this subscription
+        if name.lower() in used_names:
+            continue
+        used_names.add(name.lower())
+        services.append({
+            "name": name,
+            "provider": provider,
+            "resource_type": rtype,
+            "zone_check": bool(s.get("zone_check", False)),
+            "category": (str(s.get("category")).strip()
+                         if s.get("category") else "Other"),
+        })
+
+    if not services:
+        raise ProviderError(
+            "empty_result",
+            "None of the catalog's products matched a resource provider this "
+            "subscription can access — check that you're signed in with a "
+            "readable subscription.",
+        )
+    doc = {
+        "_comment": (
+            f"Azure product catalog intersected with subscription {sub} on "
+            f"{datetime.now(timezone.utc).date().isoformat()} (ARM providers "
+            f"api-version {PROVIDERS_API_VERSION}). Only curated, website-aligned "
+            "products the subscription can access are listed. Revert to the "
+            "built-in seed to restore the full catalog."
+        ),
+        "services": services,
+    }
+    return (json.dumps(doc, indent=2) + "\n").encode("utf-8")
+
+
 # Map of dataset id → provider callable returning seed-format bytes.
 PROVIDERS: Dict[str, Callable[[], bytes]] = {
     "region_catalog": region_catalog_bytes,
     "sku_families_seed": sku_families_seed_bytes,
+    "service_catalog": service_catalog_bytes,
 }
 
 
