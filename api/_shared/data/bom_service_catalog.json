@@ -249,7 +249,7 @@
     {
       "name": "Azure Container Storage",
       "provider": "Microsoft.ContainerStorage",
-      "resource_type": "*",
+      "resource_type": "pools",
       "zone_check": false,
       "category": "Storage"
     },

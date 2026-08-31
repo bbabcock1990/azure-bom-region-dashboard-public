@@ -34,6 +34,13 @@ COMPUTE_SKUS_API_VERSION = "2024-07-01"
 DEFAULT_TIMEOUT_S = 60.0
 MAX_PARALLEL = 8
 
+# Sentinel returned by the provider-show helper when ARM doesn't recognize a
+# provider namespace at all (404 InvalidResourceNamespace) — i.e. the service's
+# resource provider isn't available to this subscription/tenant. It's kept
+# distinct from an empty list (provider exists but offers no region) so the UI
+# can tell "provider not registered here" apart from "not offered in region".
+PROVIDER_ABSENT = "\u0000provider-absent"
+
 _DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 _CATALOG_PATH = os.path.join(_DATA_DIR, "bom_service_catalog.json")
 
@@ -257,12 +264,14 @@ def _fetch_provider_locations_one(
         )
     if r.status_code == 404:
         # The provider namespace doesn't exist in this tenant/cloud (ARM
-        # returns 404 InvalidResourceNamespace). That just means the service
-        # isn't available here — surface it as "not available anywhere" so the
-        # UI shows ❌ for this one service instead of failing the whole run.
-        log.info("bom_services: provider show 404 for %s — treating as "
-                 "unavailable", provider)
-        return []
+        # returns 404 InvalidResourceNamespace). That means the service's
+        # resource provider isn't available to this subscription — return the
+        # ABSENT sentinel so the caller can label it honestly ("provider not
+        # available in this subscription") rather than implying we checked
+        # every region.
+        log.info("bom_services: provider show 404 for %s — provider absent",
+                 provider)
+        return [PROVIDER_ABSENT]
     if r.status_code >= 400:
         raise BomServicesError(
             "arm_provider_show_failed",
@@ -561,7 +570,8 @@ def check_services_availability(
             else:
                 key = f"{svc['provider']}/{svc['resource_type']}"
                 available_locs = provider_locations.get(key, [])
-                matched = (
+                absent = available_locs == [PROVIDER_ABSENT]
+                matched = (not absent) and (
                     "*" in available_locs
                     or region_name.lower() in [str(loc).lower() for loc in available_locs]
                     or any(_normalize_region(loc) == norm_name for loc in available_locs)
@@ -569,9 +579,17 @@ def check_services_availability(
                 if matched:
                     services_result[svc_name] = {"available": True, "detail": ""}
                 else:
+                    if absent:
+                        # Provider namespace unknown to this subscription — a
+                        # tenant/registration gap, not a per-region verdict.
+                        detail = "not available (provider not registered in this subscription)"
+                    elif not available_locs:
+                        detail = "not available in any region"
+                    else:
+                        detail = f"not available in {display}"
                     services_result[svc_name] = {
                         "available": False,
-                        "detail": "not in provider list",
+                        "detail": detail,
                     }
                     overall = "FAIL"
 
@@ -596,7 +614,7 @@ def synthesize_bom_records(
 
     Header is ``[Region, Display Name, Overall Status, <svc1>, <svc2>, …]``.
     Each record has the per-service column populated with
-    ``"✅ Available"`` / ``"❌ not in provider list"`` strings so
+    ``"✅ Available"`` / ``"❌ not available …"`` strings so
     ``extract_missing_services()`` sees the same ❌ markers and
     ``Overall Status`` contains ``"SUPPORTED"`` / ``"UNSUPPORTED"``.
 

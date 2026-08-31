@@ -148,7 +148,8 @@ def test_fetch_provider_locations_wildcard_unions_regional_locations():
 
 def test_fetch_provider_locations_404_marks_unavailable_not_raise():
     """A 404 InvalidResourceNamespace (provider not valid in this tenant) is
-    surfaced as unavailable (empty list), not a fatal error."""
+    surfaced as the ABSENT sentinel (provider not registered), not a fatal
+    error and not confused with a per-region gap."""
     with patch("_shared.bom_services.httpx.Client") as MC:
         client = MC.return_value.__enter__.return_value
         client.get.return_value = _arm_response(
@@ -158,7 +159,7 @@ def test_fetch_provider_locations_404_marks_unavailable_not_raise():
               "provider": "Microsoft.ContainerStorage", "resource_type": "*"}],
             arm_token="t",
         )
-    assert out["Microsoft.ContainerStorage/*"] == []
+    assert out["Microsoft.ContainerStorage/*"] == [bom_services.PROVIDER_ABSENT]
 
 
 def test_fetch_provider_locations_401_raises():
@@ -252,6 +253,33 @@ def test_check_services_availability_marks_missing_regions_fail():
     assert e["services"]["Azure Automation"]["available"] is True
     assert w["overall"] == "FAIL"
     assert w["services"]["Azure Automation"]["available"] is False
+    # region-specific gap gets a region-specific detail, not a blanket label
+    assert "West US 3" in w["services"]["Azure Automation"]["detail"]
+
+
+def test_check_services_availability_absent_provider_labeled_distinctly():
+    """A provider ARM doesn't recognize (404) is labelled as a
+    subscription/registration gap, distinct from a per-region miss, in every
+    region."""
+    svc = [{"name": "Azure Container Storage",
+            "provider": "Microsoft.ContainerStorage",
+            "resource_type": "pools", "zone_check": False}]
+    regions = [
+        {"name": "eastus", "display_name": "East US"},
+        {"name": "westus3", "display_name": "West US 3"},
+    ]
+    with patch("_shared.bom_services.httpx.Client") as MC:
+        client = MC.return_value.__enter__.return_value
+        client.get.return_value = _arm_response(
+            404, {"error": {"code": "InvalidResourceNamespace"}})
+        out = bom_services.check_services_availability(
+            svc, regions, arm_token="t",
+            subscription_id="00000000-0000-0000-0000-000000000000",
+        )
+    for r in out:
+        sr = r["services"]["Azure Container Storage"]
+        assert sr["available"] is False
+        assert "not registered in this subscription" in sr["detail"]
 
 
 def test_check_services_availability_ssdv2_needs_three_zones():
