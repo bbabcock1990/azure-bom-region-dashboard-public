@@ -2998,3 +2998,114 @@ html.filters-collapsed-init .filters-body { display: none; }
 .settings-collapse[open] > summary::before { transform: rotate(90deg); }
 .settings-collapse-hint { font-size: .85em; opacity: .7; }
 .settings-collapse-body { margin-top: 12px; }
+
+/* ---------------------------------------------------------------- Cost estimate / pricing */
+#regions-table th.cost-col,
+#regions-table td.cost-col {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+#regions-table td.cost-col { color: var(--text, #e8ecf1); }
+
+.stat.cost-stat strong { color: #8fe3b0; }
+.stat.cost-stat small { opacity: .65; font-weight: 400; }
+
+.badge-est {
+  display: inline-block;
+  font-size: .68em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(143, 227, 176, .16);
+  color: #8fe3b0;
+  border: 1px solid rgba(143, 227, 176, .35);
+  vertical-align: middle;
+  margin-left: 6px;
+}
+
+#drilldown .cost-estimate { margin: 6px 0 4px; }
+#drilldown .cost-total-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 8px 0 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, .08);
+  margin-bottom: 8px;
+}
+#drilldown .cost-total {
+  font-size: 1.55rem;
+  font-weight: 700;
+  color: #8fe3b0;
+  line-height: 1;
+}
+#drilldown .cost-total small { font-size: .55em; font-weight: 400; opacity: .7; margin-left: 3px; }
+#drilldown .cost-sub { font-size: .82rem; }
+#drilldown .cost-disclaimer { margin-top: 8px; font-size: .78rem; line-height: 1.4; }
+
+/* Cost & pricing settings panel */
+.pricing-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px 18px;
+  margin: 14px 0 8px;
+}
+.pricing-grid > label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: .85rem;
+  font-weight: 600;
+}
+.pricing-grid input,
+.pricing-grid select {
+  padding: 7px 9px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, .16);
+  background: rgba(255, 255, 255, .04);
+  color: inherit;
+  font-weight: 400;
+}
+.pricing-grid small { font-weight: 400; }
+
+.pricing-services {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 10px 0 6px;
+}
+.pricing-svc-row {
+  display: grid;
+  grid-template-columns: 1fr 120px auto;
+  align-items: center;
+  gap: 10px;
+  font-size: .9rem;
+}
+.pricing-svc-row input {
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, .16);
+  background: rgba(255, 255, 255, .04);
+  color: inherit;
+}
+.pricing-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+}
+#pricing-disclaimer { margin: 8px 0 4px; }
+
+/* Generic warn callout used in the Cost & pricing settings panel */
+#settings-pricing .note.warn {
+  background: rgba(244, 212, 163, .10);
+  border: 1px solid rgba(244, 212, 163, .35);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: .85rem;
+  line-height: 1.45;
+}
+#settings-pricing h3 { margin: 20px 0 4px; font-size: 1rem; }

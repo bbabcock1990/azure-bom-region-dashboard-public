@@ -74,6 +74,8 @@ ROUTES = [
     ("support/tickets/{ticket_name}", ["GET", "POST"], "support_ticket_get"),
     ("support/tickets", ["GET"], "support_tickets_list"),
     ("support/tickets", ["POST"], "support_ticket_create"),
+    ("pricing/settings", ["GET", "POST"], "pricing_settings"),
+    ("pricing/estimate", ["POST"], "pricing_estimate"),
     ("datasets/{dataset_id}/refresh", ["POST"], "datasets"),
     ("datasets/{dataset_id}/source", ["POST", "DELETE"], "datasets"),
     ("datasets/{dataset_id}", ["GET", "POST", "DELETE"], "datasets"),

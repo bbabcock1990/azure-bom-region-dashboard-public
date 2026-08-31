@@ -191,6 +191,7 @@
             <th>AZ 1/2/3</th>
             <th class="quota-col hidden" data-sort="quota">Quota</th>
             <th data-sort="recommendation">Recommendation</th>
+            <th class="cost-col hidden num" data-sort="est_monthly" title="Estimated monthly cost — estimate only">Est. $/mo</th>
             <th>Alternative Regions</th>
           </tr>
         </thead>
@@ -276,6 +277,10 @@
               <span class="settings-nav-icon" aria-hidden="true">🗂️</span>
               <span class="settings-nav-text"><strong>Model datasets</strong><small>Latency, regions &amp; catalogs</small></span>
             </button>
+            <button type="button" class="settings-nav-item" data-settings-tab="pricing" role="tab" aria-selected="false">
+              <span class="settings-nav-icon" aria-hidden="true">💵</span>
+              <span class="settings-nav-text"><strong>Cost &amp; pricing</strong><small>ACD discount, OS &amp; estimates</small></span>
+            </button>
             <button type="button" class="settings-nav-item" data-settings-tab="activity" role="tab" aria-selected="false">
               <span class="settings-nav-icon" aria-hidden="true">📜</span>
               <span class="settings-nav-text"><strong>Activity log</strong><small>Audit trail of all actions</small></span>
@@ -331,6 +336,55 @@
               </p>
               <div id="datasets-list" class="datasets-list">
                 <p class="muted" id="datasets-loading">Loading datasets…</p>
+              </div>
+            </section>
+            <section id="settings-pricing" class="settings-panel" data-settings-panel="pricing">
+              <h2>Cost &amp; pricing</h2>
+              <p class="muted">
+                Controls the BOM cost estimate. Compute cost is pulled live from the public
+                <strong>Azure Retail Prices API</strong> (per-vCPU list price × required cores).
+                Non-compute cost is estimated as a percentage uplift on compute plus any
+                per-service figures you enter below.
+              </p>
+              <p class="note warn" id="pricing-disclaimer">
+                ⚠️ All cost figures are <strong>estimates only</strong> — list prices anchored to a
+                representative VM size, not a quote. Actual cost depends on real VM sizes, run
+                hours, storage, egress, licensing, and your negotiated agreement.
+              </p>
+              <div class="pricing-grid">
+                <label>ACD discount %
+                  <input type="number" id="pricing-acd" min="0" max="100" step="0.5" />
+                  <small class="muted">Azure Consumption Discount applied on top of list price.</small>
+                </label>
+                <label>Pricing OS
+                  <select id="pricing-os">
+                    <option value="linux">Linux (no license)</option>
+                    <option value="windows">Windows</option>
+                  </select>
+                </label>
+                <label>Hours / month
+                  <input type="number" id="pricing-hours" min="1" max="744" step="1" />
+                  <small class="muted">730 = 24×365÷12.</small>
+                </label>
+                <label>Currency
+                  <input type="text" id="pricing-currency" maxlength="3" style="text-transform:uppercase" />
+                </label>
+                <label>Non-compute uplift %
+                  <input type="number" id="pricing-uplift" min="0" max="500" step="1" />
+                  <small class="muted">Catch-all for storage, network, etc. as a % of compute.</small>
+                </label>
+              </div>
+              <h3>Per-service monthly estimates <small class="muted">(optional)</small></h3>
+              <p class="muted">
+                Enter a flat monthly figure for any non-compute service in this BOM. These are
+                added on top of the uplift. Leave blank to rely on the uplift alone.
+              </p>
+              <div id="pricing-services" class="pricing-services">
+                <p class="muted" id="pricing-services-empty">No non-compute services in the current BOM.</p>
+              </div>
+              <div class="pricing-actions">
+                <button type="button" class="btn btn--accent" id="pricing-save">Save pricing settings</button>
+                <span id="pricing-save-msg" class="muted"></span>
               </div>
             </section>
             <section id="settings-activity" class="settings-panel" data-settings-panel="activity">
@@ -434,6 +488,9 @@
         <div class="stat"><span>Total regions</span><strong id="stat-total">0</strong></div>
         <div class="stat"><span>Ready</span><strong id="stat-ready">0</strong></div>
         <div class="stat"><span>Other verdicts</span><strong id="stat-other-verdicts">0</strong></div>
+        <div class="stat cost-stat hidden" id="stat-est-wrap" title="Estimated monthly BOM cost (compute + non-compute) for the cheapest Ready region. Estimate only.">
+          <span>Est. $/mo <small>(cheapest ready)</small></span><strong id="stat-est-cost">—</strong>
+        </div>
       </div>
     </div>
   </aside>

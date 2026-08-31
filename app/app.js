@@ -311,6 +311,7 @@ async function loadSnapshot(runId) {
   applyFilters();
   refreshMap();
   if (STATE.view === "quota") renderQuotaTab();
+  fetchPricingEstimate();
 }
 
 // The header is always app-branded now. Per-BOM / per-snapshot context is
@@ -788,6 +789,255 @@ function updateStats() {
   document.getElementById("stat-total").textContent = all.length;
   document.getElementById("stat-ready").textContent = ready;
   document.getElementById("stat-other-verdicts").textContent = all.length - ready;
+  updateCostStat();
+}
+
+// ---------------------------------------------------------------- Cost estimate (pricing)
+
+const PRICING = { settings: null, estimate: null, loading: false, reqKey: "" };
+const PRICING_DISCLAIMER = "Estimate only — list price anchored to a representative VM size, not a quote. Excludes storage, egress, licensing & negotiated terms.";
+
+function _fmtMoney(n, currency, opts) {
+  if (n == null || !Number.isFinite(Number(n))) return "—";
+  const cur = (currency || "USD").toUpperCase();
+  const frac = (opts && opts.cents) ? 2 : 0;
+  try {
+    return new Intl.NumberFormat(undefined, { style: "currency", currency: cur, maximumFractionDigits: frac }).format(Number(n));
+  } catch (e) {
+    return `${cur} ${Number(n).toLocaleString(undefined, { maximumFractionDigits: frac })}`;
+  }
+}
+
+// Non-compute service names present in the current BOM snapshot.
+function _bomServiceNames(snap) {
+  const meta = (snap && snap.meta) || {};
+  const svcs = Array.isArray(meta.services) ? meta.services : [];
+  return svcs.map(s => String((s && (s.name || s)) || "")).filter(Boolean);
+}
+
+// Build the estimate request from the current snapshot (all regions + BOM cores + services).
+function _pricingRequestBody() {
+  const snap = STATE.snapshot;
+  if (!snap) return null;
+  const regions = (snap.regions || []).map(r => r.short).filter(Boolean);
+  if (!regions.length) return null;
+  const families = _getCoresRequirements(snap).map(r => ({
+    family: r.primary_family,
+    label: r.primary_label,
+    required_cores: r.required_cores,
+  }));
+  return { regions, families, services: _bomServiceNames(snap) };
+}
+
+// Fetch (once per unique request+settings signature) the BOM cost estimate.
+async function fetchPricingEstimate(force) {
+  const body = _pricingRequestBody();
+  if (!body || !body.families.length) { PRICING.estimate = null; PRICING.reqKey = ""; _applyPricingToUI(); return; }
+  const key = JSON.stringify(body) + "|" + JSON.stringify(PRICING.settings || {});
+  if (!force && key === PRICING.reqKey && PRICING.estimate) return;
+  PRICING.reqKey = key;
+  PRICING.loading = true;
+  _applyPricingToUI();
+  try {
+    PRICING.estimate = await apiJson("/api/pricing/estimate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    console.warn("pricing estimate failed:", e && e.message);
+    PRICING.estimate = null;
+  } finally {
+    PRICING.loading = false;
+    _applyPricingToUI();
+  }
+}
+
+function _pricingRegionInfo(short) {
+  const est = PRICING.estimate;
+  if (!est || !est.regions) return null;
+  return est.regions[String(short || "").toLowerCase()] || null;
+}
+
+// Stash per-region totals (for sort) and refresh table cells, stat, drilldown.
+function _applyPricingToUI() {
+  const est = PRICING.estimate;
+  const regions = (STATE.snapshot && STATE.snapshot.regions) || [];
+  for (const r of regions) {
+    const info = est && est.regions ? est.regions[String(r.short || "").toLowerCase()] : null;
+    r.est_monthly = (info && info.priced_any) ? Number(info.monthly_net) : 0;
+  }
+  if (document.querySelector("#regions-table tbody")) renderTable();
+  updateCostStat();
+  const dd = document.getElementById("drilldown");
+  if (dd && !dd.classList.contains("hidden") && STATE.activeDrilldownRegion) {
+    _refreshDrilldownCost(STATE.activeDrilldownRegion);
+  }
+}
+
+// Overview KPI: cheapest Ready region net monthly (fallback: cheapest any).
+function updateCostStat() {
+  const wrap = document.getElementById("stat-est-wrap");
+  const el = document.getElementById("stat-est-cost");
+  if (!wrap || !el) return;
+  const hasReq = snapshotHasCoresRequirements(STATE.snapshot);
+  wrap.classList.toggle("hidden", !hasReq);
+  if (!hasReq) return;
+  if (PRICING.loading && !PRICING.estimate) { el.textContent = "…"; return; }
+  const est = PRICING.estimate;
+  if (!est) { el.textContent = "—"; return; }
+  const regions = (STATE.snapshot && STATE.snapshot.regions) || [];
+  const pick = (readyOnly) => {
+    let best = null;
+    for (const r of regions) {
+      if (readyOnly && getDeploymentVerdictInfo(r).verdict !== "ready") continue;
+      const info = est.regions[String(r.short || "").toLowerCase()];
+      if (!info || !info.priced_any) continue;
+      if (!best || info.monthly_net < best.net) best = { net: info.monthly_net, region: r.name };
+    }
+    return best;
+  };
+  const best = pick(true) || pick(false);
+  if (!best) { el.textContent = "—"; return; }
+  el.textContent = _fmtMoney(best.net, est.currency);
+  wrap.title = `Estimated monthly BOM cost (compute + non-compute) for ${best.region}, the cheapest Ready region. ${PRICING_DISCLAIMER}`;
+}
+
+// The cost cell shown in the regions table for a region.
+function _costCellHtml(r) {
+  if (!snapshotHasCoresRequirements(STATE.snapshot)) return `<td class="cost-col hidden num"></td>`;
+  const est = PRICING.estimate;
+  const info = _pricingRegionInfo(r.short);
+  let text = "—", title = PRICING_DISCLAIMER;
+  if (PRICING.loading && !info) text = "…";
+  else if (info && info.priced_any) {
+    text = _fmtMoney(info.monthly_net, est.currency);
+    if (!info.complete) { text += "*"; title = "Some families could not be priced. " + PRICING_DISCLAIMER; }
+  } else if (est) text = "n/a";
+  return `<td class="cost-col num" title="${escapeHtml(title)}">${escapeHtml(text)}</td>`;
+}
+
+// Drilldown cost section body (compute families + non-compute + total).
+function _costBody(r) {
+  const est = PRICING.estimate;
+  const info = _pricingRegionInfo(r.short);
+  let inner;
+  if (PRICING.loading && !info) {
+    inner = `<div class="note">Estimating cost…</div>`;
+  } else if (!info || !info.priced_any) {
+    inner = `<div class="note">No cost estimate available for this region.</div>`;
+  } else {
+    const cur = est.currency, c = info.compute, nc = info.noncompute;
+    const famRows = (c.families || []).map(f => f.priced
+      ? `<div class="key">${escapeHtml(f.label)} <span class="muted">(${f.required_cores} vCPU × ${_fmtMoney(f.per_core_hour, cur, { cents: true })}/hr)</span></div><div>${_fmtMoney(f.monthly_net, cur)}/mo</div>`
+      : `<div class="key">${escapeHtml(f.label)} <span class="muted">(${f.required_cores} vCPU)</span></div><div class="muted">not priced</div>`
+    ).join("");
+    const svcRows = (nc.items || []).map(s =>
+      `<div class="key">${escapeHtml(s.service)}</div><div>${_fmtMoney(s.monthly_net, cur)}/mo</div>`
+    ).join("");
+    const acdLine = est.acd_discount_pct ? ` · ACD ${est.acd_discount_pct}% off list ${_fmtMoney(info.monthly_list, cur)}/mo` : "";
+    inner = `
+      <div class="cost-total-row">
+        <div class="cost-total">${_fmtMoney(info.monthly_net, cur)}<small>/mo</small></div>
+        <div class="cost-sub muted">${info.complete ? "" : "Partial — some families unpriced · "}${_fmtMoney(info.monthly_net * 12, cur)}/yr${acdLine}</div>
+      </div>
+      <div class="dd-readiness-subtitle">Compute — ${_fmtMoney(c.monthly_net, cur)}/mo</div>
+      <div class="kv">${famRows || '<div class="muted">none</div>'}</div>
+      <div class="dd-readiness-subtitle">Non-compute — ${_fmtMoney(nc.monthly_net, cur)}/mo</div>
+      <div class="kv">
+        ${svcRows}
+        <div class="key">Uplift <span class="muted">(${nc.uplift_pct}% of compute)</span></div><div>${_fmtMoney(nc.uplift_net, cur)}/mo</div>
+      </div>`;
+  }
+  const meta = est ? `OS: ${escapeHtml(est.os)} · ${est.hours_per_month} h/mo` : "OS: linux · 730 h/mo";
+  return `<h4>Cost estimate <span class="badge-est" title="${escapeHtml(PRICING_DISCLAIMER)}">Estimate</span></h4>
+    <div class="cost-estimate">${inner}</div>
+    <div class="note muted cost-disclaimer">${escapeHtml(PRICING_DISCLAIMER)}<br>${meta}.</div>`;
+}
+
+function renderCostEstimateSection(r) {
+  if (!snapshotHasCoresRequirements(STATE.snapshot)) return "";
+  return `<div id="dd-cost-wrap">${_costBody(r)}</div>`;
+}
+
+function _refreshDrilldownCost(short) {
+  const wrap = document.getElementById("dd-cost-wrap");
+  if (!wrap) return;
+  const r = _findRegionByShort(short);
+  if (r) wrap.innerHTML = _costBody(r);
+}
+
+// -------- Cost & pricing settings (gear → Settings → Cost & pricing) --------
+
+async function loadPricingSettings() {
+  if (!PRICING.settings) {
+    try { const s = await apiJson("/api/pricing/settings"); PRICING.settings = s.settings || {}; }
+    catch (e) { PRICING.settings = {}; }
+  }
+  const s = PRICING.settings || {};
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+  set("pricing-acd", s.acd_discount_pct != null ? s.acd_discount_pct : 0);
+  set("pricing-os", s.pricing_os || "linux");
+  set("pricing-hours", s.hours_per_month != null ? s.hours_per_month : 730);
+  set("pricing-currency", (s.currency || "USD").toUpperCase());
+  set("pricing-uplift", s.noncompute_uplift_pct != null ? s.noncompute_uplift_pct : 35);
+  _renderServiceEstimateInputs(s.service_estimates || {});
+  const msg = document.getElementById("pricing-save-msg");
+  if (msg) msg.textContent = "";
+}
+
+function _renderServiceEstimateInputs(estimates) {
+  const wrap = document.getElementById("pricing-services");
+  if (!wrap) return;
+  const names = _bomServiceNames(STATE.snapshot);
+  if (!names.length) {
+    wrap.innerHTML = `<p class="muted">No non-compute services in the current BOM.</p>`;
+    return;
+  }
+  wrap.innerHTML = names.map(n => {
+    const v = (estimates && estimates[n] != null) ? estimates[n] : "";
+    return `<label class="pricing-svc-row"><span>${escapeHtml(n)}</span>
+      <input type="number" min="0" step="1" data-service="${escapeHtml(n)}" value="${escapeHtml(String(v))}" placeholder="0" /><small class="muted">$/mo</small></label>`;
+  }).join("");
+}
+
+async function savePricingSettings() {
+  const num = (id, d) => { const el = document.getElementById(id); const n = el ? parseFloat(el.value) : NaN; return Number.isFinite(n) ? n : d; };
+  const svc = {};
+  document.querySelectorAll("#pricing-services [data-service]").forEach(inp => {
+    const name = inp.getAttribute("data-service");
+    const n = parseFloat(inp.value);
+    if (Number.isFinite(n) && n > 0) svc[name] = n;
+  });
+  const patch = {
+    acd_discount_pct: num("pricing-acd", 0),
+    pricing_os: (document.getElementById("pricing-os") || {}).value || "linux",
+    hours_per_month: num("pricing-hours", 730),
+    currency: (((document.getElementById("pricing-currency") || {}).value) || "USD").toUpperCase(),
+    noncompute_uplift_pct: num("pricing-uplift", 35),
+    service_estimates: svc,
+  };
+  const msg = document.getElementById("pricing-save-msg");
+  const btn = document.getElementById("pricing-save");
+  if (btn) btn.disabled = true;
+  if (msg) msg.textContent = "Saving…";
+  try {
+    const res = await apiJson("/api/pricing/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    PRICING.settings = res.settings || patch;
+    if (msg) msg.textContent = "Saved — recalculating estimate…";
+    await fetchPricingEstimate(true);
+    if (msg) msg.textContent = "Saved.";
+    showToast("Pricing settings saved.", "success");
+  } catch (e) {
+    if (msg) msg.textContent = "";
+    showToast(e.message || "Could not save pricing settings.", "error");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 function initContinentFilter() {
@@ -878,6 +1128,10 @@ function renderTable() {
   if (headerCell) {
     headerCell.classList.toggle("hidden", !showQuotaCol);
   }
+  const costHeader = document.querySelector("#regions-table thead .cost-col");
+  if (costHeader) {
+    costHeader.classList.toggle("hidden", !showQuotaCol);
+  }
   for (const r of STATE.filtered) {
     const tr = document.createElement("tr");
     tr.dataset.region = r.name;
@@ -905,6 +1159,7 @@ function renderTable() {
       <td><span class="zone-cells">${zoneHtml}</span></td>
       ${quotaCellHtml}
       <td class="rec-cell">${escapeHtml(r.recommendation || "—")}</td>
+      ${_costCellHtml(r)}
       <td class="alt-cell">${escapeHtml((r.alt_regions || []).map(a =>
         a.latency_ms != null ? `${a.region} (${a.latency_ms}ms)` : a.region
       ).join(", "))}</td>
@@ -945,6 +1200,8 @@ function openDrilldown(r) {
       <div class="key">Region (short)</div><div>${escapeHtml(r.short)}</div>
       <div class="key">Quota</div><div>${ddVerdictHtml}</div>
     </div>`;
+
+  html += renderCostEstimateSection(r);
 
   if (r.sku_zone_detail && Object.keys(r.sku_zone_detail).length) {
     // Determine which SKU families are BOM primary vs fallback
@@ -6113,7 +6370,7 @@ function _collectBomSupportOverride() {
 // Switch the active panel within the Settings view. Lazy-loads each tab's
 // data the first time (and on every re-open, so the content stays fresh).
 function switchSettingsTab(tab) {
-  const tabs = ["owner", "datasets", "activity"];
+  const tabs = ["owner", "datasets", "pricing", "activity"];
   if (!tabs.includes(tab)) tab = "owner";
   STATE.settingsTab = tab;
   document.querySelectorAll("[data-settings-tab]").forEach(btn => {
@@ -6126,6 +6383,7 @@ function switchSettingsTab(tab) {
   });
   if (tab === "owner") loadOwnerSettings();
   else if (tab === "datasets") loadDatasetsSettings();
+  else if (tab === "pricing") loadPricingSettings();
   else if (tab === "activity") loadActivityLog();
 }
 
@@ -7131,6 +7389,8 @@ function init() {
   document.querySelectorAll("[data-settings-tab]").forEach(btn => {
     btn.addEventListener("click", () => switchSettingsTab(btn.getAttribute("data-settings-tab")));
   });
+  const pricingSaveBtn = document.getElementById("pricing-save");
+  if (pricingSaveBtn) pricingSaveBtn.addEventListener("click", savePricingSettings);
   document.getElementById("btn-export-csv").addEventListener("click", exportCsv);
   document.getElementById("btn-export-xlsx").addEventListener("click", exportXlsx);
   document.getElementById("drilldown-overlay").addEventListener("click", closeDrilldown);
