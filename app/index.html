@@ -285,13 +285,17 @@
             <section id="settings-owner" class="settings-panel is-active" data-settings-panel="owner">
               <h2>Ticket owner</h2>
               <p class="muted">
-                The Azure support contact that tickets created from this dashboard are filed under.
-                Additional contact logistics (phone, country, time zone, CC list) live in the <strong>Tickets</strong> tab.
+                The Azure support contact used as defaults on every ticket created from this dashboard.
+                Azure requires a contact name, email, and country.
               </p>
               <div class="settings-owner-grid">
                 <label>First name <input type="text" id="owner-first" maxlength="60" autocomplete="off" /></label>
                 <label>Last name <input type="text" id="owner-last" maxlength="60" autocomplete="off" /></label>
                 <label>Email <input type="email" id="owner-email" maxlength="120" autocomplete="off" /></label>
+                <label>Additional emails (CC) <input type="text" id="owner-cc" maxlength="400" autocomplete="off" /></label>
+                <label>Phone <input type="text" id="owner-phone" maxlength="40" autocomplete="off" /></label>
+                <label>Country <input type="text" id="owner-country" maxlength="60" autocomplete="off" /></label>
+                <label>Time zone <input type="text" id="owner-tz" maxlength="80" autocomplete="off" /></label>
                 <label>Default severity
                   <select id="owner-sev">
                     <option value="minimal">Minimal</option>
@@ -303,6 +307,11 @@
               <div class="support-form-actions">
                 <button type="button" class="btn btn--accent" id="owner-save">Save owner</button>
                 <span class="muted" id="owner-status"></span>
+              </div>
+              <div class="settings-danger">
+                <h3>Danger zone</h3>
+                <p class="muted">Delete all local snapshots and analysis history (support contact settings are kept). Does not touch Azure.</p>
+                <button type="button" class="btn btn--danger" id="owner-wipe">Wipe local state</button>
               </div>
             </section>
             <section id="settings-datasets" class="settings-panel" data-settings-panel="datasets">

@@ -3314,7 +3314,18 @@ function _renderQuotaHierarchy(result) {
       donorHtml = `<div class="qd-donor-note">Scanned ${nonBomSubs.length} subscription${nonBomSubs.length === 1 ? "" : "s"} — none currently have free quota for ${escapeHtml(neededLabels)}.</div>`;
     } else {
       const totalFree = evaluated.reduce((sum, e) => sum + (Number(e.bestFree) || 0), 0);
-      const totalSummary = `<div class="qd-donor-total">Total free to pull: <strong>${_formatQuotaNumber(totalFree)} vCPU</strong> across ${evaluated.length} donor subscription${evaluated.length === 1 ? "" : "s"}</div>`;
+      const perSkuTotals = new Map();
+      evaluated.forEach(e => (e.chips || []).forEach(c => {
+        perSkuTotals.set(c.label, (perSkuTotals.get(c.label) || 0) + (Number(c.free) || 0));
+      }));
+      const skuTotalChips = [...perSkuTotals.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([label, free]) => `<span class="qd-chip qd-chip--total">${escapeHtml(label)} · ${_formatQuotaNumber(free)} free</span>`)
+        .join("");
+      const totalSummary = `<div class="qd-donor-total">
+        <div class="qd-donor-total-head">Total free to pull across ${evaluated.length} donor subscription${evaluated.length === 1 ? "" : "s"}</div>
+        <div class="qd-donor-total-chips">${skuTotalChips || `<span class="qd-chip qd-chip--total">${_formatQuotaNumber(totalFree)} vCPU</span>`}</div>
+      </div>`;
       const cards = evaluated.map(({ s, chips, bestFree, coversAll }) => {
         const badge = coversAll
           ? `<span class="qd-donor-badge qd-donor-badge--ok">Can cover shortfall</span>`
@@ -6053,22 +6064,28 @@ function switchSettingsTab(tab) {
 async function loadOwnerSettings() {
   await ensureSupportSettings();
   const s = SUPPORT.settings || {};
-  const f = document.getElementById("owner-first");
-  const l = document.getElementById("owner-last");
-  const e = document.getElementById("owner-email");
-  const sev = document.getElementById("owner-sev");
-  if (f) f.value = s.contact_first_name || "";
-  if (l) l.value = s.contact_last_name || "";
-  if (e) e.value = s.primary_email || "";
-  if (sev) sev.value = s.default_severity || "moderate";
+  const set = (id, val) => { const el = document.getElementById(id); if (el) el.value = val; };
+  set("owner-first", s.contact_first_name || "");
+  set("owner-last", s.contact_last_name || "");
+  set("owner-email", s.primary_email || "");
+  set("owner-cc", s.additional_emails || "");
+  set("owner-phone", s.phone || "");
+  set("owner-country", s.country || "US");
+  set("owner-tz", s.preferred_timezone || "Pacific Standard Time");
+  set("owner-sev", s.default_severity || "moderate");
 }
 
 async function saveOwnerSettings() {
   const status = document.getElementById("owner-status");
+  const val = (id) => ((document.getElementById(id) || {}).value || "").trim();
   const body = {
-    contact_first_name: ((document.getElementById("owner-first") || {}).value || "").trim(),
-    contact_last_name: ((document.getElementById("owner-last") || {}).value || "").trim(),
-    primary_email: ((document.getElementById("owner-email") || {}).value || "").trim(),
+    contact_first_name: val("owner-first"),
+    contact_last_name: val("owner-last"),
+    primary_email: val("owner-email"),
+    additional_emails: val("owner-cc"),
+    phone: val("owner-phone"),
+    country: val("owner-country") || "US",
+    preferred_timezone: val("owner-tz"),
     default_severity: (document.getElementById("owner-sev") || {}).value || "moderate",
   };
   if (status) status.textContent = "Saving…";
@@ -6542,7 +6559,8 @@ function _supportHtml() {
         <label>Subscription <select id="sup-sub">${subOpts}</select></label>
         <label>Region <select id="sup-region">${regionOpts}</select></label>
         <label>SKU family <select id="sup-family">${familyOpts}</select></label>
-        <label id="sup-limit-wrap">New vCPU limit <input type="number" id="sup-limit" min="1" value="100" /></label>
+        <label id="sup-limit-wrap">New vCPU limit <input type="number" id="sup-limit" min="1" value="100" />
+          <small class="sup-limit-info muted" id="sup-limit-info"></small></label>
         <label id="sup-zones-wrap" class="hidden">Zones (comma-sep) <input type="text" id="sup-zones" placeholder="1,2,3" /></label>
         <label>Severity <select id="sup-sev">${sevOpts}</select></label>
       </div>
@@ -6558,31 +6576,6 @@ function _supportHtml() {
       <table class="support-table"><thead><tr>
         <th>Type</th><th>Title</th><th>Region</th><th>Severity</th><th>Status</th><th>Created</th><th></th>
       </tr></thead><tbody id="support-tickets-body">${ticketsHtml}</tbody></table>
-    </section>
-
-    <section class="support-section">
-      <h3>Support contact settings</h3>
-      <p class="muted">Used as defaults on every ticket. Azure requires a contact name, email, and country.</p>
-      <div class="support-form-grid">
-        <label>First name <input type="text" id="set-first" value="${escapeHtml(s.contact_first_name || "")}" /></label>
-        <label>Last name <input type="text" id="set-last" value="${escapeHtml(s.contact_last_name || "")}" /></label>
-        <label>Email <input type="email" id="set-email" value="${escapeHtml(s.primary_email || "")}" /></label>
-        <label>Additional emails (CC) <input type="text" id="set-cc" value="${escapeHtml(s.additional_emails || "")}" /></label>
-        <label>Phone <input type="text" id="set-phone" value="${escapeHtml(s.phone || "")}" /></label>
-        <label>Country <input type="text" id="set-country" value="${escapeHtml(s.country || "US")}" /></label>
-        <label>Time zone <input type="text" id="set-tz" value="${escapeHtml(s.preferred_timezone || "Pacific Standard Time")}" /></label>
-        <label>Default severity <select id="set-sev">${sevOpts}</select></label>
-      </div>
-      <div class="support-form-actions">
-        <button type="button" class="btn btn--accent" id="set-save">Save settings</button>
-        <span class="support-settings-status" id="set-status"></span>
-      </div>
-    </section>
-
-    <section class="support-section support-danger">
-      <h3>Danger zone</h3>
-      <p class="muted">Delete all local snapshots and analysis history (support contact settings are kept). Does not touch Azure.</p>
-      <button type="button" class="btn btn--danger" id="sup-wipe">Wipe local state</button>
     </section>
   </div>`;
 }
@@ -6619,6 +6612,65 @@ function _supportSyncKindFields() {
   const zonesWrap = document.getElementById("sup-zones-wrap");
   if (limitWrap) limitWrap.classList.toggle("hidden", kind !== "quota");
   if (zonesWrap) zonesWrap.classList.toggle("hidden", kind !== "technical");
+  _supportUpdateQuotaMath();
+}
+
+// Compute current-vs-needed quota math for the selected region + SKU family,
+// prefill the "New vCPU limit" with the recommended value (still user-editable),
+// and show the math as helper text under the field.
+function _supportUpdateQuotaMath(opts) {
+  opts = opts || {};
+  const kind = (document.getElementById("sup-kind") || {}).value;
+  const info = document.getElementById("sup-limit-info");
+  const limitInput = document.getElementById("sup-limit");
+  if (!info || !limitInput) return;
+  if (kind !== "quota") { info.textContent = ""; return; }
+
+  const region = (document.getElementById("sup-region") || {}).value || "";
+  const familySel = document.getElementById("sup-family");
+  const family = (familySel || {}).value || "";
+  if (!region || !family) { info.textContent = ""; return; }
+
+  const row = _findQuotaRow(region, family);
+  let current = null;
+  let required = null;
+  if (row) {
+    if (row.subscription && row.subscription.limit != null) current = Number(row.subscription.limit);
+    if (row.required != null) required = Number(row.required);
+  }
+  if (required == null && familySel && familySel.selectedOptions[0]) {
+    const cores = Number(familySel.selectedOptions[0].getAttribute("data-cores"));
+    if (Number.isFinite(cores) && cores > 0) required = cores;
+  }
+
+  // Recommended new limit: reuse the same logic the quota buttons use when we
+  // have a full row; otherwise fall back to current + shortfall.
+  let recommended;
+  if (row) {
+    recommended = _quotaRequestLimitForRow(row);
+  } else if (current != null && required != null) {
+    recommended = _roundUpToNearest(Math.max(current + Math.max(0, required - current), required), 50);
+  } else if (required != null) {
+    recommended = required;
+  } else {
+    recommended = Number(limitInput.value) || 100;
+  }
+
+  // Prefill unless the user has manually typed a higher value this session.
+  if (opts.force || !limitInput.dataset.userEdited) {
+    limitInput.value = String(Math.round(recommended));
+  }
+
+  if (current != null && required != null) {
+    const shortfall = Math.max(0, required - current);
+    info.innerHTML = shortfall > 0
+      ? `Current limit <strong>${_formatQuotaNumber(current)}</strong> · BOM needs <strong>${_formatQuotaNumber(required)}</strong> → shortfall <strong>${_formatQuotaNumber(shortfall)}</strong>. Prefilled new limit <strong>${_formatQuotaNumber(Math.round(recommended))}</strong> (editable).`
+      : `Current limit <strong>${_formatQuotaNumber(current)}</strong> already covers the BOM need of <strong>${_formatQuotaNumber(required)}</strong>. Prefilled <strong>${_formatQuotaNumber(Math.round(recommended))}</strong> for extra headroom (editable).`;
+  } else if (required != null) {
+    info.innerHTML = `BOM needs <strong>${_formatQuotaNumber(required)}</strong> vCPU for this SKU. Prefilled new limit <strong>${_formatQuotaNumber(Math.round(recommended))}</strong> (editable).`;
+  } else {
+    info.textContent = "";
+  }
 }
 
 function _supportGatherForm() {
@@ -6746,9 +6798,13 @@ function _supportPrefill(kind, regionShort, opts) {
       if (has) familySel.value = opts.family;
     }
     const limitInput = document.getElementById("sup-limit");
-    if (limitInput && opts.newLimit != null && Number.isFinite(Number(opts.newLimit))) {
-      limitInput.value = String(Math.round(Number(opts.newLimit)));
+    if (limitInput) {
+      delete limitInput.dataset.userEdited;
+      if (opts.newLimit != null && Number.isFinite(Number(opts.newLimit))) {
+        limitInput.value = String(Math.round(Number(opts.newLimit)));
+      }
     }
+    _supportUpdateQuotaMath({ force: true });
     const box = document.getElementById("sup-create") || document.querySelector(".support-form-grid");
     if (box) box.scrollIntoView({ behavior: "smooth", block: "center" });
   }, 60);
@@ -6758,14 +6814,16 @@ function _wireSupportTab(view) {
   _supportSyncKindFields();
   const kindSel = view.querySelector("#sup-kind");
   if (kindSel) kindSel.addEventListener("change", _supportSyncKindFields);
+  const regionSel = view.querySelector("#sup-region");
+  if (regionSel) regionSel.addEventListener("change", () => _supportUpdateQuotaMath({ force: true }));
+  const familySel = view.querySelector("#sup-family");
+  if (familySel) familySel.addEventListener("change", () => _supportUpdateQuotaMath({ force: true }));
+  const limitInput = view.querySelector("#sup-limit");
+  if (limitInput) limitInput.addEventListener("input", () => { limitInput.dataset.userEdited = "1"; });
   const prev = view.querySelector("#sup-preview");
   if (prev) prev.addEventListener("click", () => _supportCreate(true));
   const sub = view.querySelector("#sup-submit");
   if (sub) sub.addEventListener("click", () => _supportCreate(false));
-  const save = view.querySelector("#set-save");
-  if (save) save.addEventListener("click", _supportSaveSettings);
-  const wipe = view.querySelector("#sup-wipe");
-  if (wipe) wipe.addEventListener("click", _supportWipe);
 
   view.querySelector("#support-blockers-body").addEventListener("click", (ev) => {
     const btn = ev.target.closest("[data-prefill]");
@@ -6836,6 +6894,8 @@ function init() {
   if (openSettingsBtn) openSettingsBtn.addEventListener("click", () => switchView("settings"));
   const ownerSaveBtn = document.getElementById("owner-save");
   if (ownerSaveBtn) ownerSaveBtn.addEventListener("click", saveOwnerSettings);
+  const ownerWipeBtn = document.getElementById("owner-wipe");
+  if (ownerWipeBtn) ownerWipeBtn.addEventListener("click", _supportWipe);
   document.querySelectorAll("[data-settings-tab]").forEach(btn => {
     btn.addEventListener("click", () => switchSettingsTab(btn.getAttribute("data-settings-tab")));
   });

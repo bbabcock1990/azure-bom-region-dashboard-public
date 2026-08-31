@@ -775,6 +775,19 @@ main {
   padding: 8px 12px;
   margin-bottom: 10px;
 }
+.qd-donor-total-head {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.qd-donor-total-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.qd-chip--total {
+  background: rgba(16,124,16,0.16);
+  color: #22c55e;
+}
 .qd-donor-total strong {
   color: #22c55e;
   font-variant-numeric: tabular-nums;
@@ -2705,6 +2718,22 @@ html.filters-collapsed-init .filters-body { display: none; }
   font-size: 12px; font-weight: 600; color: var(--text-secondary, #aab3c8);
 }
 .settings-owner-grid input, .settings-owner-grid select { width: 100%; }
+.settings-danger {
+  margin-top: 22px;
+  padding: 14px 16px;
+  border: 1px solid #6a2a2a;
+  border-radius: 10px;
+  background: rgba(106, 42, 42, 0.08);
+}
+.settings-danger h3 { margin: 0 0 4px; font-size: 14px; }
+.sup-limit-info {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.4;
+  font-weight: 400;
+}
+.sup-limit-info strong { color: var(--text-primary); font-variant-numeric: tabular-nums; }
 @media (max-width: 640px) { .bom-owner-grid { grid-template-columns: 1fr; } }
 
 /* BOM wizard: collapsible per-BOM support details */
