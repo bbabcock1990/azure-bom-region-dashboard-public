@@ -6540,12 +6540,9 @@ function _supportHtml() {
         .map(r => `<option value="${escapeHtml(r.short || "")}">${escapeHtml(r.name || r.short || "")}</option>`).join("")
     : "";
 
-  const ticketsHtml = (SUPPORT.tickets || []).length
-    ? SUPPORT.tickets.map(_supportTicketRow).join("")
-    : `<tr><td colspan="7" class="muted">No tickets yet. Preview one above to get started.</td></tr>`;
-
   return `
   <div class="support-wrap">
+    <!-- tracked tickets removed: submitted tickets surface in the live Azure list below -->
     <div class="support-intro">
       <h2>Support tickets</h2>
       <p class="muted">Turn a deployment blocker into an Azure support request — a <strong>quota increase</strong>
@@ -6608,14 +6605,6 @@ function _supportHtml() {
         <tr><td colspan="5" class="muted">Loading live tickets from Azure…</td></tr>
       </tbody></table>
     </section>
-
-    <section class="support-section">
-      <h3>Tracked tickets</h3>
-      <p class="muted">Tickets created or previewed from this dashboard.</p>
-      <table class="support-table"><thead><tr>
-        <th>Type</th><th>Title</th><th>Region</th><th>Severity</th><th>Status</th><th>Created</th><th></th>
-      </tr></thead><tbody id="support-tickets-body">${ticketsHtml}</tbody></table>
-    </section>
   </div>`;
 }
 
@@ -6648,13 +6637,6 @@ async function _supportLoadAzureTickets() {
   }
   body.innerHTML = `<tr><td colspan="5" class="muted"><span class="quota-request-spinner" aria-hidden="true"></span> Loading live tickets from Azure…</td></tr>`;
 
-  // Names of tickets we created, so we can exclude them from the "external" list.
-  const ours = new Set();
-  (SUPPORT.tickets || []).forEach(t => {
-    if (t.ticket_name) ours.add(String(t.ticket_name).toLowerCase());
-    if (t.azure_ticket_id) ours.add(String(t.azure_ticket_id).toLowerCase());
-  });
-
   const seen = new Set();
   const collected = [];
   const errors = [];
@@ -6665,7 +6647,7 @@ async function _supportLoadAzureTickets() {
       const res = await apiJson(`/api/support/azure-tickets?subscription_id=${encodeURIComponent(subId)}&open_only=false`);
       for (const t of (res.tickets || [])) {
         const key = String(t.ticket_name || t.azure_ticket_id || "").toLowerCase();
-        if (!key || seen.has(key) || ours.has(key)) continue;
+        if (!key || seen.has(key)) continue;
         seen.add(key);
         collected.push(t);
       }
@@ -6844,9 +6826,8 @@ async function _supportReloadTickets() {
   try {
     const t = await apiJson("/api/support/tickets");
     SUPPORT.tickets = t.tickets || [];
-    const body = document.getElementById("support-tickets-body");
-    if (body) body.innerHTML = (SUPPORT.tickets.length ? SUPPORT.tickets.map(_supportTicketRow).join("") : `<tr><td colspan="7" class="muted">No tickets yet.</td></tr>`);
     _updateSupportBadge();
+    _supportLoadAzureTickets();
   } catch (e) { /* ignore */ }
 }
 
@@ -6964,12 +6945,6 @@ function _wireSupportTab(view) {
     const btn = ev.target.closest("[data-prefill]");
     if (!btn) return;
     _supportPrefill(btn.getAttribute("data-prefill"), btn.getAttribute("data-region"));
-  });
-  view.querySelector("#support-tickets-body").addEventListener("click", (ev) => {
-    const v = ev.target.closest("[data-ticket-view]");
-    const r = ev.target.closest("[data-ticket-refresh]");
-    if (v) _supportViewPayload(v.getAttribute("data-ticket-view"));
-    else if (r) _supportRefreshTicket(r.getAttribute("data-ticket-refresh"));
   });
 }
 
