@@ -330,6 +330,10 @@ def _main(req: func.HttpRequest) -> func.HttpResponse:
             "bom_header": bom_header,
             "bom_records": bom_records,
             "required_families": saved["required_skus"],
+            # Persist the selected services (with any per-service tier) into
+            # the snapshot so the dashboard can surface tiers + ZRS readiness
+            # without re-reading the BOM record.
+            "services": saved.get("services") or [],
         }
     else:
         if step2_file is None:

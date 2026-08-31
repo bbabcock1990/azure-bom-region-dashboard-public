@@ -1919,6 +1919,11 @@ html.filters-collapsed-init .filters-body { display: none; }
 .svc-tier-chip { display: inline-block; margin-left: .4rem; padding: 0 .4rem; font-size: .7rem;
   border: 1px solid var(--panel-border-divider); border-radius: 999px; color: var(--panel-text-dim);
   background: var(--panel-input-bg, #1b1f2a); vertical-align: middle; }
+.zrs-mark { font-size: .8rem; font-weight: 600; }
+.zrs-mark.ok { color: #b6e8c7; }
+.zrs-mark.warn { color: #f4d4a3; }
+.zrs-mark.danger { color: #f4b3b3; }
+#drilldown .note.ok { color: #b6e8c7; border-left-color: #2f7d52; }
 
 /* Regions picker — reuses .bom-services-list grid, adds AZ chip + delete-custom. */
 .bom-regions-toolbar { display: flex; align-items: center; gap: .5rem;

@@ -1746,10 +1746,12 @@ def compile_snapshot(
         ]
         bom_records = bom_data.get("bom_records") or []
         bom_required = bom_data.get("required_families") or None
+        bom_services_selected = bom_data.get("services") or []
         log.info("in-app BOM ok: %d records (required-skus from bom_data: %s)",
                  len(bom_records), "yes" if bom_required else "no")
     else:
         bom_header, bom_records, bom_required = _read_bom_xlsx_bytes(step2_bytes)
+        bom_services_selected = []
         log.info("step2 ok: %d records (required-skus sheet: %s)",
                  len(bom_records), "yes" if bom_required else "no")
 
@@ -2059,6 +2061,7 @@ def compile_snapshot(
         "families_requested": len(families),
         "skus_source": skus_source,
         "skus_resolved": required_families,
+        "services": bom_services_selected,
         "compile_seconds": round(time.time() - t_start, 2),
         "sku_availability": {
             "provider": "arm",

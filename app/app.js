@@ -312,6 +312,27 @@ async function loadSnapshot(runId) {
   refreshMap();
   if (STATE.view === "quota") renderQuotaTab();
   fetchPricingEstimate();
+  ensureZrsRefData();
+}
+
+// Preload the reference data the ZRS (zone-redundancy) readiness check needs:
+//   * a region → has-AZ map (from the region catalog), and
+//   * the service catalog (so we know which selected tiers are ZRS-capable).
+// Both loaders are cached, so this is cheap on repeat snapshot loads. Failures
+// are non-fatal — the readiness section simply won't render.
+async function ensureZrsRefData() {
+  try {
+    const [regions] = await Promise.all([
+      ensureBomRegionsCatalog().catch(() => null),
+      ensureBomCatalog().catch(() => null),
+    ]);
+    STATE.regionAzMap = {};
+    for (const rg of (regions || BOM_EDIT.regionsCatalog || [])) {
+      if (rg && rg.name) STATE.regionAzMap[String(rg.name).toLowerCase()] = !!rg.has_az;
+    }
+  } catch (e) {
+    /* non-fatal */
+  }
 }
 
 // The header is always app-branded now. Per-BOM / per-snapshot context is
@@ -810,15 +831,24 @@ function _fmtMoney(n, currency, opts) {
 
 // Non-compute service names present in the current BOM snapshot.
 function _bomServiceNames(snap) {
-  const meta = (snap && snap.meta) || {};
-  const svcs = Array.isArray(meta.services) ? meta.services : [];
+  const svcs = _currentBomServices(snap);
   return svcs.map(s => String((s && (s.name || s)) || "")).filter(Boolean);
+}
+
+// The BOM's selected services (with any per-service tier). Prefer the loaded
+// snapshot's meta (self-contained, matches what was analyzed); fall back to the
+// active BOM record so tiers/ZRS surface even before the BOM is re-run.
+function _currentBomServices(snap) {
+  const s = snap || STATE.snapshot;
+  const fromSnap = ((s && s.meta) || {}).services;
+  if (Array.isArray(fromSnap) && fromSnap.length) return fromSnap;
+  const meta = STATE.activeBomId ? getBomMeta(STATE.activeBomId) : null;
+  return (meta && Array.isArray(meta.services)) ? meta.services : [];
 }
 
 // Map of service name → selected tier id from the snapshot's BOM (or {}).
 function _bomServiceTiers(snap) {
-  const meta = (snap && snap.meta) || {};
-  const svcs = Array.isArray(meta.services) ? meta.services : [];
+  const svcs = _currentBomServices(snap);
   const out = {};
   for (const s of svcs) {
     if (s && s.name && s.tier) out[String(s.name)] = String(s.tier);
@@ -1157,6 +1187,73 @@ function _refreshDrilldownCost(short) {
   if (r) { wrap.innerHTML = _costBodyInner(r); _validateAltsForRegion(r); }
 }
 
+// ── Zone-redundancy (ZRS/HA) readiness ──────────────────────────────────────
+// Zone-redundant storage / zone-redundant HA (e.g. Azure SQL Business Critical
+// or General Purpose with ZR, Premium Redis, Flexible-Server GP/MO HA) require
+// the target region to expose Availability Zones. This surfaces, per region,
+// whether each ZRS-capable tier the user selected in their BOM can actually be
+// deployed zone-redundant there — a region with no AZs can't host it.
+
+// Return the BOM services whose selected tier is zone-redundant-capable:
+//   [{ name, tierId, tierLabel }]
+function _zrsCapableSelections() {
+  const svcs = _currentBomServices(STATE.snapshot);
+  const out = [];
+  for (const s of svcs) {
+    if (!s || !s.name || !s.tier) continue;
+    const tiers = _catalogTiersFor(s.name);
+    const hit = tiers.find(t => t.id === s.tier);
+    if (hit && hit.zone_redundant) {
+      out.push({ name: s.name, tierId: s.tier, tierLabel: _tierLabel(s.name, s.tier) });
+    }
+  }
+  return out;
+}
+
+// Region-level AZ support: true / false from the region catalog, or null when
+// unknown (catalog not loaded / region absent) so we can show an honest
+// "unverified" state rather than a false negative.
+function _regionSupportsAz(r) {
+  const map = STATE.regionAzMap || null;
+  if (!map) return null;
+  const key = String(r.short || "").toLowerCase();
+  if (!(key in map)) return null;
+  return !!map[key];
+}
+
+// Overall ZRS pill for the region drilldown header, or null when the BOM has no
+// ZRS-capable tier selections (nothing to check).
+function _zrsReadinessPill(r) {
+  const sels = _zrsCapableSelections();
+  if (!sels.length) return null;
+  const az = _regionSupportsAz(r);
+  if (az === false) return { cls: "pill-fail", text: "ZRS: no AZs", title: "This region has no Availability Zones — zone-redundant tiers can't be deployed here." };
+  if (az === null) return { cls: "pill-warn", text: "ZRS: unverified", title: "Availability-Zone support for this region could not be confirmed." };
+  return { cls: "pill-ok", text: "ZRS: ready", title: "This region supports Availability Zones — zone-redundant tiers can be deployed." };
+}
+
+function renderZrsReadinessSection(r) {
+  const sels = _zrsCapableSelections();
+  if (!sels.length) return "";
+  const az = _regionSupportsAz(r);
+  let intro;
+  if (az === false) {
+    intro = `<div class="note danger">${escapeHtml(r.name)} has <strong>no Availability Zones</strong>. Zone-redundant (ZRS/HA) deployments aren't supported here — choose an AZ-enabled region for these tiers, or accept locally-redundant (single-zone) resilience.</div>`;
+  } else if (az === null) {
+    intro = `<div class="note">Availability-Zone support for this region couldn't be confirmed from the catalog. Verify AZ availability before committing to zone-redundant tiers.</div>`;
+  } else {
+    intro = `<div class="note ok">${escapeHtml(r.name)} supports <strong>Availability Zones</strong>, so the zone-redundant tiers below can be deployed for zone resilience.</div>`;
+  }
+  const rows = sels.map(s => {
+    let mark;
+    if (az === false) mark = `<span class="zrs-mark danger">⛔ Not supported (no AZs)</span>`;
+    else if (az === null) mark = `<span class="zrs-mark warn">⚠️ Unverified</span>`;
+    else mark = `<span class="zrs-mark ok">✓ Zone-redundant capable</span>`;
+    return `<div class="key">${escapeHtml(s.name)} <span class="svc-tier-chip">${escapeHtml(s.tierLabel)}</span></div><div>${mark}</div>`;
+  }).join("");
+  return `${intro}<div class="kv">${rows}</div>`;
+}
+
 // -------- Cost & pricing settings (gear → Settings → Cost & pricing) --------
 
 async function loadPricingSettings() {
@@ -1408,6 +1505,15 @@ function openDrilldown(r) {
     </div>`, { badge: statusPill });
 
   html += renderCostEstimateSection(r);
+
+  const zrsSection = renderZrsReadinessSection(r);
+  if (zrsSection) {
+    const zrsPill = _zrsReadinessPill(r);
+    const zrsBadge = zrsPill
+      ? `<span class="pill ${zrsPill.cls}" title="${escapeHtml(zrsPill.title)}">${escapeHtml(zrsPill.text)}</span>`
+      : "";
+    html += _ddSection("Zone-redundancy (ZRS/HA) readiness", zrsSection, { badge: zrsBadge });
+  }
 
   if (r.sku_zone_detail && Object.keys(r.sku_zone_detail).length) {
     // Determine which SKU families are BOM primary vs fallback
