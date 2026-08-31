@@ -113,7 +113,8 @@ async def main(req: func.HttpRequest) -> func.HttpResponse:
             demo_mode=demo,
         )
     except support_tickets.SupportError as ex:
-        return _err(ex.code, ex.message, ex.status)
+        extra = {"details": ex.details} if getattr(ex, "details", None) is not None else {}
+        return _err(ex.code, ex.message, ex.status, **extra)
     except Exception as ex:  # pragma: no cover - defensive
         log.exception("support ticket create failed")
         return _err("unexpected", f"Support ticket create failed: {ex!r}", 500)

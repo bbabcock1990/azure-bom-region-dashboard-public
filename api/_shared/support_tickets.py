@@ -63,11 +63,12 @@ VALID_SEVERITIES = ("minimal", "moderate", "critical")
 
 
 class SupportError(Exception):
-    def __init__(self, code: str, message: str, status: int = 400):
+    def __init__(self, code: str, message: str, status: int = 400, details: Any = None):
         super().__init__(message)
         self.code = code
         self.message = message
         self.status = status
+        self.details = details
 
 
 # ─── small helpers ───────────────────────────────────────────────────────────
@@ -516,6 +517,11 @@ def create_ticket(
         message=f"Submitting support ticket ({kind}): {title}",
         details={"region": region, "family": family, "severity": sev},
     )
+    log.info(
+        "support ticket PUT sub=%s classification=%s payload=%s",
+        subscription_id, problem_classification_id,
+        json.dumps(payload, ensure_ascii=False)[:2000],
+    )
     try:
         with httpx.Client(timeout=60.0, http2=False) as client:
             resp = client.put(
@@ -536,6 +542,11 @@ def create_ticket(
 
     if resp.status_code >= 400:
         message = _extract_message(body, f"Support ticket failed (HTTP {resp.status_code}).")
+        log.error(
+            "support ticket submit HTTP %d for sub=%s kind=%s: %s | body=%s",
+            resp.status_code, subscription_id, kind, message,
+            json.dumps(body, ensure_ascii=False)[:2000],
+        )
         record["status"] = "failed"
         record["error"] = message[:400]
         record["azure_status_code"] = resp.status_code
@@ -549,7 +560,7 @@ def create_ticket(
             message=f"Support ticket FAILED ({kind}): {message}",
             details={"status_code": resp.status_code},
         )
-        raise SupportError("submit_failed", message, resp.status_code)
+        raise SupportError("submit_failed", message, resp.status_code, details=body)
 
     props = (body or {}).get("properties") or {}
     record["status"] = "submitted"
@@ -690,8 +701,24 @@ def _safe_json(resp: "httpx.Response") -> Any:
 def _extract_message(payload: Any, fallback: str) -> str:
     if isinstance(payload, dict):
         error = payload.get("error")
-        if isinstance(error, dict) and error.get("message"):
-            return str(error["message"])
+        if isinstance(error, dict):
+            parts: List[str] = []
+            if error.get("message"):
+                parts.append(str(error["message"]))
+            # ARM often hides the real reason in error.details[].message and/or a
+            # more specific error.code — surface both so the client sees it.
+            details = error.get("details")
+            if isinstance(details, list):
+                for d in details:
+                    if isinstance(d, dict) and d.get("message") and str(d["message"]) not in parts:
+                        parts.append(str(d["message"]))
+            code = error.get("code")
+            if code and not parts:
+                parts.append(str(code))
+            elif code:
+                parts[0] = f"{parts[0]} [{code}]"
+            if parts:
+                return " — ".join(parts)
         if payload.get("message"):
             return str(payload["message"])
     if isinstance(payload, str) and payload.strip():
