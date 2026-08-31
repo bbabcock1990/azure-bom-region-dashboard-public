@@ -792,6 +792,26 @@ main {
   color: #22c55e;
   font-variant-numeric: tabular-nums;
 }
+.qd-chip--primary,
+.qd-chip--total.qd-chip--primary {
+  background: rgba(76, 175, 80, 0.15);
+  color: #4caf50;
+  border: 1px solid rgba(76, 175, 80, 0.3);
+}
+.qd-chip--fallback,
+.qd-chip--total.qd-chip--fallback {
+  background: rgba(255, 193, 7, 0.12);
+  color: #ffc107;
+  border: 1px solid rgba(255, 193, 7, 0.3);
+}
+.quota-control__static {
+  font-weight: 600;
+  color: var(--text-primary);
+  padding: 6px 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: rgba(255,255,255,0.04);
+}
 
 /* Quota action buttons route all increases to the Tickets tab */
 .quota-ticket-actions {

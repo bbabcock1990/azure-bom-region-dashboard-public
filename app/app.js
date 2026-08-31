@@ -549,12 +549,21 @@ function renderSubscriptionSwitcher() {
     const name = _subNameById(subId) || `Subscription ${index + 1}`;
     return `<option value="${escapeHtml(subId)}">${escapeHtml(name)}</option>`;
   }).join("");
-  const disabled = ids.length <= 1 ? " disabled" : "";
+  const single = ids.length <= 1;
   hosts.forEach((host) => {
     const isQuotaTab = host.id === "quota-subscription-control";
+    const labelText = isQuotaTab ? "Subscription:" : "Viewing quota for";
+    if (single) {
+      const name = _subNameById(activeId) || _subNameById(ids[0]) || `Subscription 1`;
+      host.innerHTML = `<label class="quota-control quota-control--subscription${isQuotaTab ? " quota-control--inline" : ""}" data-subscription-switcher-wrap="1">
+        <span>${labelText}</span>
+        <span class="quota-control__static" title="This BOM is scoped to a single subscription — pick a different subscription only when a BOM covers more than one.">${escapeHtml(name)}</span>
+      </label>`;
+      return;
+    }
     host.innerHTML = `<label class="quota-control quota-control--subscription${isQuotaTab ? " quota-control--inline" : ""}" data-subscription-switcher-wrap="1">
-      <span>${isQuotaTab ? "Subscription:" : "Viewing quota for"}</span>
-      <select data-subscription-switcher="1" aria-label="Select the subscription context for quota views"${disabled}>${options}</select>
+      <span>${labelText}</span>
+      <select data-subscription-switcher="1" title="Switch which subscription's quota you're viewing for this BOM" aria-label="Select the subscription context for quota views">${options}</select>
     </label>`;
     const sel = host.querySelector("[data-subscription-switcher]");
     if (sel) sel.value = activeId || "";
@@ -3280,10 +3289,13 @@ function _renderQuotaHierarchy(result) {
     donorHtml = `<div class="qd-donor-note">No other (non-BOM) subscriptions are available to pull quota from. Request an increase on this subscription instead.</div>`;
   } else if (cachedDonors && cachedDonors.status === "loaded") {
     const relevant = new Set();
+    const primaryFams = new Set();
+    const fallbackFams = new Set();
     failingRows.forEach(r => {
-      if (r.family) relevant.add(r.family.toLowerCase());
-      if (r.alt_family) relevant.add(r.alt_family.toLowerCase());
+      if (r.family) { relevant.add(r.family.toLowerCase()); primaryFams.add(r.family.toLowerCase()); }
+      if (r.alt_family) { relevant.add(r.alt_family.toLowerCase()); fallbackFams.add(r.alt_family.toLowerCase()); }
     });
+    const famRole = (famLower) => primaryFams.has(famLower) ? "primary" : (fallbackFams.has(famLower) ? "fallback" : "");
     const evaluated = nonBomSubs.map(s => {
       const scan = cachedDonors.results[s.id] || null;
       if (!scan || scan.status !== "ok") return null;
@@ -3293,7 +3305,7 @@ function _renderQuotaHierarchy(result) {
       for (const [fam, info] of Object.entries(fams)) {
         if (!relevant.has(fam.toLowerCase())) continue;
         const fr = info && info.headroom != null ? info.headroom : 0;
-        if (fr > 0) { bestFree = Math.max(bestFree, fr); chips.push({ label: _donorFamilyLabel(fam, result.rows), free: fr }); }
+        if (fr > 0) { bestFree = Math.max(bestFree, fr); chips.push({ label: _donorFamilyLabel(fam, result.rows), free: fr, role: famRole(fam.toLowerCase()) }); }
       }
       if (bestFree <= 0) return null;
       const coversAll = failingRows.every(r => {
@@ -3315,12 +3327,14 @@ function _renderQuotaHierarchy(result) {
     } else {
       const totalFree = evaluated.reduce((sum, e) => sum + (Number(e.bestFree) || 0), 0);
       const perSkuTotals = new Map();
+      const perSkuRole = new Map();
       evaluated.forEach(e => (e.chips || []).forEach(c => {
         perSkuTotals.set(c.label, (perSkuTotals.get(c.label) || 0) + (Number(c.free) || 0));
+        if (c.role && !perSkuRole.has(c.label)) perSkuRole.set(c.label, c.role);
       }));
       const skuTotalChips = [...perSkuTotals.entries()]
         .sort((a, b) => b[1] - a[1])
-        .map(([label, free]) => `<span class="qd-chip qd-chip--total">${escapeHtml(label)} · ${_formatQuotaNumber(free)} free</span>`)
+        .map(([label, free]) => `<span class="qd-chip qd-chip--total${perSkuRole.get(label) ? ` qd-chip--${perSkuRole.get(label)}` : ""}">${escapeHtml(label)} · ${_formatQuotaNumber(free)} free</span>`)
         .join("");
       const totalSummary = `<div class="qd-donor-total">
         <div class="qd-donor-total-head">Total free to pull across ${evaluated.length} donor subscription${evaluated.length === 1 ? "" : "s"}</div>
@@ -3329,8 +3343,8 @@ function _renderQuotaHierarchy(result) {
       const cards = evaluated.map(({ s, chips, bestFree, coversAll }) => {
         const badge = coversAll
           ? `<span class="qd-donor-badge qd-donor-badge--ok">Can cover shortfall</span>`
-          : `<span class="qd-donor-badge qd-donor-badge--partial">Partial · ${_formatQuotaNumber(bestFree)} free</span>`;
-        const chipHtml = chips.map(c => `<span class="qd-chip">${escapeHtml(c.label)} · ${_formatQuotaNumber(c.free)} free</span>`).join("");
+          : "";
+        const chipHtml = chips.map(c => `<span class="qd-chip${c.role ? ` qd-chip--${c.role}` : ""}">${escapeHtml(c.label)} · ${_formatQuotaNumber(c.free)} free</span>`).join("");
         return `<div class="qd-donor">
           <div class="qd-donor-head">
             <span class="qd-donor-name">${escapeHtml(s.name || s.id)}</span>
