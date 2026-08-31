@@ -958,13 +958,16 @@ function _altValidBadge(v, regionShort) {
   const limit = (v.quota && v.quota.limit != null) ? Number(v.quota.limit) : "";
   const ticketLink = (kind, text) =>
     `<a href="#" class="alt-ticket-link" data-alt-ticket="${kind}" data-alt-region="${region}" data-alt-family="${armFam}" data-alt-label="${label}" data-alt-cores="${cores}" data-alt-limit="${limit}">${text}</a>`;
-  // Surface partial-zone restrictions (some AZs blocked, others usable).
+  // Surface zone status: partial restrictions (some AZs blocked) or an
+  // explicit all-clear when every zone is usable for this subscription.
   let zoneNote = "";
-  if (v.zone_limited && Array.isArray(v.zones)) {
+  if (Array.isArray(v.zones) && v.zones.length) {
     const blocked = v.zones.map((ok, i) => ok ? null : i + 1).filter(Boolean);
     const avail = v.zones.map((ok, i) => ok ? i + 1 : null).filter(Boolean);
-    if (blocked.length) {
+    if (v.zone_limited && blocked.length) {
       zoneNote = ` <span class="alt-zone-note" title="Restricted in AZ ${blocked.join(", ")} for this subscription; usable in AZ ${avail.join(", ") || "none"}.">⚠️ AZ-limited (not in ${blocked.map(z => "AZ " + z).join(", ")})</span> ${ticketLink("technical", "Request AZ access →")}`;
+    } else if (v.offered && !v.region_restricted && !blocked.length) {
+      zoneNote = ` <span class="alt-zone-note ok" title="No zonal (AZ) restrictions for this subscription; usable in AZ ${avail.join(", ") || "all"}.">✓ No AZ restrictions</span>`;
     }
   }
   switch (v.verdict) {
