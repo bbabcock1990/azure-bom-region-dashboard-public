@@ -934,7 +934,6 @@ function openDrilldown(r) {
     <div class="kv">
       <div class="key">Status</div><div><span class="status-pill ${statusClass(r.status)}">${escapeHtml(r.status)}</span></div>
       <div class="key">Region (short)</div><div>${escapeHtml(r.short)}</div>
-      <div class="key">Coordinates</div><div>${r.coords[0] != null ? r.coords.join(", ") : "—"}</div>
       <div class="key">Quota</div><div>${ddVerdictHtml}</div>
     </div>`;
 
@@ -1009,7 +1008,7 @@ function openDrilldown(r) {
   }
 
   if (r.alt_regions && r.alt_regions.length) {
-    html += `<h4>Alternative Regions</h4>`;
+    html += `<h4>Alternative regions based on health and latency</h4>`;
     for (const a of r.alt_regions) {
       const ms = a.latency_ms != null ? `${a.latency_ms} ms` : "geo proximity";
       html += `<div class="alt-row"><span>${escapeHtml(a.region)}</span><span class="ms">${ms}</span></div>`;
@@ -3503,10 +3502,15 @@ function refreshMap() {
       attribution: '&copy; OpenStreetMap',
       maxZoom: 8,
     }).addTo(STATE.map);
+    _ensureLatencyPairControl();
   }
   if (STATE.mapLayer) {
     STATE.map.removeLayer(STATE.mapLayer);
   }
+  // Markers get rebuilt on every refresh, so drop any stale latency selection
+  // (its marker references would otherwise dangle).
+  clearLatencyPair();
+  STATE.mapMarkersByRegion = {};
   const layer = L.layerGroup();
   for (const r of STATE.filtered) {
     if (r.coords[0] == null) continue;
@@ -3514,15 +3518,20 @@ function refreshMap() {
     const marker = L.circleMarker(r.coords, {
       radius: 8, color: "#fff", weight: 2, fillColor: color, fillOpacity: 0.9,
     });
+    marker._regionName = r.name;
+    marker._baseColor = color;
+    STATE.mapMarkersByRegion[r.name] = marker;
     marker.bindPopup(`
       <div><strong>${escapeHtml(r.name)}</strong></div>
       <div style="font-size:11px;color:#6b7280">${escapeHtml(r.geo)}</div>
       <div style="margin:4px 0">Health: <strong>${r.deployment_health}</strong> &middot; ${escapeHtml(r.status)}</div>
       ${r.recommendation ? `<div style="font-size:12px">${escapeHtml(r.recommendation)}</div>` : ""}
-      <div style="margin-top:6px"><a href="#" class="map-details-link" data-region="${escapeHtml(r.name)}">Details &rarr;</a></div>
+      <div style="margin-top:6px"><a href="#" class="map-latency-link" data-region="${escapeHtml(r.name)}">Measure latency &harr;</a></div>
+      <div style="margin-top:4px"><a href="#" class="map-details-link" data-region="${escapeHtml(r.name)}">Details &rarr;</a></div>
     `);
     marker.on("popupopen", function () {
-      const link = marker.getPopup().getElement().querySelector(".map-details-link");
+      const el = marker.getPopup().getElement();
+      const link = el.querySelector(".map-details-link");
       if (link) {
         link.addEventListener("click", function (e) {
           e.preventDefault();
@@ -3531,11 +3540,163 @@ function refreshMap() {
           if (region) openDrilldown(region);
         });
       }
+      const latLink = el.querySelector(".map-latency-link");
+      if (latLink) {
+        latLink.addEventListener("click", function (e) {
+          e.preventDefault();
+          selectRegionForLatency(this.getAttribute("data-region"));
+          marker.closePopup();
+        });
+      }
     });
     layer.addLayer(marker);
   }
   layer.addTo(STATE.map);
   STATE.mapLayer = layer;
+}
+
+// ── Map latency measurement (pick two regions → draw a line labelled with the
+// published round-trip latency between them) ────────────────────────────────
+
+function latencyBetween(nameA, nameB) {
+  const matrix = (STATE.snapshot && STATE.snapshot.latency_matrix) || {};
+  const map = buildDisplayToLatency();
+  const a = map[String(nameA).toLowerCase()];
+  const b = map[String(nameB).toLowerCase()];
+  if (!a || !b) return null;
+  let ms = matrix[a] && matrix[a][b];
+  if (ms == null) ms = matrix[b] && matrix[b][a];
+  return ms == null ? null : ms;
+}
+
+function _regionByName(name) {
+  return (STATE.snapshot && STATE.snapshot.regions || []).find(x => x.name === name);
+}
+
+function _setMarkerSelected(name, selected) {
+  const m = STATE.mapMarkersByRegion && STATE.mapMarkersByRegion[name];
+  if (!m) return;
+  m.setStyle(selected
+    ? { color: "#0F6CBD", weight: 4, radius: 10, fillColor: m._baseColor }
+    : { color: "#fff", weight: 2, radius: 8, fillColor: m._baseColor });
+}
+
+function selectRegionForLatency(name) {
+  if (!name) return;
+  STATE.latencyPair = STATE.latencyPair || { a: null, b: null };
+  const p = STATE.latencyPair;
+  if (!p.a) {
+    p.a = name;
+    _setMarkerSelected(name, true);
+    _updateLatencyPairControl();
+    return;
+  }
+  if (p.a === name) {
+    // Re-clicking the source clears the whole selection.
+    clearLatencyPair();
+    return;
+  }
+  // A already chosen — this becomes B (or replaces a completed pair's B).
+  if (p.b) _setMarkerSelected(p.b, false);
+  p.b = name;
+  _setMarkerSelected(name, true);
+  _drawLatencyPair();
+  _updateLatencyPairControl();
+}
+
+function _clearLatencyLine() {
+  if (STATE.latencyLineLayer) {
+    STATE.map.removeLayer(STATE.latencyLineLayer);
+    STATE.latencyLineLayer = null;
+  }
+}
+
+function clearLatencyPair() {
+  const p = STATE.latencyPair;
+  if (p) {
+    if (p.a) _setMarkerSelected(p.a, false);
+    if (p.b) _setMarkerSelected(p.b, false);
+  }
+  STATE.latencyPair = { a: null, b: null };
+  _clearLatencyLine();
+  _updateLatencyPairControl();
+}
+
+function _drawLatencyPair() {
+  const p = STATE.latencyPair;
+  if (!p || !p.a || !p.b) return;
+  const ra = _regionByName(p.a);
+  const rb = _regionByName(p.b);
+  if (!ra || !rb || ra.coords[0] == null || rb.coords[0] == null) return;
+  _clearLatencyLine();
+  const ms = latencyBetween(p.a, p.b);
+  const color = ms == null ? "#8A8886" : ms < 50 ? "#107C10" : ms < 120 ? "#D29200" : "#DA291C";
+  const line = L.polyline([ra.coords, rb.coords], {
+    color, weight: 3, opacity: 0.85,
+    dashArray: ms == null ? "6 6" : null,
+  });
+  const label = ms == null
+    ? "latency not published"
+    : `${ms} ms round-trip`;
+  const mid = [(ra.coords[0] + rb.coords[0]) / 2, (ra.coords[1] + rb.coords[1]) / 2];
+  const badge = L.marker(mid, {
+    interactive: false,
+    icon: L.divIcon({
+      className: "latency-pair-badge",
+      html: `<span style="background:${color};color:#fff;padding:2px 8px;border-radius:10px;` +
+            `font-size:11px;font-weight:600;white-space:nowrap;box-shadow:0 1px 3px rgba(0,0,0,0.4)">` +
+            `${escapeHtml(label)}</span>`,
+      iconSize: null,
+    }),
+  });
+  const grp = L.layerGroup([line, badge]);
+  grp.addTo(STATE.map);
+  STATE.latencyLineLayer = grp;
+}
+
+function _ensureLatencyPairControl() {
+  if (STATE.latencyPairControl || !STATE.map) return;
+  const ctl = L.control({ position: "topright" });
+  ctl.onAdd = function () {
+    const div = L.DomUtil.create("div", "latency-pair-control");
+    div.style.cssText =
+      "background:rgba(255,255,255,0.95);color:#201f1e;padding:8px 10px;border-radius:6px;" +
+      "font-size:12px;box-shadow:0 1px 4px rgba(0,0,0,0.3);max-width:230px;line-height:1.35";
+    L.DomEvent.disableClickPropagation(div);
+    div.innerHTML = `<div id="latency-pair-body"></div>`;
+    return div;
+  };
+  ctl.addTo(STATE.map);
+  STATE.latencyPairControl = ctl;
+  _updateLatencyPairControl();
+}
+
+function _updateLatencyPairControl() {
+  const body = document.getElementById("latency-pair-body");
+  if (!body) return;
+  const p = STATE.latencyPair || { a: null, b: null };
+  if (!p.a && !p.b) {
+    body.innerHTML =
+      `<strong>Measure latency</strong><br>` +
+      `<span style="color:#605e5c">Click a region's <em>Measure latency &harr;</em> ` +
+      `link, then pick a second region to draw the line.</span>`;
+    return;
+  }
+  const ms = p.a && p.b ? latencyBetween(p.a, p.b) : null;
+  const msHtml = p.a && p.b
+    ? (ms == null
+        ? `<span style="color:#a4262c">latency not published</span>`
+        : `<strong>${ms} ms</strong> round-trip`)
+    : `<span style="color:#605e5c">pick a second region…</span>`;
+  body.innerHTML =
+    `<div><strong>A:</strong> ${escapeHtml(p.a || "—")}</div>` +
+    `<div><strong>B:</strong> ${escapeHtml(p.b || "—")}</div>` +
+    `<div style="margin-top:3px">${msHtml}</div>` +
+    `<div style="margin-top:6px"><a href="#" id="latency-pair-clear" style="color:#0F6CBD">Clear</a></div>`;
+  const clear = document.getElementById("latency-pair-clear");
+  if (clear) {
+    clear.addEventListener("click", function (e) { e.preventDefault(); clearLatencyPair(); });
+  }
 }
 
 window.openDrilldownByName = function (name) {
@@ -3735,7 +3896,7 @@ function renderCompareSlot(slot) {
   // Alternatives
   let altHtml = "";
   if (r.alt_regions && r.alt_regions.length) {
-    altHtml += `<div style="margin-top:10px"><strong>Alternative Regions:</strong></div>`;
+    altHtml += `<div style="margin-top:10px"><strong>Alternative regions based on health and latency:</strong></div>`;
     for (const a of r.alt_regions) {
       altHtml += `<div style="font-size:11px;padding-left:8px;color:var(--text-secondary)">${escapeHtml(a.region)}${a.latency_ms != null ? ` (${a.latency_ms}ms)` : ""}</div>`;
     }
