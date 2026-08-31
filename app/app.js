@@ -927,12 +927,15 @@ function _altSavingsBlock(info, cur, regionShort) {
   if (!swaps.length) return "";
   const rows = swaps.map(s => {
     const vend = s.vendor ? `<span class="alt-vendor alt-vendor--${s.vendor.toLowerCase()}" title="${escapeHtml(s.note || "")}">${escapeHtml(s.vendor)}</span>` : "";
+    const ret = (s.retirement && s.retirement.note)
+      ? ` <span class="alt-prevgen" title="${escapeHtml((s.retirement.replacement ? "Newer generation available: " + s.retirement.replacement + ". " : "") + "Still fully supported.")}">🕈 ${escapeHtml(s.retirement.note)}</span>`
+      : "";
     return `<div class="alt-swap">
       <div class="alt-swap-top">
         <div class="alt-swap-main">
           <span class="alt-from">${escapeHtml(s.from_label)}</span>
           <span class="alt-arrow">→</span>
-          <span class="alt-to">${escapeHtml(s.to_label)}</span> ${vend}
+          <span class="alt-to">${escapeHtml(s.to_label)}</span> ${vend}${ret}
         </div>
         <div class="alt-swap-save">−${_fmtMoney(s.savings_monthly_net, cur)}/mo <span class="muted">(${s.savings_pct}%)</span></div>
       </div>
@@ -976,6 +979,11 @@ function _altValidBadge(v, regionShort) {
     case "quota": {
       const need = v.quota && v.quota.shortfall != null ? Math.round(v.quota.shortfall) : null;
       return `<span class="alt-valid warn" title="${title}">⚠️ Quota short${need != null ? ` ${need} vCPU` : ""}</span>${zoneNote} ${ticketLink("quota", "Request quota →")}`;
+    }
+    case "incompatible": {
+      const miss = (v.parity && Array.isArray(v.parity.missing)) ? v.parity.missing.map(m => m.cap) : [];
+      const detail = miss.length ? ` (missing ${escapeHtml(miss.join(", "))})` : "";
+      return `<span class="alt-valid danger" title="${title}">⛔ Not capability-equivalent${detail}</span>`;
     }
     case "restricted":
       return `<span class="alt-valid danger" title="${title}">⛔ Restricted</span> ${ticketLink("technical", "Request access →")}`;
@@ -1034,7 +1042,7 @@ async function _validateAltsForRegion(r) {
       body: JSON.stringify({
         subscription_id: sub,
         region: r.short,
-        alternatives: swaps.map((s) => ({ family: s.to_family, required_cores: s.required_cores })),
+        alternatives: swaps.map((s) => ({ family: s.to_family, from_family: s.from_family, required_cores: s.required_cores })),
       }),
     });
     entry.status = "done";
@@ -1146,6 +1154,8 @@ async function loadPricingSettings() {
   set("pricing-alt-min", s.alt_min_savings_pct != null ? s.alt_min_savings_pct : 5);
   const altToggle = document.getElementById("pricing-suggest-alts");
   if (altToggle) altToggle.checked = s.suggest_alternatives !== false;
+  const genToggle = document.getElementById("pricing-allow-older-gen");
+  if (genToggle) genToggle.checked = s.allow_older_generation === true;
   _renderServiceEstimateInputs(s.service_estimates || {});
   const msg = document.getElementById("pricing-save-msg");
   if (msg) msg.textContent = "";
@@ -1182,6 +1192,7 @@ async function savePricingSettings() {
     noncompute_uplift_pct: num("pricing-uplift", 35),
     suggest_alternatives: !!(document.getElementById("pricing-suggest-alts") || {}).checked,
     alt_min_savings_pct: num("pricing-alt-min", 5),
+    allow_older_generation: !!(document.getElementById("pricing-allow-older-gen") || {}).checked,
     service_estimates: svc,
   };
   const msg = document.getElementById("pricing-save-msg");

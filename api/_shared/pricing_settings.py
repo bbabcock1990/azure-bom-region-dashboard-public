@@ -42,6 +42,7 @@ _FIELDS = (
     "noncompute_uplift_pct",
     "suggest_alternatives",
     "alt_min_savings_pct",
+    "allow_older_generation",
 )
 
 DEFAULTS: Dict[str, Any] = {
@@ -52,6 +53,7 @@ DEFAULTS: Dict[str, Any] = {
     "noncompute_uplift_pct": 35.0,
     "suggest_alternatives": True,
     "alt_min_savings_pct": 5.0,
+    "allow_older_generation": False,
     "service_estimates": {},  # {service_name: monthly_usd}
 }
 
@@ -141,6 +143,7 @@ def get_settings() -> Dict[str, Any]:
     merged["currency"] = _clean_currency(merged.get("currency"))
     merged["suggest_alternatives"] = _clean_bool(merged.get("suggest_alternatives"), True)
     merged["alt_min_savings_pct"] = _clean_pct(merged.get("alt_min_savings_pct"), 5.0)
+    merged["allow_older_generation"] = _clean_bool(merged.get("allow_older_generation"), False)
     return merged
 
 
@@ -161,6 +164,8 @@ def save_settings(patch: Dict[str, Any]) -> Dict[str, Any]:
         entity["suggest_alternatives"] = _clean_bool(patch.get("suggest_alternatives"), True)
     if "alt_min_savings_pct" in patch:
         entity["alt_min_savings_pct"] = _clean_pct(patch.get("alt_min_savings_pct"), 5.0)
+    if "allow_older_generation" in patch:
+        entity["allow_older_generation"] = _clean_bool(patch.get("allow_older_generation"), False)
     if "service_estimates" in patch:
         cleaned = _clean_service_estimates(patch.get("service_estimates"))
         entity["service_estimates_json"] = json.dumps(cleaned, ensure_ascii=False)

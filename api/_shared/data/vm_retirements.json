@@ -1,0 +1,26 @@
+{
+  "_comment": "Snapshot of Azure VM size-series lifecycle status. Sourced from Microsoft Learn: retired-sizes-list and previous-gen-sizes-list. There is no official Azure API for VM size retirement; these docs are the authoritative source. Refresh by re-reading those two pages and updating this file (see vm_retirement.py). 'cores' are core-form family labels (lowercase) as emitted by pricing.equivalents(). status: retired | announced | previous_gen. sub_status (previous_gen only): capacity_limited | next_gen_available. blocks_recommendation is derived in code: retired/announced always block; previous_gen blocks only when capacity_limited.",
+  "source_retired": "https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/lifecycle/retired-sizes-list",
+  "source_previous_gen": "https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/lifecycle/previous-gen-sizes-list",
+  "snapshot_date": "2026-08-31",
+  "records": [
+    {"series": "D-series (v1)", "cores": ["dv1", "dsv1"], "status": "previous_gen", "sub_status": "capacity_limited", "class": "general"},
+    {"series": "Dv2/Dsv2-series", "cores": ["dv2", "dsv2"], "status": "announced", "planned_retirement_date": "2028-05-01", "announced": "2025-03-31", "replacement": "Dsv5/Dsv6", "migration_url": "https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/lifecycle/retirement/d-ds-dv2-dsv2-ls-series-migration-guide", "class": "general"},
+    {"series": "Dv3/Dsv3-series", "cores": ["dv3", "dsv3"], "status": "previous_gen", "sub_status": "next_gen_available", "replacement": "Dsv5/Dsv6", "class": "general"},
+    {"series": "Av2/Amv2-series", "cores": ["av2", "amv2"], "status": "announced", "planned_retirement_date": "2028-11-15", "announced": "2025-10-15", "class": "general"},
+    {"series": "B-series (v1)", "cores": ["bs", "bsv1"], "status": "announced", "planned_retirement_date": "2028-11-15", "announced": "2025-10-15", "class": "general"},
+    {"series": "F-series (v1)", "cores": ["f", "fs"], "status": "announced", "planned_retirement_date": "2028-11-15", "announced": "2025-10-15", "class": "compute"},
+    {"series": "Fsv2-series", "cores": ["fsv2"], "status": "announced", "planned_retirement_date": "2028-11-15", "announced": "2025-10-15", "replacement": "Fasv6", "migration_url": "https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/lifecycle/retirement/d-ds-dv2-dsv2-ls-series-migration-guide", "class": "compute"},
+    {"series": "Ev3/Esv3-series", "cores": ["ev3", "esv3"], "status": "previous_gen", "sub_status": "next_gen_available", "replacement": "Esv5/Esv6", "class": "memory"},
+    {"series": "Ev4/Esv4-series", "cores": ["ev4", "esv4"], "status": "previous_gen", "sub_status": "next_gen_available", "replacement": "Esv5/Esv6", "class": "memory"},
+    {"series": "Eav4/Easv4-series", "cores": ["eav4", "easv4"], "status": "previous_gen", "sub_status": "next_gen_available", "replacement": "Easv5/Easv6", "class": "memory"},
+    {"series": "Edv4/Edsv4-series", "cores": ["edv4", "edsv4"], "status": "previous_gen", "sub_status": "next_gen_available", "replacement": "Edsv5/Edsv6", "class": "memory"},
+    {"series": "G/Gs-series", "cores": ["g", "gs"], "status": "announced", "planned_retirement_date": "2028-11-15", "announced": "2025-10-15", "class": "memory"},
+    {"series": "Ls-series (v1)", "cores": ["ls", "lsv1"], "status": "announced", "planned_retirement_date": "2028-05-01", "announced": "2025-03-31", "class": "storage"},
+    {"series": "Lsv2-series", "cores": ["lsv2"], "status": "announced", "planned_retirement_date": "2028-11-15", "announced": "2025-10-15", "class": "storage"},
+    {"series": "NCv3-series", "cores": ["ncv3"], "status": "retired", "planned_retirement_date": "2025-09-30", "class": "gpu"},
+    {"series": "NVv3-series", "cores": ["nvv3"], "status": "announced", "planned_retirement_date": "2026-09-30", "announced": "2025-04-15", "class": "gpu"},
+    {"series": "NVv4-series", "cores": ["nvv4"], "status": "announced", "planned_retirement_date": "2026-09-30", "announced": "2025-04-15", "class": "gpu"},
+    {"series": "NP-series", "cores": ["np"], "status": "announced", "planned_retirement_date": "2027-05-31", "announced": "2026-04-02", "class": "fpga"}
+  ]
+}

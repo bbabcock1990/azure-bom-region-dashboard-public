@@ -34,7 +34,9 @@ from typing import Any, Dict, List
 
 from .._shared import auth, csrf, auth_token
 from .._shared import httpfunc as func
+from .._shared import pricing, sku_capabilities
 from .._shared.arm_sku_availability import fetch_arm_sku_records
+from .._shared.arm_skus import fetch_region_capabilities
 from .._shared.quota_groups import check_subscription_quota
 
 log = logging.getLogger(__name__)
@@ -192,10 +194,13 @@ async def main(req: func.HttpRequest) -> func.HttpResponse:
             cores = int(float(item.get("required_cores") or 0))
         except (TypeError, ValueError):
             cores = 0
+        from_core = pricing._family_core(str(item.get("from_family") or "").strip())
         alts.append({
             "family": core,
             "arm_id": _arm_family_id(core),
             "required_cores": max(0, cores),
+            "from_family": from_core,
+            "core": pricing._family_core(core).lower(),
         })
     if not alts:
         return _err("no_alternatives", "No valid alternatives supplied.", 400)
@@ -256,6 +261,24 @@ async def main(req: func.HttpRequest) -> func.HttpResponse:
     quota_families = quota_region.get("families") or {}
     quota_status = quota_region.get("status") or quota.get("status") or "unknown"
 
+    # Authoritative capability parity: a cheaper swap must support everything the
+    # original BOM size does (temp disk, premium/ultra disk, accelerated
+    # networking, encryption-at-host, Hyper-V generation, memory). Best-effort —
+    # if the capabilities call fails we leave parity "unknown" rather than block.
+    core_index: Dict[str, Any] = {}
+    try:
+        caps_by_size = await asyncio.to_thread(
+            fetch_region_capabilities,
+            arm_token=arm_token,
+            subscription_id=subscription_id,
+            region=region,
+            timeout_s=20.0,
+        )
+        core_index = sku_capabilities.index_by_core(caps_by_size)
+    except Exception:  # pragma: no cover - defensive
+        log.exception("alt capability lookup failed")
+        core_index = {}
+
     results: Dict[str, Any] = {}
     for a in alts:
         arm_lower = a["arm_id"].lower()
@@ -279,12 +302,29 @@ async def main(req: func.HttpRequest) -> func.HttpResponse:
             required_cores=a["required_cores"],
         )
 
+        # Capability parity — only meaningful when the SKU is actually offered
+        # and we know the original family to compare against. A parity failure
+        # takes precedence over quota/zone verdicts: no quota bump makes an
+        # incompatible size a valid swap.
+        parity = {"status": "unknown", "missing": [], "vcpus": None}
+        if offered and a.get("from_family") and core_index:
+            parity = sku_capabilities.parity_check(
+                core_index, a["from_family"], a["core"]
+            )
+        v_name = verdict["verdict"]
+        v_msg = verdict["message"]
+        if offered and parity.get("status") == "incompatible":
+            labels = [m["cap"] for m in parity.get("missing") or []]
+            v_name = "incompatible"
+            v_msg = ("Not capability-equivalent — missing "
+                     + ", ".join(labels) + " that the current size has.")
+
         results[a["family"]] = {
             "family": a["family"],
             "arm_family": a["arm_id"],
             "required_cores": a["required_cores"],
-            "verdict": verdict["verdict"],
-            "message": verdict["message"],
+            "verdict": v_name,
+            "message": v_msg,
             "offered": offered,
             "region_restricted": region_restricted,
             "zone_limited": verdict.get("zone_limited", False),
@@ -292,6 +332,11 @@ async def main(req: func.HttpRequest) -> func.HttpResponse:
             "available_zones": available_zones,
             "restricted_zones": restricted_zones,
             "sub_restriction_raw": sub_restriction_raw,
+            "parity": {
+                "status": parity.get("status"),
+                "missing": parity.get("missing") or [],
+                "compared_vcpus": parity.get("vcpus"),
+            },
             "quota": {
                 "limit": _num(q.get("limit")),
                 "usage": _num(q.get("usage")),

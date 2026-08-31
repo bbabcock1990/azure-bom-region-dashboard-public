@@ -28,6 +28,8 @@ import threading
 import time
 from typing import Dict, List, Optional, Tuple
 
+from . import vm_retirement
+
 log = logging.getLogger(__name__)
 
 RETAIL_PRICES_URL = "https://prices.azure.com/api/retail/prices"
@@ -127,14 +129,56 @@ _GROUP_BY_CORE: Dict[str, Tuple[str, ...]] = {
 }
 
 
+def _size_features(family: str) -> str:
+    """Lowercase feature letters of a core-form label (the bit between the
+    series letter and ``v<n>``). ``Ddsv5`` -> ``ds``; ``Dpsv6`` -> ``ps``."""
+    core = _family_core(family)
+    m = re.match(r"^([A-Za-z])([A-Za-z]*?)v(\d+)$", core)
+    return (m.group(2).lower() if m else "")
+
+
+def _generation(family: str) -> int:
+    """The ``v<n>`` generation number of a core-form label; 0 when unknown.
+
+    ``Dsv5`` -> 5, ``Fsv2`` -> 2, ``Fasv6`` -> 6.
+    """
+    core = _family_core(family)
+    m = re.match(r"^[A-Za-z][A-Za-z]*?v(\d+)$", core)
+    try:
+        return int(m.group(1)) if m else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _naming_parity_ok(orig_family: str, alt_family: str) -> bool:
+    """True when ``alt`` preserves the capability-bearing feature letters of
+    ``orig`` that the Azure naming convention encodes.
+
+    The letters we enforce parity on:
+      * ``d`` — a local **temp disk**. If the original has one, the substitute
+        must too (dropping it silently breaks workloads that rely on ephemeral
+        local storage).
+      * ``s`` — **premium storage** capability. Enforced defensively; every
+        mainstream ``s`` family already keeps it.
+
+    This is a cheap, deterministic guard that runs without an ARM call. The live
+    validation endpoint layers an authoritative capability-superset check on top
+    (accelerated networking, encryption-at-host, HyperV gen, etc.).
+    """
+    orig = _size_features(orig_family)
+    alt = _size_features(alt_family)
+    for letter in ("d", "s"):
+        if letter in orig and letter not in alt:
+            return False
+    return True
+
+
 def _cpu_vendor(family: str) -> Tuple[str, str]:
     """Return ``(vendor, note)`` inferred from a family's feature letters.
 
     ``Dasv6`` -> AMD, ``Dpsv5`` -> ARM (needs ARM64 image), else Intel.
     """
-    core = _family_core(family)
-    m = re.match(r"^([A-Za-z])([A-Za-z]*?)v(\d+)$", core)
-    features = (m.group(2).lower() if m else "")
+    features = _size_features(family)
     if "p" in features:
         return "ARM", "ARM64/Ampere — requires an ARM64-compatible OS image."
     if "a" in features:
@@ -154,6 +198,47 @@ def equivalents(family: str) -> List[str]:
     if not group:
         return []
     return [m for m in group if m.lower() != core]
+
+
+def eligible_alternatives(
+    family: str,
+    *,
+    exclude_cores: Optional[set] = None,
+    allow_older_generation: bool = False,
+) -> List[dict]:
+    """Filtered size-equivalent substitutes for ``family``, safe to recommend.
+
+    Starts from :func:`equivalents` and drops any candidate that would be an
+    unsafe or undesirable swap:
+
+      * already in the BOM (``exclude_cores``, core-form lowercased);
+      * loses a capability the original encodes in its name — today the local
+        **temp disk** (``d``) — see :func:`_naming_parity_ok`;
+      * is an **older generation** than the original, unless
+        ``allow_older_generation`` is set;
+      * is **retired / announced for retirement / capacity-limited**
+        (:mod:`vm_retirement`).
+
+    Returns a list of ``{"family": <core label>, "retirement": <rec|None>}``
+    preserving the group's order. ``retirement`` is attached only for
+    still-eligible *previous-gen* series so the UI can flag them.
+    """
+    exclude = {str(c).lower() for c in (exclude_cores or set())}
+    orig_gen = _generation(family)
+    out: List[dict] = []
+    for cand in equivalents(family):
+        cc = _family_core(cand).lower()
+        if cc in exclude:
+            continue
+        if not _naming_parity_ok(family, cand):
+            continue
+        if not allow_older_generation and _generation(cand) < orig_gen:
+            continue
+        rec = vm_retirement.status_for_core(cand)
+        if rec and rec.get("blocks_recommendation"):
+            continue
+        out.append({"family": cand, "retirement": rec})
+    return out
 
 
 def _matches_target_os(item: dict, os_name: str) -> bool:
@@ -333,6 +418,7 @@ def estimate(
     suggest_alternatives: bool = True,
     alt_min_savings_pct: float = 5.0,
     max_alternatives: int = 3,
+    allow_older_generation: bool = False,
 ) -> Dict:
     """Estimate monthly BOM cost per region (compute + non-compute).
 
@@ -421,18 +507,24 @@ def estimate(
         top_n = 3
     bom_cores = {_family_core(f["family"]).lower() for f in norm_families}
     alt_by_family: Dict[str, List[str]] = {}
+    alt_retirement: Dict[str, Optional[dict]] = {}
     alt_ids: List[str] = []
     alt_seen = set()
     if suggest_alternatives:
         for f in norm_families:
-            cands = [c for c in equivalents(f["family"])
-                     if _family_core(c).lower() not in bom_cores]
-            alt_by_family[f["family"]] = cands
+            cands = eligible_alternatives(
+                f["family"],
+                exclude_cores=bom_cores,
+                allow_older_generation=bool(allow_older_generation),
+            )
+            alt_by_family[f["family"]] = [c["family"] for c in cands]
             for c in cands:
-                key = _family_core(c).lower()
+                core = c["family"]
+                key = _family_core(core).lower()
+                alt_retirement[key] = c.get("retirement")
                 if key not in alt_seen:
                     alt_seen.add(key)
-                    alt_ids.append(c)
+                    alt_ids.append(core)
 
     price_ids = fam_ids + alt_ids
 
@@ -496,12 +588,19 @@ def estimate(
                 a_hourly = cinfo["per_core_hour"] * cores
                 a_month = a_hourly * hours
                 vendor, note = _cpu_vendor(cand)
+                rec = alt_retirement.get(_family_core(cand).lower())
                 alts.append({
                     "family": cand,
                     "label": cand,
                     "anchor_size": cinfo["anchor_size"],
                     "vendor": vendor,
                     "note": note,
+                    "retirement": ({
+                        "status": rec.get("status"),
+                        "sub_status": rec.get("sub_status"),
+                        "note": vm_retirement.short_note(cand),
+                        "replacement": rec.get("replacement"),
+                    } if rec else None),
                     "per_core_hour": round(cinfo["per_core_hour"], 5),
                     "monthly_list": round(a_month, 2),
                     "monthly_net": round(a_month * factor, 2),
@@ -537,6 +636,7 @@ def estimate(
                     "to_label": best["label"],
                     "vendor": best["vendor"],
                     "note": best["note"],
+                    "retirement": best.get("retirement"),
                     "required_cores": cores,
                     "savings_monthly_net": best["savings_monthly_net"],
                     "savings_pct": best["savings_pct"],

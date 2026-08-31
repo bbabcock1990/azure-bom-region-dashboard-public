@@ -3206,6 +3206,7 @@ html.filters-collapsed-init .filters-body { display: none; }
 #drilldown .alt-valid.checking { color: var(--muted); font-weight: 500; font-style: italic; }
 #drilldown .alt-zone-note { color: #f4d4a3; font-weight: 600; }
 #drilldown .alt-zone-note.ok { color: var(--good, #7ee0a2); }
+#drilldown .alt-prevgen { color: #c9b6e4; font-weight: 600; font-size: 0.85em; white-space: nowrap; }
 #drilldown .alt-ticket-link {
   font-size: .76rem;
   font-weight: 600;

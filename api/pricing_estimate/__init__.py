@@ -90,6 +90,7 @@ async def main(req: func.HttpRequest) -> func.HttpResponse:
     service_estimates = _pick(body, "service_estimates", saved.get("service_estimates", {}))
     suggest_alts = _pick(body, "suggest_alternatives", saved.get("suggest_alternatives", True))
     alt_min_savings = _pick(body, "alt_min_savings_pct", saved.get("alt_min_savings_pct", 5.0))
+    allow_older_gen = _pick(body, "allow_older_generation", saved.get("allow_older_generation", False))
 
     try:
         result = await asyncio.to_thread(
@@ -105,6 +106,7 @@ async def main(req: func.HttpRequest) -> func.HttpResponse:
             service_estimates=service_estimates,
             suggest_alternatives=suggest_alts,
             alt_min_savings_pct=alt_min_savings,
+            allow_older_generation=allow_older_gen,
         )
     except Exception as ex:  # pragma: no cover - defensive
         log.exception("pricing estimate failed")
