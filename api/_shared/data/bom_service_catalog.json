@@ -620,10 +620,11 @@
     },
     {
       "name": "Microsoft Sentinel",
-      "provider": "Microsoft.SecurityInsights",
-      "resource_type": "*",
+      "provider": "Microsoft.OperationalInsights",
+      "resource_type": "workspaces",
       "zone_check": false,
-      "category": "Security & Identity"
+      "category": "Security & Identity",
+      "note": "Microsoft Sentinel is enabled on a Log Analytics workspace (Microsoft.OperationalInsights/workspaces); its availability tracks Log Analytics. The Microsoft.SecurityInsights provider only advertises ~16 control-plane homing regions, which understates where Sentinel can actually be onboarded (e.g. it omits the Australia regions where Sentinel is GA)."
     },
     {
       "name": "Managed Identities",
