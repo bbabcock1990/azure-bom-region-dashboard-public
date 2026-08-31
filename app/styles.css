@@ -769,20 +769,28 @@ main {
 .qd-donor-total {
   font-size: 13px;
   color: var(--text-primary);
-  background: var(--panel-bg);
-  border: 1px solid var(--panel-border);
-  border-radius: 8px;
-  padding: 8px 12px;
-  margin-bottom: 10px;
+  background: linear-gradient(135deg, rgba(34,197,94,0.10), rgba(76,175,80,0.04));
+  border: 1px solid rgba(76,175,80,0.35);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+  box-shadow: 0 4px 18px rgba(0,0,0,0.28), 0 0 0 1px rgba(76,175,80,0.06);
 }
 .qd-donor-total-head {
-  font-weight: 600;
-  margin-bottom: 6px;
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.2px;
+  margin-bottom: 10px;
 }
 .qd-donor-total-chips {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 8px;
+}
+.qd-donor-total-chips .qd-chip {
+  font-size: 13px;
+  padding: 5px 12px;
+  border-radius: 8px;
 }
 .qd-chip--total {
   background: rgba(16,124,16,0.16);
