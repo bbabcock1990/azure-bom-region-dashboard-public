@@ -3109,3 +3109,64 @@ html.filters-collapsed-init .filters-body { display: none; }
   line-height: 1.45;
 }
 #settings-pricing h3 { margin: 20px 0 4px; font-size: 1rem; }
+
+/* ---------------------------------------------------------------- Cheaper equivalent SKUs */
+.cost-save-badge {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: .72em;
+  font-weight: 700;
+  color: #8fe3b0;
+  background: rgba(143, 227, 176, .14);
+  border: 1px solid rgba(143, 227, 176, .35);
+  border-radius: 999px;
+  padding: 0 6px;
+  vertical-align: middle;
+}
+
+#drilldown .alt-title { color: #8fe3b0; margin-top: 14px; }
+#drilldown .alt-headline {
+  font-weight: 600;
+  color: #8fe3b0;
+  margin: 2px 0 8px;
+  font-size: .95rem;
+}
+#drilldown .alt-swaps { display: flex; flex-direction: column; gap: 6px; }
+#drilldown .alt-swap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: rgba(143, 227, 176, .07);
+  border: 1px solid rgba(143, 227, 176, .18);
+}
+#drilldown .alt-swap-main { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+#drilldown .alt-from { opacity: .75; text-decoration: line-through; }
+#drilldown .alt-to { font-weight: 700; }
+#drilldown .alt-arrow { opacity: .6; }
+#drilldown .alt-swap-save { color: #8fe3b0; font-weight: 600; white-space: nowrap; }
+#drilldown .alt-note { margin-top: 8px; font-size: .78rem; line-height: 1.4; }
+
+.alt-vendor {
+  font-size: .68em;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .03em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, .2);
+  cursor: help;
+}
+.alt-vendor--amd { color: #f0a35e; border-color: rgba(240, 163, 94, .5); background: rgba(240, 163, 94, .12); }
+.alt-vendor--arm { color: #7bc7ff; border-color: rgba(123, 199, 255, .5); background: rgba(123, 199, 255, .12); }
+.alt-vendor--intel { color: #9ab0c6; border-color: rgba(154, 176, 198, .5); background: rgba(154, 176, 198, .12); }
+
+.pricing-check {
+  flex-direction: row !important;
+  align-items: flex-start;
+  gap: 8px !important;
+  grid-column: 1 / -1;
+}
+.pricing-check input[type="checkbox"] { margin-top: 3px; width: auto; }

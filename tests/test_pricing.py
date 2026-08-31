@@ -222,3 +222,137 @@ def test_pricing_settings_invalid_values_fall_back():
     assert saved["hours_per_month"] == 730
     assert saved["currency"] == "USD"
 
+
+def test_pricing_settings_alternative_fields():
+    from _shared import pricing_settings as ps
+
+    defaults = ps.get_settings()
+    assert defaults["suggest_alternatives"] is True
+    assert defaults["alt_min_savings_pct"] == 5.0
+
+    saved = ps.save_settings({"suggest_alternatives": False, "alt_min_savings_pct": 12})
+    assert saved["suggest_alternatives"] is False
+    assert saved["alt_min_savings_pct"] == 12.0
+
+
+# --------------------------------------------------------------- equivalents / vendor
+
+def test_equivalents_same_ratio_group():
+    eqs = {e.lower() for e in pricing_mod.equivalents("Dsv5")}
+    # AMD, ARM and newer/older generations of the same 4 GiB/vCPU D-series.
+    assert "dasv6" in eqs
+    assert "dpsv5" in eqs
+    assert "dsv3" in eqs
+    # The family itself is never in its own equivalents.
+    assert "dsv5" not in eqs
+    # Different ratio series must not leak in.
+    assert not any(x.startswith("e") or x.startswith("f") for x in eqs)
+
+
+def test_equivalents_handles_canonical_family_id():
+    # BOM ids arrive as e.g. "standardDsv5Family" (any case).
+    eqs = {e.lower() for e in pricing_mod.equivalents("standardDsv5Family")}
+    assert "dasv6" in eqs
+
+
+def test_equivalents_unknown_series_empty():
+    assert pricing_mod.equivalents("NCadsA100v4") == []
+    assert pricing_mod.equivalents("") == []
+
+
+def test_cpu_vendor_detection():
+    assert pricing_mod._cpu_vendor("Dasv6")[0] == "AMD"
+    assert pricing_mod._cpu_vendor("Dpsv5")[0] == "ARM"
+    assert pricing_mod._cpu_vendor("Dsv5")[0] == "Intel"
+    # ARM carries an image-compatibility caveat.
+    assert "ARM64" in pricing_mod._cpu_vendor("Dpsv5")[1]
+
+
+# --------------------------------------------------------------- estimate() alternatives
+
+def test_estimate_suggests_cheaper_equivalent(monkeypatch):
+    # Dsv5 Intel $0.20/hr anchor; a cheaper AMD Dasv6 at $0.16/hr (20% off).
+    _patch_prices(monkeypatch, {
+        "Standard_D4s_v5": 0.20,
+        "Standard_D4as_v6": 0.16,
+    })
+    result = pricing_mod.estimate(
+        ["eastus"],
+        [{"family": "Dsv5", "label": "Dsv5", "required_cores": 100}],
+        hours_per_month=730,
+        noncompute_uplift_pct=0.0,
+        suggest_alternatives=True,
+        alt_min_savings_pct=5.0,
+    )
+    region = result["regions"]["eastus"]
+    fam = region["compute"]["families"][0]
+    labels = {a["family"] for a in fam["alternatives"]}
+    assert "Dasv6" in labels
+    dasv6 = next(a for a in fam["alternatives"] if a["family"] == "Dasv6")
+    assert dasv6["vendor"] == "AMD"
+    assert dasv6["savings_pct"] == 20.0
+    # Region roll-up reflects the swap.
+    assert region["has_cheaper_alt"] is True
+    assert region["compute"]["alt_savings_pct"] == 20.0
+    # 100 cores * 730h: $3650 primary -> $2920 optimized.
+    assert region["compute"]["optimized_monthly_list"] == 2920.0
+    swap = region["compute"]["swaps"][0]
+    assert swap["to_family"] == "Dasv6"
+
+
+def test_estimate_ignores_alt_below_threshold(monkeypatch):
+    # AMD only 3% cheaper — below the 5% threshold, so not suggested.
+    _patch_prices(monkeypatch, {
+        "Standard_D4s_v5": 0.20,
+        "Standard_D4as_v6": 0.194,
+    })
+    result = pricing_mod.estimate(
+        ["eastus"],
+        [{"family": "Dsv5", "label": "Dsv5", "required_cores": 100}],
+        suggest_alternatives=True,
+        alt_min_savings_pct=5.0,
+    )
+    region = result["regions"]["eastus"]
+    assert region["has_cheaper_alt"] is False
+    assert region["compute"]["families"][0]["alternatives"] == []
+
+
+def test_estimate_alternatives_disabled(monkeypatch):
+    _patch_prices(monkeypatch, {
+        "Standard_D4s_v5": 0.20,
+        "Standard_D4as_v6": 0.10,
+    })
+    result = pricing_mod.estimate(
+        ["eastus"],
+        [{"family": "Dsv5", "label": "Dsv5", "required_cores": 100}],
+        suggest_alternatives=False,
+    )
+    region = result["regions"]["eastus"]
+    assert region["has_cheaper_alt"] is False
+    assert region["compute"]["families"][0].get("alternatives") == []
+    assert result["suggest_alternatives"] is False
+
+
+def test_estimate_excludes_bom_family_from_alternatives(monkeypatch):
+    # Both Dsv5 and Dasv6 are in the BOM — neither should be suggested as an
+    # alternative for the other (they're already planned).
+    _patch_prices(monkeypatch, {
+        "Standard_D4s_v5": 0.20,
+        "Standard_D4as_v6": 0.16,
+    })
+    result = pricing_mod.estimate(
+        ["eastus"],
+        [
+            {"family": "Dsv5", "label": "Dsv5", "required_cores": 50},
+            {"family": "Dasv6", "label": "Dasv6", "required_cores": 50},
+        ],
+        suggest_alternatives=True,
+        alt_min_savings_pct=5.0,
+    )
+    region = result["regions"]["eastus"]
+    for fam in region["compute"]["families"]:
+        alt_labels = {a["family"].lower() for a in fam.get("alternatives", [])}
+        assert "dsv5" not in alt_labels
+        assert "dasv6" not in alt_labels
+
+

@@ -908,13 +908,40 @@ function _costCellHtml(r) {
   if (!snapshotHasCoresRequirements(STATE.snapshot)) return `<td class="cost-col hidden num"></td>`;
   const est = PRICING.estimate;
   const info = _pricingRegionInfo(r.short);
-  let text = "—", title = PRICING_DISCLAIMER;
+  let text = "—", title = PRICING_DISCLAIMER, badge = "";
   if (PRICING.loading && !info) text = "…";
   else if (info && info.priced_any) {
     text = _fmtMoney(info.monthly_net, est.currency);
     if (!info.complete) { text += "*"; title = "Some families could not be priced. " + PRICING_DISCLAIMER; }
+    if (info.has_cheaper_alt && info.compute && info.compute.alt_savings_pct > 0) {
+      badge = ` <span class="cost-save-badge" title="A cheaper size-equivalent SKU is available in this region — save ~${_fmtMoney(info.compute.alt_savings_monthly_net, est.currency)}/mo. Open the region for details.">▼${info.compute.alt_savings_pct}%</span>`;
+    }
   } else if (est) text = "n/a";
-  return `<td class="cost-col num" title="${escapeHtml(title)}">${escapeHtml(text)}</td>`;
+  return `<td class="cost-col num" title="${escapeHtml(title)}">${escapeHtml(text)}${badge}</td>`;
+}
+
+// Cheaper size-equivalent SKU suggestions block for the drilldown cost section.
+function _altSavingsBlock(info, cur) {
+  const c = info.compute || {};
+  const swaps = c.swaps || [];
+  if (!swaps.length) return "";
+  const rows = swaps.map(s => {
+    const vend = s.vendor ? `<span class="alt-vendor alt-vendor--${s.vendor.toLowerCase()}" title="${escapeHtml(s.note || "")}">${escapeHtml(s.vendor)}</span>` : "";
+    return `<div class="alt-swap">
+      <div class="alt-swap-main">
+        <span class="alt-from">${escapeHtml(s.from_label)}</span>
+        <span class="alt-arrow">→</span>
+        <span class="alt-to">${escapeHtml(s.to_label)}</span> ${vend}
+      </div>
+      <div class="alt-swap-save">−${_fmtMoney(s.savings_monthly_net, cur)}/mo <span class="muted">(${s.savings_pct}%)</span></div>
+    </div>`;
+  }).join("");
+  const total = `Save up to ${_fmtMoney(c.alt_savings_monthly_net, cur)}/mo (${c.alt_savings_pct}%) → optimized ${_fmtMoney(c.optimized_monthly_net, cur)}/mo`;
+  return `
+    <div class="dd-readiness-subtitle alt-title">💡 Cheaper size-equivalent SKUs</div>
+    <div class="alt-headline">${total}</div>
+    <div class="alt-swaps">${rows}</div>
+    <div class="note muted alt-note">Same vCPU &amp; memory, different CPU vendor/generation. Priced in this region via the public price list — <strong>verify per-AZ availability, quota, and image/CPU-architecture compatibility</strong> before switching.</div>`;
 }
 
 // Drilldown cost section body (compute families + non-compute + total).
@@ -943,6 +970,7 @@ function _costBody(r) {
       </div>
       <div class="dd-readiness-subtitle">Compute — ${_fmtMoney(c.monthly_net, cur)}/mo</div>
       <div class="kv">${famRows || '<div class="muted">none</div>'}</div>
+      ${_altSavingsBlock(info, cur)}
       <div class="dd-readiness-subtitle">Non-compute — ${_fmtMoney(nc.monthly_net, cur)}/mo</div>
       <div class="kv">
         ${svcRows}
@@ -981,6 +1009,9 @@ async function loadPricingSettings() {
   set("pricing-hours", s.hours_per_month != null ? s.hours_per_month : 730);
   set("pricing-currency", (s.currency || "USD").toUpperCase());
   set("pricing-uplift", s.noncompute_uplift_pct != null ? s.noncompute_uplift_pct : 35);
+  set("pricing-alt-min", s.alt_min_savings_pct != null ? s.alt_min_savings_pct : 5);
+  const altToggle = document.getElementById("pricing-suggest-alts");
+  if (altToggle) altToggle.checked = s.suggest_alternatives !== false;
   _renderServiceEstimateInputs(s.service_estimates || {});
   const msg = document.getElementById("pricing-save-msg");
   if (msg) msg.textContent = "";
@@ -1015,6 +1046,8 @@ async function savePricingSettings() {
     hours_per_month: num("pricing-hours", 730),
     currency: (((document.getElementById("pricing-currency") || {}).value) || "USD").toUpperCase(),
     noncompute_uplift_pct: num("pricing-uplift", 35),
+    suggest_alternatives: !!(document.getElementById("pricing-suggest-alts") || {}).checked,
+    alt_min_savings_pct: num("pricing-alt-min", 5),
     service_estimates: svc,
   };
   const msg = document.getElementById("pricing-save-msg");

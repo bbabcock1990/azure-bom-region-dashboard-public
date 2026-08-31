@@ -373,6 +373,14 @@
                   <input type="number" id="pricing-uplift" min="0" max="500" step="1" />
                   <small class="muted">Catch-all for storage, network, etc. as a % of compute.</small>
                 </label>
+                <label>Cheaper-SKU min savings %
+                  <input type="number" id="pricing-alt-min" min="0" max="90" step="1" />
+                  <small class="muted">Only suggest equivalents at least this much cheaper per vCPU.</small>
+                </label>
+                <label class="pricing-check">
+                  <input type="checkbox" id="pricing-suggest-alts" />
+                  <span>Suggest cheaper size-equivalent SKUs<br><small class="muted">Compare each family against AMD/ARM/newer-gen siblings priced in-region.</small></span>
+                </label>
               </div>
               <h3>Per-service monthly estimates <small class="muted">(optional)</small></h3>
               <p class="muted">

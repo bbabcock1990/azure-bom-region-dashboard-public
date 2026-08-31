@@ -40,6 +40,8 @@ _FIELDS = (
     "hours_per_month",
     "currency",
     "noncompute_uplift_pct",
+    "suggest_alternatives",
+    "alt_min_savings_pct",
 )
 
 DEFAULTS: Dict[str, Any] = {
@@ -48,6 +50,8 @@ DEFAULTS: Dict[str, Any] = {
     "hours_per_month": 730,
     "currency": "USD",
     "noncompute_uplift_pct": 35.0,
+    "suggest_alternatives": True,
+    "alt_min_savings_pct": 5.0,
     "service_estimates": {},  # {service_name: monthly_usd}
 }
 
@@ -73,6 +77,19 @@ def _clean_hours(value: Any) -> int:
     except (TypeError, ValueError):
         return 730
     return hours if hours > 0 else 730
+
+
+def _clean_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    s = str(value).strip().lower()
+    if s in ("true", "1", "yes", "on"):
+        return True
+    if s in ("false", "0", "no", "off"):
+        return False
+    return default
 
 
 def _clean_currency(value: Any) -> str:
@@ -122,6 +139,8 @@ def get_settings() -> Dict[str, Any]:
     merged["pricing_os"] = _clean_os(merged.get("pricing_os"))
     merged["hours_per_month"] = _clean_hours(merged.get("hours_per_month"))
     merged["currency"] = _clean_currency(merged.get("currency"))
+    merged["suggest_alternatives"] = _clean_bool(merged.get("suggest_alternatives"), True)
+    merged["alt_min_savings_pct"] = _clean_pct(merged.get("alt_min_savings_pct"), 5.0)
     return merged
 
 
@@ -138,6 +157,10 @@ def save_settings(patch: Dict[str, Any]) -> Dict[str, Any]:
         entity["hours_per_month"] = _clean_hours(patch.get("hours_per_month"))
     if "currency" in patch:
         entity["currency"] = _clean_currency(patch.get("currency"))
+    if "suggest_alternatives" in patch:
+        entity["suggest_alternatives"] = _clean_bool(patch.get("suggest_alternatives"), True)
+    if "alt_min_savings_pct" in patch:
+        entity["alt_min_savings_pct"] = _clean_pct(patch.get("alt_min_savings_pct"), 5.0)
     if "service_estimates" in patch:
         cleaned = _clean_service_estimates(patch.get("service_estimates"))
         entity["service_estimates_json"] = json.dumps(cleaned, ensure_ascii=False)

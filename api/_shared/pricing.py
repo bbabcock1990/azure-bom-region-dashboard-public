@@ -41,6 +41,10 @@ HTTP_TIMEOUT_S = 30.0
 # sensitive — it just needs to exist in the region.
 ANCHOR_VCPUS: Tuple[int, ...] = (4, 2, 8, 16)
 
+# The Retail Prices API rejects very long ``$filter`` clauses, so size lookups
+# are chunked into batches of at most this many armSkuName OR-terms per request.
+_MAX_SIZES_PER_FILTER = 12
+
 # Retail prices change infrequently; cache per (currency, os, region, family).
 _CACHE_TTL_S = 6 * 3600
 _LOCK = threading.Lock()
@@ -81,6 +85,71 @@ def anchor_size_for(family: str, vcpus: int) -> Optional[str]:
     return f"Standard_{series}{vcpus}{features}_v{version}"
 
 
+# --- Cheaper equivalent SKU suggestions -------------------------------------
+#
+# Families grouped by workload class *and identical vCPU:RAM ratio*, so any
+# member is a size-for-size substitute for another (same cores => same RAM).
+# Members differ only by CPU vendor / generation / local-disk, which is exactly
+# where the price differences live:
+#   - ``a`` = AMD  (usually cheaper than Intel, x86-compatible, drop-in)
+#   - ``p`` = ARM/Ampere (cheapest, but needs an ARM64-compatible OS image)
+#   - higher ``v<n>`` = newer generation (often cheaper *and* faster)
+# Low-memory (``l``) and high-memory variants are deliberately excluded from a
+# group because they change the RAM ratio and are therefore not size-equivalent.
+_EQUIVALENCE_GROUPS: Tuple[Tuple[str, ...], ...] = (
+    # General purpose — 4 GiB / vCPU (D-series).
+    (
+        "Dsv3", "Dsv4", "Dsv5", "Ddsv4", "Ddsv5",
+        "Dasv4", "Dasv5", "Dasv6", "Dadsv5", "Dadsv6",
+        "Dpsv5", "Dpsv6", "Dpdsv5", "Dpdsv6",
+    ),
+    # Memory optimized — 8 GiB / vCPU (E-series).
+    (
+        "Esv3", "Esv4", "Esv5", "Edsv4", "Edsv5",
+        "Easv4", "Easv5", "Easv6", "Eadsv5", "Eadsv6",
+        "Epsv5", "Epsv6", "Epdsv5", "Epdsv6",
+    ),
+    # Compute optimized — 2 GiB / vCPU (F-series).
+    (
+        "Fsv2", "Fasv6",
+    ),
+)
+
+# core-form (lowercase) -> the group it belongs to.
+_GROUP_BY_CORE: Dict[str, Tuple[str, ...]] = {
+    member.lower(): group for group in _EQUIVALENCE_GROUPS for member in group
+}
+
+
+def _cpu_vendor(family: str) -> Tuple[str, str]:
+    """Return ``(vendor, note)`` inferred from a family's feature letters.
+
+    ``Dasv6`` -> AMD, ``Dpsv5`` -> ARM (needs ARM64 image), else Intel.
+    """
+    core = _family_core(family)
+    m = re.match(r"^([A-Za-z])([A-Za-z]*?)v(\d+)$", core)
+    features = (m.group(2).lower() if m else "")
+    if "p" in features:
+        return "ARM", "ARM64/Ampere — requires an ARM64-compatible OS image."
+    if "a" in features:
+        return "AMD", "AMD-based — x86-compatible, typically a drop-in swap."
+    return "Intel", ""
+
+
+def equivalents(family: str) -> List[str]:
+    """Same-size (same vCPU:RAM ratio) substitute families for ``family``.
+
+    Returns the other members of ``family``'s equivalence group as core-form
+    labels (e.g. ``Dasv6``). Empty when the family isn't a mainstream
+    general/compute/memory series we can safely substitute.
+    """
+    core = _family_core(family).lower()
+    group = _GROUP_BY_CORE.get(core)
+    if not group:
+        return []
+    return [m for m in group if m.lower() != core]
+
+
 def _matches_target_os(item: dict, os_name: str) -> bool:
     """True when a retail item is the on-demand PAYG meter for ``os_name``."""
     if (item.get("type") or "") != "Consumption":
@@ -105,8 +174,9 @@ def _fetch_region_size_prices(
 ) -> Dict[str, float]:
     """Return ``{armSkuName: hourly_list_price}`` for ``sizes`` in ``region``.
 
-    A single Retail Prices API call covers all requested sizes (they're OR'd in
-    the ``$filter``). Missing sizes are simply absent from the result.
+    Sizes are OR'd into the Retail Prices ``$filter``. The API rejects very
+    long filters, so requests are chunked into small batches and merged.
+    Missing sizes are simply absent from the result.
     """
     if not sizes:
         return {}
@@ -115,6 +185,19 @@ def _fetch_region_size_prices(
     except Exception:  # pragma: no cover - httpx is a hard dependency
         return {}
 
+    out: Dict[str, float] = {}
+    try:
+        with httpx.Client(timeout=HTTP_TIMEOUT_S) as client:
+            for i in range(0, len(sizes), _MAX_SIZES_PER_FILTER):
+                batch = sizes[i:i + _MAX_SIZES_PER_FILTER]
+                _fetch_size_batch(client, region, batch, currency, os_name, out)
+    except Exception as ex:  # pragma: no cover - network best-effort
+        log.info("pricing: retail API call failed for region=%s (%r)", region, ex)
+    return out
+
+
+def _fetch_size_batch(client, region, sizes, currency, os_name, out) -> None:
+    """Fetch one batch of ``sizes`` in ``region``, merging into ``out``."""
     size_filter = " or ".join(f"armSkuName eq '{s}'" for s in sizes)
     flt = (
         "serviceName eq 'Virtual Machines' "
@@ -124,37 +207,31 @@ def _fetch_region_size_prices(
     )
     params: Optional[dict] = {"currencyCode": f"'{currency}'", "$filter": flt}
     url = RETAIL_PRICES_URL
-    out: Dict[str, float] = {}
-    try:
-        with httpx.Client(timeout=HTTP_TIMEOUT_S) as client:
-            while True:
-                resp = client.get(url, params=params)
-                if resp.status_code >= 400:
-                    log.info(
-                        "pricing: retail API %s for region=%s (%s)",
-                        resp.status_code, region, resp.text[:200],
-                    )
-                    return out
-                body = resp.json()
-                for item in body.get("Items") or []:
-                    if not _matches_target_os(item, os_name):
-                        continue
-                    name = str(item.get("armSkuName") or "")
-                    price = item.get("retailPrice")
-                    if not name or price is None:
-                        continue
-                    price = float(price)
-                    # Keep the lowest matching on-demand rate per size.
-                    if name not in out or price < out[name]:
-                        out[name] = price
-                nxt = body.get("NextPageLink")
-                if not nxt:
-                    break
-                url = nxt
-                params = None  # NextPageLink carries the full query
-    except Exception as ex:  # pragma: no cover - network best-effort
-        log.info("pricing: retail API call failed for region=%s (%r)", region, ex)
-    return out
+    while True:
+        resp = client.get(url, params=params)
+        if resp.status_code >= 400:
+            log.info(
+                "pricing: retail API %s for region=%s (%s)",
+                resp.status_code, region, resp.text[:200],
+            )
+            return
+        body = resp.json()
+        for item in body.get("Items") or []:
+            if not _matches_target_os(item, os_name):
+                continue
+            name = str(item.get("armSkuName") or "")
+            price = item.get("retailPrice")
+            if not name or price is None:
+                continue
+            price = float(price)
+            # Keep the lowest matching on-demand rate per size.
+            if name not in out or price < out[name]:
+                out[name] = price
+        nxt = body.get("NextPageLink")
+        if not nxt:
+            break
+        url = nxt
+        params = None  # NextPageLink carries the full query
 
 
 def price_families_in_region(
@@ -247,6 +324,9 @@ def estimate(
     services: Optional[List[str]] = None,
     noncompute_uplift_pct: float = 0.0,
     service_estimates: Optional[Dict[str, float]] = None,
+    suggest_alternatives: bool = True,
+    alt_min_savings_pct: float = 5.0,
+    max_alternatives: int = 3,
 ) -> Dict:
     """Estimate monthly BOM cost per region (compute + non-compute).
 
@@ -257,6 +337,12 @@ def estimate(
       monthly figure the operator entered (region-agnostic).
     - **Uplift**: ``noncompute_uplift_pct`` percent of the region's compute cost,
       a catch-all for everything not itemized.
+
+    When ``suggest_alternatives`` is set, each priced family is also compared
+    against its size-equivalent siblings (other CPU vendors / generations) that
+    the Retail API prices in the same region; those at least
+    ``alt_min_savings_pct`` cheaper per vCPU are attached as ``alternatives``
+    and rolled up into a per-region ``optimized`` compute figure.
 
     Returns a dict with a per-region breakdown (list and ACD-net) for compute,
     non-compute, and the combined total.
@@ -316,6 +402,34 @@ def estimate(
     fam_ids = [f["family"] for f in norm_families]
     out_regions: Dict[str, dict] = {}
 
+    # Cheaper-equivalent candidates: size-for-size substitutes for each BOM
+    # family, excluding any family already in the BOM (by core form). Priced in
+    # the same per-region Retail call as the BOM families.
+    try:
+        min_sav_frac = max(0.0, float(alt_min_savings_pct or 0.0)) / 100.0
+    except (TypeError, ValueError):
+        min_sav_frac = 0.05
+    try:
+        top_n = max(1, int(max_alternatives))
+    except (TypeError, ValueError):
+        top_n = 3
+    bom_cores = {_family_core(f["family"]).lower() for f in norm_families}
+    alt_by_family: Dict[str, List[str]] = {}
+    alt_ids: List[str] = []
+    alt_seen = set()
+    if suggest_alternatives:
+        for f in norm_families:
+            cands = [c for c in equivalents(f["family"])
+                     if _family_core(c).lower() not in bom_cores]
+            alt_by_family[f["family"]] = cands
+            for c in cands:
+                key = _family_core(c).lower()
+                if key not in alt_seen:
+                    alt_seen.add(key)
+                    alt_ids.append(c)
+
+    price_ids = fam_ids + alt_ids
+
     # Resolve the unique region shorts up front and price them concurrently —
     # each region is an independent (cached) Retail Prices API call.
     unique_shorts = []
@@ -327,12 +441,12 @@ def estimate(
             unique_shorts.append(short)
 
     priced_by_region: Dict[str, Dict[str, Optional[dict]]] = {}
-    if unique_shorts and fam_ids:
+    if unique_shorts and price_ids:
         import concurrent.futures
 
         def _price_one(short: str):
             return short, price_families_in_region(
-                short, fam_ids, os_name=os_name, currency=currency,
+                short, price_ids, os_name=os_name, currency=currency,
             )
 
         workers = min(8, len(unique_shorts))
@@ -346,6 +460,8 @@ def estimate(
         priced = priced_by_region.get(short, {})
         fam_rows: List[dict] = []
         month_list = 0.0
+        optimized_list = 0.0  # compute cost if each family swaps to its cheapest equiv
+        region_swaps: List[dict] = []
         priced_any = False
         any_unpriced = False
         for f in norm_families:
@@ -359,21 +475,70 @@ def estimate(
                     "priced": False,
                 })
                 continue
-            hourly = info["per_core_hour"] * f["required_cores"]
+            cores = f["required_cores"]
+            hourly = info["per_core_hour"] * cores
             m_list = hourly * hours
+
+            # Cheaper size-equivalent alternatives priced in this region.
+            alts: List[dict] = []
+            for cand in alt_by_family.get(f["family"], []):
+                cinfo = priced.get(cand)
+                if not cinfo:
+                    continue
+                if cinfo["per_core_hour"] >= info["per_core_hour"] * (1.0 - min_sav_frac):
+                    continue
+                a_hourly = cinfo["per_core_hour"] * cores
+                a_month = a_hourly * hours
+                vendor, note = _cpu_vendor(cand)
+                alts.append({
+                    "family": cand,
+                    "label": cand,
+                    "anchor_size": cinfo["anchor_size"],
+                    "vendor": vendor,
+                    "note": note,
+                    "per_core_hour": round(cinfo["per_core_hour"], 5),
+                    "monthly_list": round(a_month, 2),
+                    "monthly_net": round(a_month * factor, 2),
+                    "savings_monthly_list": round(m_list - a_month, 2),
+                    "savings_monthly_net": round((m_list - a_month) * factor, 2),
+                    "savings_pct": round((1.0 - cinfo["per_core_hour"] / info["per_core_hour"]) * 100.0, 1),
+                })
+            alts.sort(key=lambda a: a["monthly_net"])
+            alts = alts[:top_n]
+
             fam_rows.append({
                 "family": f["family"],
                 "label": f["label"],
-                "required_cores": f["required_cores"],
+                "required_cores": cores,
                 "anchor_size": info["anchor_size"],
+                "vendor": _cpu_vendor(f["family"])[0],
                 "per_core_hour": round(info["per_core_hour"], 5),
                 "hourly_list": round(hourly, 4),
                 "monthly_list": round(m_list, 2),
                 "monthly_net": round(m_list * factor, 2),
                 "priced": True,
+                "alternatives": alts,
             })
             month_list += m_list
+            # Roll the single best (cheapest) alternative into the optimized total.
+            if alts:
+                best = alts[0]
+                optimized_list += best["monthly_list"]
+                region_swaps.append({
+                    "from_family": f["family"],
+                    "from_label": f["label"],
+                    "to_family": best["family"],
+                    "to_label": best["label"],
+                    "vendor": best["vendor"],
+                    "note": best["note"],
+                    "required_cores": cores,
+                    "savings_monthly_net": best["savings_monthly_net"],
+                    "savings_pct": best["savings_pct"],
+                })
+            else:
+                optimized_list += m_list
             priced_any = True
+        alt_savings_list = round(month_list - optimized_list, 2)
         out_regions[short] = {
             "compute": {
                 "monthly_list": round(month_list, 2),
@@ -382,6 +547,12 @@ def estimate(
                 "families": fam_rows,
                 "priced_any": priced_any,
                 "complete": priced_any and not any_unpriced,
+                # Compute cost if every family swapped to its cheapest equivalent.
+                "optimized_monthly_list": round(optimized_list, 2),
+                "optimized_monthly_net": round(optimized_list * factor, 2),
+                "alt_savings_monthly_net": round(alt_savings_list * factor, 2),
+                "alt_savings_pct": round((alt_savings_list / month_list) * 100.0, 1) if month_list else 0.0,
+                "swaps": region_swaps,
             },
             "noncompute": {
                 "itemized_total_list": itemized_total,
@@ -400,6 +571,10 @@ def estimate(
             ),
             "priced_any": priced_any,
             "complete": priced_any and not any_unpriced,
+            # Headline savings signal for the region (cheapest-equivalent swaps).
+            "alt_savings_monthly_net": round(alt_savings_list * factor, 2),
+            "alt_savings_pct": round((alt_savings_list / month_list) * 100.0, 1) if month_list else 0.0,
+            "has_cheaper_alt": bool(region_swaps),
         }
 
     return {
@@ -409,6 +584,8 @@ def estimate(
         "acd_discount_pct": acd,
         "noncompute_uplift_pct": uplift,
         "itemized_service_total": itemized_total,
+        "suggest_alternatives": bool(suggest_alternatives),
+        "alt_min_savings_pct": round(max(0.0, float(alt_min_savings_pct or 0.0)), 1),
         "regions": out_regions,
         "estimate_only": True,
     }
