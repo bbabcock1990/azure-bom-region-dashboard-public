@@ -2,7 +2,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 
-def _install_fake_client(monkeypatch, mod, *, status, payload):
+def _install_fake_client(monkeypatch, mod, *, status, payload, method="post"):
     calls = {}
 
     class FakeAsyncClient:
@@ -23,6 +23,16 @@ def _install_fake_client(monkeypatch, mod, *, status, payload):
                 status,
                 json=payload,
                 request=httpx.Request("POST", url),
+            )
+
+        async def get(self, url, *, params=None, headers=None):
+            calls["url"] = url
+            calls["params"] = params
+            calls["headers"] = headers
+            return httpx.Response(
+                status,
+                json=payload,
+                request=httpx.Request("GET", url),
             )
 
     monkeypatch.setattr(mod.httpx, "AsyncClient", FakeAsyncClient)
@@ -126,3 +136,73 @@ def test_register_provider_rejects_bad_namespace(monkeypatch, tmp_path):
     )
     assert res.status_code == 400
     assert res.json()["error"] == "bad_provider"
+
+
+def test_provider_status_reports_registered(monkeypatch, tmp_path):
+    monkeypatch.setenv("LOCAL_STORAGE_DIR", str(tmp_path))
+    monkeypatch.delenv("ALLOWED_ORIGIN", raising=False)
+
+    from api import register_provider as mod
+    from server.app import app
+
+    class _TokenInfo:
+        token = "token-123"
+
+    monkeypatch.setattr(
+        mod.auth_token, "get_arm_token", lambda subscription_id: _TokenInfo(),
+        raising=False,
+    )
+    _install_fake_client(
+        monkeypatch, mod, status=200,
+        payload={"namespace": "Microsoft.ContainerStorage",
+                 "registrationState": "Registered"},
+        method="get",
+    )
+
+    client = TestClient(app)
+    res = client.get(
+        "/api/providers/status",
+        params={
+            "subscription_id": "11111111-2222-3333-4444-555555555555",
+            "provider": "Microsoft.ContainerStorage",
+        },
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["registration_state"] == "Registered"
+    assert body["registered"] is True
+    assert body["absent"] is False
+
+
+def test_provider_status_404_reports_not_registered(monkeypatch, tmp_path):
+    monkeypatch.setenv("LOCAL_STORAGE_DIR", str(tmp_path))
+    monkeypatch.delenv("ALLOWED_ORIGIN", raising=False)
+
+    from api import register_provider as mod
+    from server.app import app
+
+    class _TokenInfo:
+        token = "token-123"
+
+    monkeypatch.setattr(
+        mod.auth_token, "get_arm_token", lambda subscription_id: _TokenInfo(),
+        raising=False,
+    )
+    _install_fake_client(
+        monkeypatch, mod, status=404,
+        payload={"error": {"code": "InvalidResourceNamespace"}},
+        method="get",
+    )
+
+    client = TestClient(app)
+    res = client.get(
+        "/api/providers/status",
+        params={
+            "subscription_id": "11111111-2222-3333-4444-555555555555",
+            "provider": "Microsoft.ContainerStorage",
+        },
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["registered"] is False
+    assert body["absent"] is True

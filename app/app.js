@@ -2420,80 +2420,159 @@ function _registrationRequiredHtml(list, opts = {}) {
   for (const [prov, services] of byProvider.entries()) {
     const svcList = services.map(escapeHtml).join(", ");
     const provLabel = prov ? escapeHtml(prov) : "provider";
-    const btn = prov
-      ? `<button class="btn-register-provider" data-register-provider="${escapeHtml(prov)}" ` +
-        `style="margin-top:6px;font-size:11px;padding:3px 10px;border:1px solid #f4a726;` +
-        `background:rgba(244,167,38,0.15);color:#f4a726;border-radius:4px;cursor:pointer">` +
-        `Register ${provLabel}</button>`
+    const btnStyle =
+      "font-size:11px;padding:3px 10px;border:1px solid #f4a726;" +
+      "background:rgba(244,167,38,0.15);color:#f4a726;border-radius:4px;cursor:pointer";
+    const actions = prov
+      ? `<div class="reg-actions" style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">` +
+        `<button data-reg-action="register" data-provider="${escapeHtml(prov)}" style="${btnStyle}">Register ${provLabel}</button>` +
+        `<button data-reg-action="status" data-provider="${escapeHtml(prov)}" style="${btnStyle};opacity:0.85">Check status</button>` +
+        `</div>`
       : "";
     html +=
-      `<div style="font-size:12px;padding:6px 8px;margin:3px 0;background:rgba(244,167,38,0.10);` +
+      `<div class="reg-provider-block" data-reg-provider="${escapeHtml(prov)}" ` +
+      `style="font-size:12px;padding:6px 8px;margin:3px 0;background:rgba(244,167,38,0.10);` +
       `border-left:3px solid #f4a726;color:#f4a726;border-radius:4px">` +
       `<div><strong>${svcList}</strong></div>` +
       `<div style="font-size:11px;opacity:0.9;margin-top:2px">Provider <code>${provLabel}</code> ` +
       `isn't registered on this subscription, so availability is unknown. ` +
       `Registering is free and self-service — after it shows Registered, re-run the analysis.</div>` +
-      btn +
+      `<div class="reg-status" data-reg-status style="margin-top:6px;font-size:11px;display:none"></div>` +
+      `<div class="reg-cli" data-reg-cli style="margin-top:6px;font-size:11px;display:none">` +
+      `<div style="opacity:0.9;margin-bottom:3px">Ask a subscription Owner/Contributor to run:</div>` +
+      `<code class="reg-cli-text" data-reg-cli-text style="display:block;padding:6px 8px;background:rgba(0,0,0,0.35);` +
+      `border-radius:4px;white-space:pre-wrap;word-break:break-all;cursor:pointer" ` +
+      `title="Click to copy"></code></div>` +
+      actions +
       `</div>`;
   }
   return html;
 }
 
-async function registerBomProvider(provider, btnEl) {
+function _regBlockFor(el) {
+  return el ? el.closest(".reg-provider-block") : null;
+}
+
+function _regSetStatus(block, text, color) {
+  if (!block) return;
+  const el = block.querySelector("[data-reg-status]");
+  if (!el) return;
+  el.textContent = text;
+  el.style.color = color || "#f4a726";
+  el.style.display = text ? "block" : "none";
+}
+
+function _regShowCli(block, cliCmd) {
+  if (!block) return;
+  const wrap = block.querySelector("[data-reg-cli]");
+  const code = block.querySelector("[data-reg-cli-text]");
+  if (!wrap || !code) return;
+  code.textContent = cliCmd;
+  wrap.style.display = "block";
+}
+
+async function registerBomProvider(provider, block) {
   if (!provider) return;
   const subscriptionId = focusedSubscriptionId() || "";
+  const subName = _subNameById ? _subNameById(subscriptionId) : subscriptionId;
   const cli = `az provider register --namespace ${provider}` +
     (subscriptionId ? ` --subscription ${subscriptionId}` : "");
   if (!subscriptionId) {
-    showToast("No subscription selected to register the provider against.", "error");
+    _regSetStatus(block, "⛔ No subscription selected to register against.", "#e57373");
     return;
   }
-  if (btnEl) { btnEl.disabled = true; btnEl.textContent = "Registering…"; }
+  const regBtn = block && block.querySelector('[data-reg-action="register"]');
+  if (regBtn) { regBtn.disabled = true; regBtn.textContent = "Registering…"; }
+  _regSetStatus(block, `Submitting registration on ${subName}…`, "#f4a726");
   try {
-    await apiJson("/api/providers/register", {
+    const data = await apiJson("/api/providers/register", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ subscription_id: subscriptionId, provider }),
     });
-    showToast(
-      `✓ Registering ${provider}. This can take a few minutes — re-run analysis once it shows Registered.`,
-      "success",
+    const state = (data && data.registration_state) || "Registering";
+    _regSetStatus(
+      block,
+      `✅ Registration started on ${subName} (state: ${state}). Azure usually finishes in 1–5 minutes — ` +
+      `click “Check status”, then re-run the analysis once it shows Registered.`,
+      "#81c784",
     );
-    if (btnEl) { btnEl.textContent = "Registration started ✓"; }
+    if (regBtn) { regBtn.textContent = "Registration started ✓"; regBtn.disabled = true; }
+    showToast(`✓ Registering ${provider} on ${subName}…`, "success");
   } catch (err) {
     const cliCmd = (err && err.body && err.body.cli_command) || cli;
     const forbidden = err && (err.status === 403 || (err.body && err.body.error === "forbidden"));
-    const reason = forbidden
-      ? "You don't have permission to register providers on this subscription."
-      : ((err && err.message) || String(err));
-    let copied = false;
-    try { await navigator.clipboard.writeText(cliCmd); copied = true; } catch (_) {}
-    showToast(
-      `✗ Couldn't auto-register ${provider}: ${reason} ` +
-      (copied ? "Register command copied to clipboard." : `Run: ${cliCmd}`),
-      "error",
-    );
-    if (btnEl) {
-      btnEl.disabled = false;
-      btnEl.textContent = "Copy register command";
-      btnEl.dataset.cliFallback = cliCmd;
+    if (forbidden) {
+      _regSetStatus(
+        block,
+        `⛔ Not registered. Your account can’t register providers on ${subName} ` +
+        `(missing “${provider}/register/action” permission).`,
+        "#e57373",
+      );
+    } else {
+      _regSetStatus(block, `⛔ Not registered — ${(err && err.message) || String(err)}`, "#e57373");
     }
+    _regShowCli(block, cliCmd);
+    if (regBtn) { regBtn.disabled = false; regBtn.textContent = `Register ${provider}`; }
+    showToast(`✗ Couldn’t auto-register ${provider}. See the command in the card.`, "error");
+  }
+}
+
+async function checkProviderRegistration(provider, block) {
+  if (!provider) return;
+  const subscriptionId = focusedSubscriptionId() || "";
+  const subName = _subNameById ? _subNameById(subscriptionId) : subscriptionId;
+  if (!subscriptionId) {
+    _regSetStatus(block, "⛔ No subscription selected.", "#e57373");
+    return;
+  }
+  const statusBtn = block && block.querySelector('[data-reg-action="status"]');
+  if (statusBtn) { statusBtn.disabled = true; statusBtn.textContent = "Checking…"; }
+  _regSetStatus(block, "Checking registration state…", "#f4a726");
+  try {
+    const params = new URLSearchParams({ subscription_id: subscriptionId, provider });
+    const data = await apiJson(`/api/providers/status?${params.toString()}`);
+    const state = (data && data.registration_state) || "Unknown";
+    if (data && data.registered) {
+      _regSetStatus(
+        block,
+        `✅ Registered on ${subName}. Re-run the analysis to see this service’s regional availability.`,
+        "#81c784",
+      );
+    } else if (state.toLowerCase() === "registering") {
+      _regSetStatus(block, `⏳ Registering on ${subName}… check again in a moment.`, "#f4a726");
+    } else {
+      _regSetStatus(block, `Not registered yet on ${subName} (state: ${state}).`, "#f4a726");
+    }
+  } catch (err) {
+    _regSetStatus(block, `Couldn’t read status — ${(err && err.message) || String(err)}`, "#e57373");
+  } finally {
+    if (statusBtn) { statusBtn.disabled = false; statusBtn.textContent = "Check status"; }
   }
 }
 
 function _handleRegisterProviderInteraction(ev) {
-  const btn = ev.target.closest("[data-register-provider]");
-  if (!btn) return;
-  ev.preventDefault();
-  ev.stopPropagation();
-  if (btn.dataset.cliFallback) {
-    navigator.clipboard.writeText(btn.dataset.cliFallback).then(
+  const cliText = ev.target.closest("[data-reg-cli-text]");
+  if (cliText && cliText.textContent) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    navigator.clipboard.writeText(cliText.textContent).then(
       () => showToast("Register command copied to clipboard.", "info"),
-      () => showToast(btn.dataset.cliFallback, "info"),
+      () => {},
     );
     return;
   }
-  registerBomProvider(btn.dataset.registerProvider, btn);
+  const btn = ev.target.closest("[data-reg-action]");
+  if (!btn) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  const block = _regBlockFor(btn);
+  const provider = btn.dataset.provider;
+  if (btn.dataset.regAction === "status") {
+    checkProviderRegistration(provider, block);
+  } else {
+    registerBomProvider(provider, block);
+  }
 }
 
 function _handleQuotaRequestInteraction(ev) {

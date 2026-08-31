@@ -50,6 +50,7 @@ ROUTES = [
     ("quota/request-status", ["GET"], "quota_request_status"),
     ("quota/history", ["GET", "POST"], "quota_history"),
     ("providers/register", ["POST"], "register_provider"),
+    ("providers/status", ["GET"], "register_provider"),
     ("subscription_metadata/{bom_id}", ["GET", "PUT", "DELETE"], "subscription_metadata"),
     ("subscription_metadata", ["GET", "POST", "PUT", "DELETE"], "subscription_metadata"),
     ("subscriptions", ["GET"], "subscriptions_list"),

@@ -78,8 +78,89 @@ def _extract_message(payload: Any, fallback: str) -> str:
     return fallback
 
 
+async def _status(req: func.HttpRequest) -> func.HttpResponse:
+    """GET /api/providers/status?subscription_id=..&provider=..
+
+    Reports the current registration state of a resource provider so the UI
+    can tell the user whether a registration has completed (NotRegistered →
+    Registering → Registered).
+    """
+    subscription_id = str(req.params.get("subscription_id") or "").strip().lower()
+    provider = str(req.params.get("provider") or "").strip()
+    if not GUID_RE.match(subscription_id):
+        return _err("bad_subscription", "subscription_id must be a GUID.", 400)
+    if not PROVIDER_RE.match(provider):
+        return _err(
+            "bad_provider",
+            "provider must be a resource provider namespace, e.g. Microsoft.ContainerStorage.",
+            400,
+        )
+
+    token_getter = getattr(
+        auth_token, "get_arm_token_for_subscription", auth_token.get_arm_token
+    )
+    try:
+        token_info = await asyncio.to_thread(token_getter, subscription_id)
+    except auth_token.AuthError as ex:
+        return _err("auth_error", ex.message, 401, auth_code=ex.code)
+
+    token = getattr(token_info, "token", None) or str(token_info)
+    url = (
+        f"{ARM_BASE}/subscriptions/{subscription_id}/providers/"
+        f"{quote(provider, safe='')}"
+    )
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "User-Agent": "azure-bom-region-dashboard/1.0",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30.0, http2=False) as client:
+            resp = await client.get(
+                url, params={"api-version": API_VERSION}, headers=headers
+            )
+    except Exception as ex:
+        log.exception("provider status request failed unexpectedly")
+        return _err("request_failed", f"Provider status check failed: {ex!r}", 502)
+
+    if resp.status_code == 404:
+        # Namespace not known to the subscription — effectively un-registered.
+        return _ok({
+            "provider": provider,
+            "registration_state": "NotRegistered",
+            "registered": False,
+            "absent": True,
+        })
+    if resp.status_code >= 400:
+        try:
+            payload: Any = resp.json()
+        except Exception:
+            payload = resp.text
+        return _err(
+            "status_failed",
+            _extract_message(payload, f"Provider status check failed ({resp.status_code})."),
+            resp.status_code,
+            provider=provider,
+        )
+
+    try:
+        payload = resp.json()
+    except Exception:
+        payload = {}
+    state = str((payload or {}).get("registrationState") or "").strip() or "Unknown"
+    return _ok({
+        "provider": provider,
+        "registration_state": state,
+        "registered": state.lower() == "registered",
+        "absent": False,
+    })
+
+
 async def main(req: func.HttpRequest) -> func.HttpResponse:
     _principal = auth.get_local_user(req)  # kept for parity / future logging
+
+    if str(getattr(req, "method", "POST")).upper() == "GET":
+        return await _status(req)
 
     try:
         csrf.assert_safe_origin(req)
