@@ -766,6 +766,33 @@ main {
   line-height: 1.45;
   margin-top: 10px;
 }
+.qd-donor-total {
+  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+}
+.qd-donor-total strong {
+  color: #22c55e;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Quota action buttons route all increases to the Tickets tab */
+.quota-ticket-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+}
+.quota-ticket-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
 
 #pending-quota-panel {
   padding: 14px 24px 0;

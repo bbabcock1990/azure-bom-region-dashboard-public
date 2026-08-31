@@ -2367,45 +2367,34 @@ function _renderQuotaRequestAction(row) {
   return `<div class="quota-card-action">${buttonHtml}${statusText ? `<div class="quota-request-status ${statusCls}">${escapeHtml(statusText)}</div>` : ""}</div>`;
 }
 
-function _quotaTicketEscalationHtml(row) {
-  // Offer a support-ticket escalation when self-service can't resolve the gap:
-  // the family is short on quota, or subscription self-service data is missing.
-  const insufficient = row.overall_status === "insufficient";
-  const noSelfService = !row.subscription_id;
-  if (!insufficient && !noSelfService) return "";
+function _quotaTicketRequestButton(row, useAlt, tag) {
+  // All quota increases are created and tracked on the Tickets tab. This button
+  // simply routes the user there with the ticket pre-filled (region, SKU family,
+  // suggested new limit) — it does not perform any inline request itself.
+  const family = useAlt ? row.alt_family : row.family;
+  if (!family) return "";
+  const label = useAlt ? (row.alt_label || row.alt_family) : (row.family_label || row.family);
   const suggested = _quotaRequestLimitForRow(row);
-  return `<div class="quota-ticket-escalate">
-    <button type="button" class="btn-link quota-open-ticket-btn"
-      data-open-ticket="quota"
-      data-region="${escapeHtml(row.region_short || "")}"
-      data-family="${escapeHtml(row.family || "")}"
-      data-limit="${escapeHtml(String(suggested || ""))}"
-      title="Open a Microsoft support ticket for this quota shortfall">Open support ticket ↗</button>
-  </div>`;
+  const tagHtml = tag
+    ? `<span class="sku-tag sku-tag--${tag === "Primary" ? "primary" : "fallback"}">${escapeHtml(tag)}</span> `
+    : "";
+  return `<button type="button" class="btn-secondary quota-ticket-btn"
+    data-open-ticket="quota"
+    data-region="${escapeHtml(row.region_short || "")}"
+    data-family="${escapeHtml(family)}"
+    data-limit="${escapeHtml(String(suggested || ""))}"
+    title="Create and track a quota-increase support ticket for ${escapeHtml(label)}">${tagHtml}Request increase (${escapeHtml(label)}) ↗</button>`;
+}
+
+function _renderQuotaTicketActions(row) {
+  const primary = _quotaTicketRequestButton(row, false, row.alt_family ? "Primary" : "");
+  const fallback = row.alt_family ? _quotaTicketRequestButton(row, true, "Fallback") : "";
+  if (!primary && !fallback) return `<span class="muted">—</span>`;
+  return `<div class="quota-ticket-actions">${primary}${fallback}</div>`;
 }
 
 function _renderQuotaActionCell(row) {
-  const state = _getQuotaRequestState(row.region_short, row.family);
-  if (!row.subscription_id && !state) {
-    return `<span class="muted">—</span>${_quotaTicketEscalationHtml(row)}`;
-  }
-  if (row.alt_family) {
-    const altRow = { ...row, family: row.alt_family, family_label: row.alt_label || row.alt_family };
-    const altState = _getQuotaRequestState(row.region_short, row.alt_family);
-    if (row.subscription_id || altState) {
-      return `<div class="quota-card-actions-row">
-        <div class="quota-card-action-col">
-          ${_renderQuotaRequestAction(row)}
-          <div class="sku-tag sku-tag--primary" style="margin-top:4px;">Primary</div>
-        </div>
-        <div class="quota-card-action-col">
-          ${_renderQuotaRequestAction(altRow)}
-          <div class="sku-tag sku-tag--fallback" style="margin-top:4px;">Fallback</div>
-        </div>
-      </div>${_quotaTicketEscalationHtml(row)}`;
-    }
-  }
-  return `${_renderQuotaRequestAction(row)}${_quotaTicketEscalationHtml(row)}`;
+  return _renderQuotaTicketActions(row);
 }
 
 function _registrationRequiredHtml(list, opts = {}) {
@@ -2704,16 +2693,7 @@ function _renderDrilldownQuotaCard(row) {
     </div>
     <div class="quota-card-divider"></div>
     <div class="quota-card-summary ${statusCls}">${escapeHtml(statusText)}</div>
-    ${(isSufficient || row.overall_status === "insufficient") ? `<div class="quota-card-actions-row">
-      <div class="quota-card-action-col">
-        ${_renderQuotaRequestAction(row)}
-        <div class="sku-tag sku-tag--primary" style="margin-top:4px;text-align:center;">Primary</div>
-      </div>
-      ${row.alt_family ? `<div class="quota-card-action-col">
-        ${_renderQuotaRequestAction({ ...row, family: row.alt_family, family_label: row.alt_label || row.alt_family })}
-        <div class="sku-tag sku-tag--fallback" style="margin-top:4px;text-align:center;">Fallback</div>
-      </div>` : ""}
-    </div>` : ""}
+    ${(isSufficient || row.overall_status === "insufficient") ? _renderQuotaTicketActions(row) : ""}
   </div>`;
 }
 
@@ -3230,27 +3210,35 @@ function _renderQuotaHierarchy(result) {
   const regionShort = result.rows[0].region_short || "";
 
   // ── Block 1: existing quota on THIS subscription for the BOM ──────────────
-  const famSummary = result.rows.map(row => {
-    const sub = row.subscription || {};
-    const free = sub.headroom != null ? sub.headroom : null;
-    const ok = row.overall_status === "sufficient";
-    const deficit = Number(row.deficit) || 0;
-    const pill = ok
+  // Render one box per SKU family (primary + secondary/fallback shown separately
+  // rather than combined) so the customer can see each SKU's headroom on its own.
+  const skuBox = (label, tag, free, required) => {
+    const meetsReq = free != null && free >= required;
+    const short = required - (free || 0);
+    const pill = meetsReq
       ? `<span class="qd-pill qd-pill--ok">Sufficient</span>`
-      : `<span class="qd-pill qd-pill--fail">Short ${_formatQuotaNumber(deficit)}</span>`;
-    const altFree = row.alt_subscription && row.alt_subscription.headroom != null
-      ? row.alt_subscription.headroom : null;
-    const altNote = row.alt_label && altFree != null
-      ? `<div class="qd-fam-alt">fallback ${escapeHtml(row.alt_label)}: ${_formatQuotaNumber(altFree)} free</div>`
+      : `<span class="qd-pill qd-pill--fail">Short ${_formatQuotaNumber(Math.max(0, short))}</span>`;
+    const tagHtml = tag
+      ? ` <span class="sku-tag sku-tag--${tag === "Primary" ? "primary" : "fallback"}">${escapeHtml(tag)}</span>`
       : "";
     return `<div class="qd-fam">
       <div class="qd-fam-main">
-        <span class="qd-fam-name">${escapeHtml(row.family_label || row.family || "—")}</span>
+        <span class="qd-fam-name">${escapeHtml(label)}${tagHtml}</span>
         ${pill}
       </div>
-      <div class="qd-fam-meta">${free != null ? _formatQuotaNumber(free) : "?"} free of ${_formatQuotaNumber(row.required)} required</div>
-      ${altNote}
+      <div class="qd-fam-meta">${free != null ? _formatQuotaNumber(free) : "?"} free of ${_formatQuotaNumber(required)} required</div>
     </div>`;
+  };
+  const famSummary = result.rows.map(row => {
+    const required = Number(row.required) || 0;
+    const hasAlt = !!row.alt_family;
+    const primFree = row.subscription && row.subscription.headroom != null ? row.subscription.headroom : null;
+    const boxes = [skuBox(row.family_label || row.family || "—", hasAlt ? "Primary" : "", primFree, required)];
+    if (hasAlt) {
+      const altFree = row.alt_subscription && row.alt_subscription.headroom != null ? row.alt_subscription.headroom : null;
+      boxes.push(skuBox(row.alt_label || row.alt_family, "Fallback", altFree, required));
+    }
+    return boxes.join("");
   }).join("");
 
   const failingRows = result.rows.filter(r => r.overall_status === "insufficient");
@@ -3325,6 +3313,8 @@ function _renderQuotaHierarchy(result) {
     if (!evaluated.length) {
       donorHtml = `<div class="qd-donor-note">Scanned ${nonBomSubs.length} subscription${nonBomSubs.length === 1 ? "" : "s"} — none currently have free quota for ${escapeHtml(neededLabels)}.</div>`;
     } else {
+      const totalFree = evaluated.reduce((sum, e) => sum + (Number(e.bestFree) || 0), 0);
+      const totalSummary = `<div class="qd-donor-total">Total free to pull: <strong>${_formatQuotaNumber(totalFree)} vCPU</strong> across ${evaluated.length} donor subscription${evaluated.length === 1 ? "" : "s"}</div>`;
       const cards = evaluated.map(({ s, chips, bestFree, coversAll }) => {
         const badge = coversAll
           ? `<span class="qd-donor-badge qd-donor-badge--ok">Can cover shortfall</span>`
@@ -3338,7 +3328,7 @@ function _renderQuotaHierarchy(result) {
           <div class="qd-donor-chips">${chipHtml}</div>
         </div>`;
       }).join("");
-      donorHtml = `<div class="qd-donor-list">${cards}</div>
+      donorHtml = `${totalSummary}<div class="qd-donor-list">${cards}</div>
         <div class="qd-donor-foot">Quota is moved between subscriptions with an Azure <strong>quota group</strong>. Confirm the donor and BOM subscriptions share (or can join) the same quota group, then rebalance in the Azure portal.</div>`;
     }
   } else if (cachedDonors && cachedDonors.status === "scanning") {
