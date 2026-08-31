@@ -217,6 +217,14 @@ def _fetch_provider_locations_one(
             f"token lacks Reader on the chosen subscription's tenant.",
             403,
         )
+    if r.status_code == 404:
+        # The provider namespace doesn't exist in this tenant/cloud (ARM
+        # returns 404 InvalidResourceNamespace). That just means the service
+        # isn't available here — surface it as "not available anywhere" so the
+        # UI shows ❌ for this one service instead of failing the whole run.
+        log.info("bom_services: provider show 404 for %s — treating as "
+                 "unavailable", provider)
+        return []
     if r.status_code >= 400:
         raise BomServicesError(
             "arm_provider_show_failed",

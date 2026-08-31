@@ -758,13 +758,6 @@
       "category": "Migration"
     },
     {
-      "name": "Azure Remote Rendering",
-      "provider": "Microsoft.MixedReality",
-      "resource_type": "*",
-      "zone_check": false,
-      "category": "Mixed Reality"
-    },
-    {
       "name": "Azure Communication Services",
       "provider": "Microsoft.Communication",
       "resource_type": "*",
@@ -774,13 +767,6 @@
     {
       "name": "Azure Maps",
       "provider": "Microsoft.Maps",
-      "resource_type": "*",
-      "zone_check": false,
-      "category": "Media & Other"
-    },
-    {
-      "name": "Azure Media Services",
-      "provider": "Microsoft.Media",
       "resource_type": "*",
       "zone_check": false,
       "category": "Media & Other"
