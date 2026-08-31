@@ -60,6 +60,16 @@ def _blob_root() -> str:
     return path
 
 
+def storage_root() -> str:
+    """Absolute path of the local-storage root (DB + blobs live here)."""
+    return _storage_root()
+
+
+def snapshots_dir() -> str:
+    """Absolute path of the directory where snapshot blobs are persisted."""
+    return os.path.join(_blob_root(), "snapshots")
+
+
 # ─── SQLite helpers ──────────────────────────────────────────────────────────
 
 # SQLite physical table name derived from the logical Azure-table name.

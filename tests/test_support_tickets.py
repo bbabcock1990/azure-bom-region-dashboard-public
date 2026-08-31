@@ -156,3 +156,68 @@ def test_real_submit_requires_contact(isolated_storage):
             dry_run=False, token="fake-token",
         )
     assert ex.value.code in ("contact_incomplete", "classification_unresolved")
+
+
+# ─── live Azure ticket listing (mocked ARM) ──────────────────────────────────
+
+@respx.mock
+def test_list_azure_tickets_filters_closed_and_normalizes(isolated_storage):
+    from _shared import support_tickets
+    sub = "11111111-1111-1111-1111-111111111111"
+    respx.get(url__regex=r".*/supportTickets(\?.*)?$").mock(
+        return_value=httpx.Response(200, json={"value": [
+            {"name": "2400001", "properties": {
+                "title": "Open quota case", "severity": "moderate", "status": "Open",
+                "createdDate": "2026-08-01T00:00:00Z", "supportTicketId": "2400001",
+                "quotaTicketDetails": {}}},
+            {"name": "2400002", "properties": {
+                "title": "Closed case", "severity": "minimal", "status": "Closed",
+                "createdDate": "2026-07-01T00:00:00Z", "supportTicketId": "2400002"}},
+        ]})
+    )
+    tickets = support_tickets.list_azure_tickets(sub, "fake-token", open_only=True)
+    assert len(tickets) == 1
+    t = tickets[0]
+    assert t["ticket_name"] == "2400001"
+    assert t["kind"] == "quota"
+    assert t["azure_status"] == "Open"
+    assert t["external"] is True
+    assert t["subscription_id"] == sub
+
+
+@respx.mock
+def test_list_azure_tickets_includes_closed_when_requested(isolated_storage):
+    from _shared import support_tickets
+    sub = "11111111-1111-1111-1111-111111111111"
+    respx.get(url__regex=r".*/supportTickets(\?.*)?$").mock(
+        return_value=httpx.Response(200, json={"value": [
+            {"name": "a", "properties": {"status": "Open", "createdDate": "2026-08-02T00:00:00Z"}},
+            {"name": "b", "properties": {"status": "Closed", "createdDate": "2026-08-01T00:00:00Z"}},
+        ]})
+    )
+    tickets = support_tickets.list_azure_tickets(sub, "fake-token", open_only=False)
+    assert {t["ticket_name"] for t in tickets} == {"a", "b"}
+    # newest first
+    assert tickets[0]["ticket_name"] == "a"
+
+
+def test_list_azure_tickets_rejects_bad_subscription(isolated_storage):
+    from _shared import support_tickets
+    with pytest.raises(support_tickets.SupportError) as ex:
+        support_tickets.list_azure_tickets("not-a-guid", "fake-token")
+    assert ex.value.code == "bad_subscription"
+
+
+@respx.mock
+def test_list_azure_tickets_surfaces_arm_error(isolated_storage):
+    from _shared import support_tickets
+    sub = "11111111-1111-1111-1111-111111111111"
+    respx.get(url__regex=r".*/supportTickets(\?.*)?$").mock(
+        return_value=httpx.Response(403, json={"error": {"message": "no support plan"}})
+    )
+    with pytest.raises(support_tickets.SupportError) as ex:
+        support_tickets.list_azure_tickets(sub, "fake-token")
+    assert ex.value.status == 403
+    assert "support plan" in ex.value.message.lower()
+
+

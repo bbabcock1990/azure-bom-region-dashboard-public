@@ -11,6 +11,7 @@ import os
 
 from .._shared import support_settings
 from .._shared import snapshot_store
+from .._shared import storage
 from .._shared import httpfunc as func
 
 
@@ -24,6 +25,8 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         "local_mode": os.getenv("LOCAL_MODE", "").lower() in ("true", "1", "yes"),
         "support_configured": support_settings.is_configured(),
         "snapshot_retention": snapshot_store.SNAPSHOT_RETENTION,
+        "storage_dir": storage.storage_root(),
+        "snapshots_dir": storage.snapshots_dir(),
     }
     return func.HttpResponse(
         json.dumps(payload), status_code=200, mimetype="application/json"

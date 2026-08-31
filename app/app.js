@@ -6073,6 +6073,11 @@ async function loadOwnerSettings() {
   set("owner-country", s.country || "US");
   set("owner-tz", s.preferred_timezone || "Pacific Standard Time");
   set("owner-sev", s.default_severity || "moderate");
+  const pathEl = document.getElementById("owner-storage-path");
+  if (pathEl) {
+    const dir = (APP_CONFIG && (APP_CONFIG.snapshots_dir || APP_CONFIG.storage_dir)) || "";
+    pathEl.textContent = dir || "(path unavailable — run a live, non-demo analysis to persist snapshots locally)";
+  }
 }
 
 async function saveOwnerSettings() {
@@ -6514,12 +6519,12 @@ function _supportHtml() {
     || `<option value="">— sign in / select a BOM —</option>`;
 
   const blockersHtml = blocked.length
-    ? blocked.slice(0, 12).map(r => {
+    ? blocked.map(r => {
         const reasons = [];
         if (r.has_zone_restriction) reasons.push("zone/SKU restriction");
         if ((r.sku_blockers || []).length) reasons.push(`${r.sku_blockers.length} SKU blocker(s)`);
         if ((r.missing_services || []).length) reasons.push(`${r.missing_services.length} missing service(s)`);
-        return `<tr>
+        return `<tr data-blocker-region="${escapeHtml(r.short || "")}">
           <td>${escapeHtml(r.name)}</td>
           <td>${escapeHtml(reasons.join(", ") || "needs validation")}</td>
           <td class="support-blocker-actions">
@@ -6528,6 +6533,12 @@ function _supportHtml() {
           </td></tr>`;
       }).join("")
     : `<tr><td colspan="3" class="muted">No blocked regions in the current analysis 🎉</td></tr>`;
+
+  const blockerFilterOpts = blocked.length
+    ? `<option value="">All blocked regions (${blocked.length})</option>` + blocked
+        .slice().sort((a, b) => (a.name || "").localeCompare(b.name || ""))
+        .map(r => `<option value="${escapeHtml(r.short || "")}">${escapeHtml(r.name || r.short || "")}</option>`).join("")
+    : "";
 
   const ticketsHtml = (SUPPORT.tickets || []).length
     ? SUPPORT.tickets.map(_supportTicketRow).join("")
@@ -6543,7 +6554,12 @@ function _supportHtml() {
     </div>
 
     <section class="support-section">
-      <h3>Blockers in the current analysis</h3>
+      <div class="support-section-head">
+        <h3>Blockers in the current analysis</h3>
+        ${blocked.length ? `<label class="support-blocker-filter">Region
+          <select id="support-blocker-filter">${blockerFilterOpts}</select>
+        </label>` : ""}
+      </div>
       <table class="support-table"><thead><tr><th>Region</th><th>Why it's blocked</th><th>Create ticket</th></tr></thead>
       <tbody id="support-blockers-body">${blockersHtml}</tbody></table>
     </section>
@@ -6573,11 +6589,91 @@ function _supportHtml() {
 
     <section class="support-section">
       <h3>Tracked tickets</h3>
+      <p class="muted">Tickets created or previewed from this dashboard.</p>
       <table class="support-table"><thead><tr>
         <th>Type</th><th>Title</th><th>Region</th><th>Severity</th><th>Status</th><th>Created</th><th></th>
       </tr></thead><tbody id="support-tickets-body">${ticketsHtml}</tbody></table>
     </section>
+
+    <section class="support-section">
+      <div class="support-section-head">
+        <h3>Active Azure tickets on this subscription</h3>
+        <button type="button" class="btn btn--sm" id="sup-azure-refresh">↻ Refresh</button>
+      </div>
+      <p class="muted">Pulled live from Azure — open support tickets already on your BOM subscription(s), excluding the ones created here.</p>
+      <table class="support-table"><thead><tr>
+        <th>Type</th><th>Title</th><th>Severity</th><th>Status</th><th>Created</th>
+      </tr></thead><tbody id="support-azure-tickets-body">
+        <tr><td colspan="5" class="muted">Loading live tickets from Azure…</td></tr>
+      </tbody></table>
+    </section>
   </div>`;
+}
+
+function _supportAzureTicketRow(t) {
+  const created = (t.created_at || "").replace("T", " ").replace("Z", "").slice(0, 19);
+  const statusPill = t.azure_status
+    ? `<span class="pill pill-warn">${escapeHtml(t.azure_status)}</span>`
+    : `<span class="pill pill-muted">—</span>`;
+  return `<tr>
+    <td>${escapeHtml(t.kind || "support")}</td>
+    <td title="${escapeHtml(t.ticket_name || "")}">${escapeHtml(t.title || t.ticket_name || "")}</td>
+    <td>${escapeHtml(t.severity || "")}</td>
+    <td>${statusPill}</td>
+    <td>${escapeHtml(created)}</td>
+  </tr>`;
+}
+
+// Real-time pull of Azure support tickets already on the BOM subscription(s),
+// excluding the ones this dashboard created (tracked locally).
+async function _supportLoadAzureTickets() {
+  const body = document.getElementById("support-azure-tickets-body");
+  if (!body) return;
+  const subs = _activeBomSubs().filter(Boolean);
+  if (!subs.length) {
+    body.innerHTML = `<tr><td colspan="5" class="muted">Sign in and select a BOM to see live tickets.</td></tr>`;
+    return;
+  }
+  body.innerHTML = `<tr><td colspan="5" class="muted"><span class="quota-request-spinner" aria-hidden="true"></span> Loading live tickets from Azure…</td></tr>`;
+
+  // Names of tickets we created, so we can exclude them from the "external" list.
+  const ours = new Set();
+  (SUPPORT.tickets || []).forEach(t => {
+    if (t.ticket_name) ours.add(String(t.ticket_name).toLowerCase());
+    if (t.azure_ticket_id) ours.add(String(t.azure_ticket_id).toLowerCase());
+  });
+
+  const seen = new Set();
+  const collected = [];
+  const errors = [];
+  await Promise.all(subs.map(async (subId) => {
+    try {
+      const res = await apiJson(`/api/support/azure-tickets?subscription_id=${encodeURIComponent(subId)}`);
+      for (const t of (res.tickets || [])) {
+        const key = String(t.ticket_name || t.azure_ticket_id || "").toLowerCase();
+        if (!key || seen.has(key) || ours.has(key)) continue;
+        seen.add(key);
+        collected.push(t);
+      }
+    } catch (e) {
+      errors.push({ subId, message: e.message || String(e) });
+    }
+  }));
+
+  collected.sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+
+  if (!collected.length) {
+    const note = errors.length
+      ? `Could not load tickets for ${errors.length} subscription(s): ${escapeHtml(errors[0].message)}`
+      : "No other active Azure support tickets on this subscription.";
+    body.innerHTML = `<tr><td colspan="5" class="muted">${note}</td></tr>`;
+    return;
+  }
+  let html = collected.map(_supportAzureTicketRow).join("");
+  if (errors.length) {
+    html += `<tr><td colspan="5" class="muted">Note: ${errors.length} subscription(s) could not be read (${escapeHtml(errors[0].message)}).</td></tr>`;
+  }
+  body.innerHTML = html;
 }
 
 function _supportTicketRow(t) {
@@ -6810,6 +6906,16 @@ function _supportPrefill(kind, regionShort, opts) {
   }, 60);
 }
 
+function _applyBlockerFilter(regionShort) {
+  const body = document.getElementById("support-blockers-body");
+  if (!body) return;
+  const want = (regionShort || "").toLowerCase();
+  body.querySelectorAll("tr[data-blocker-region]").forEach(tr => {
+    const r = (tr.getAttribute("data-blocker-region") || "").toLowerCase();
+    tr.classList.toggle("hidden", !!want && r !== want);
+  });
+}
+
 function _wireSupportTab(view) {
   _supportSyncKindFields();
   const kindSel = view.querySelector("#sup-kind");
@@ -6820,6 +6926,11 @@ function _wireSupportTab(view) {
   if (familySel) familySel.addEventListener("change", () => _supportUpdateQuotaMath({ force: true }));
   const limitInput = view.querySelector("#sup-limit");
   if (limitInput) limitInput.addEventListener("input", () => { limitInput.dataset.userEdited = "1"; });
+  const blockerFilter = view.querySelector("#support-blocker-filter");
+  if (blockerFilter) blockerFilter.addEventListener("change", () => _applyBlockerFilter(blockerFilter.value));
+  const azureRefresh = view.querySelector("#sup-azure-refresh");
+  if (azureRefresh) azureRefresh.addEventListener("click", _supportLoadAzureTickets);
+  _supportLoadAzureTickets();
   const prev = view.querySelector("#sup-preview");
   if (prev) prev.addEventListener("click", () => _supportCreate(true));
   const sub = view.querySelector("#sup-submit");

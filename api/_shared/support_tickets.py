@@ -590,6 +590,97 @@ def refresh_status(ticket_name: str, token: str) -> Dict[str, Any]:
     return _public_record(entity)
 
 
+# Statuses Azure reports for a support ticket. Anything not explicitly closed is
+# treated as "open/active".
+_CLOSED_STATUSES = {"closed"}
+
+
+def _normalize_azure_ticket(sub_id: str, item: Dict[str, Any]) -> Dict[str, Any]:
+    """Map an ARM Microsoft.Support/supportTickets item to the UI ticket shape."""
+    props = (item or {}).get("properties") or {}
+    name = item.get("name") or props.get("supportTicketId") or ""
+    created = props.get("createdDate") or props.get("createDate") or ""
+    modified = props.get("modifiedDate") or ""
+    severity = str(props.get("severity") or "").lower() or None
+    status = props.get("status") or ""
+    # Best-effort ticket "type" — quota tickets carry a quotaTicketDetails blob.
+    kind = "quota" if "quotaTicketDetails" in props else (
+        "technical" if "technicalTicketDetails" in props else "support"
+    )
+    return {
+        "ticket_name": name,
+        "kind": kind,
+        "status": "submitted",
+        "azure_status": status,
+        "dry_run": False,
+        "external": True,
+        "subscription_id": sub_id,
+        "region": "",
+        "severity": severity,
+        "title": props.get("title") or name,
+        "created_at": created,
+        "updated_at": modified,
+        "azure_ticket_id": props.get("supportTicketId") or name,
+    }
+
+
+def list_azure_tickets(
+    subscription_id: str, token: str, *, open_only: bool = True, limit: int = 100
+) -> List[Dict[str, Any]]:
+    """Real-time list of Azure support tickets on a subscription via ARM.
+
+    Returns tickets in the same public shape the UI uses, flagged
+    ``external: True``. When ``open_only`` is set (default), closed tickets are
+    filtered out. Paginates through ARM ``nextLink`` results.
+    """
+    sub_id = str(subscription_id or "").strip().lower()
+    if not GUID_RE.match(sub_id):
+        raise SupportError("bad_subscription", "subscription_id must be a GUID.", 400)
+    if not token:
+        raise SupportError("no_token", "An ARM token is required to list tickets.", 401)
+
+    url: Optional[str] = (
+        f"{ARM_BASE}/subscriptions/{sub_id}/providers/"
+        f"Microsoft.Support/supportTickets"
+    )
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    out: List[Dict[str, Any]] = []
+    try:
+        with httpx.Client(timeout=30.0, http2=False) as client:
+            params: Optional[Dict[str, str]] = {"api-version": SUPPORT_API_VERSION}
+            while url and len(out) < limit:
+                resp = client.get(url, params=params, headers=headers)
+                if resp.status_code >= 400:
+                    body = _safe_json(resp)
+                    raise SupportError(
+                        "list_failed",
+                        _extract_message(body, f"Could not list support tickets ({resp.status_code})."),
+                        resp.status_code,
+                    )
+                data = resp.json() or {}
+                for item in data.get("value") or []:
+                    rec = _normalize_azure_ticket(sub_id, item)
+                    if open_only and str(rec.get("azure_status") or "").lower() in _CLOSED_STATUSES:
+                        continue
+                    out.append(rec)
+                url = data.get("nextLink")
+                params = None  # nextLink already carries the query string
+    except SupportError:
+        raise
+    except Exception as ex:
+        raise SupportError("request_failed", f"Support ticket list failed: {ex!r}", 502)
+
+    out.sort(key=lambda t: t.get("created_at") or "", reverse=True)
+    return out[: max(1, int(limit or 0))]
+
+
+def _safe_json(resp: "httpx.Response") -> Any:
+    try:
+        return resp.json()
+    except Exception:
+        return getattr(resp, "text", "")
+
+
 def _extract_message(payload: Any, fallback: str) -> str:
     if isinstance(payload, dict):
         error = payload.get("error")

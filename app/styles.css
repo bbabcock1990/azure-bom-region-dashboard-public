@@ -2726,6 +2726,34 @@ html.filters-collapsed-init .filters-body { display: none; }
   background: rgba(106, 42, 42, 0.08);
 }
 .settings-danger h3 { margin: 0 0 4px; font-size: 14px; }
+.settings-storage-path { margin: 8px 0 12px; }
+.settings-storage-path code {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  font-size: 12px;
+  word-break: break-all;
+  max-width: 100%;
+}
+.support-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.support-blocker-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.support-blocker-filter select { min-width: 180px; }
 .sup-limit-info {
   display: block;
   margin-top: 4px;
