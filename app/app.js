@@ -953,9 +953,11 @@ function _altValidBadge(v, regionShort) {
   const title = escapeHtml(v.message || "");
   const region = escapeHtml(regionShort || "");
   const armFam = escapeHtml(v.arm_family || "");
+  const label = escapeHtml(v.family || "");
   const cores = Number(v.required_cores || 0);
-  const ticketLink = (kind, label) =>
-    `<a href="#" class="alt-ticket-link" data-alt-ticket="${kind}" data-alt-region="${region}" data-alt-family="${armFam}" data-alt-cores="${cores}">${label}</a>`;
+  const limit = (v.quota && v.quota.limit != null) ? Number(v.quota.limit) : "";
+  const ticketLink = (kind, text) =>
+    `<a href="#" class="alt-ticket-link" data-alt-ticket="${kind}" data-alt-region="${region}" data-alt-family="${armFam}" data-alt-label="${label}" data-alt-cores="${cores}" data-alt-limit="${limit}">${text}</a>`;
   switch (v.verdict) {
     case "ok":
       return `<span class="alt-valid ok" title="${title}">✅ Available · quota OK</span>`;
@@ -1481,9 +1483,17 @@ function openDrilldown(r) {
       const kind = link.getAttribute("data-alt-ticket");
       const regionShort = link.getAttribute("data-alt-region") || STATE.activeDrilldownRegion || "";
       const family = link.getAttribute("data-alt-family") || "";
+      const label = link.getAttribute("data-alt-label") || "";
       const cores = Number(link.getAttribute("data-alt-cores") || 0);
+      const limitRaw = link.getAttribute("data-alt-limit");
+      const currentLimit = limitRaw !== "" && limitRaw != null ? Number(limitRaw) : null;
       closeDrilldown();
-      _supportPrefill(kind, regionShort, { family, newLimit: cores > 0 ? cores : undefined });
+      _supportPrefill(kind, regionShort, {
+        family,
+        label,
+        cores: cores > 0 ? cores : undefined,
+        currentLimit: Number.isFinite(currentLimit) ? currentLimit : undefined,
+      });
     });
     body._altTicketBound = true;
   }
@@ -7278,6 +7288,12 @@ function _supportUpdateQuotaMath(opts) {
     const cores = Number(familySel.selectedOptions[0].getAttribute("data-cores"));
     if (Number.isFinite(cores) && cores > 0) required = cores;
   }
+  // Suggested alternatives aren't in the snapshot's quota rows; fall back to the
+  // real current limit captured from the live validation (stashed on the option).
+  if (current == null && familySel && familySel.selectedOptions[0]) {
+    const optLimit = Number(familySel.selectedOptions[0].getAttribute("data-current-limit"));
+    if (Number.isFinite(optLimit)) current = optLimit;
+  }
 
   // Recommended new limit: reuse the same logic the quota buttons use when we
   // have a full row; otherwise fall back to current + shortfall.
@@ -7436,8 +7452,29 @@ function _supportPrefill(kind, regionShort, opts) {
     _supportSyncKindFields();
     const familySel = document.getElementById("sup-family");
     if (familySel && opts.family) {
-      const has = Array.from(familySel.options).some(o => o.value === opts.family);
-      if (has) familySel.value = opts.family;
+      // Drop any previously-injected alternative so they don't accumulate.
+      Array.from(familySel.querySelectorAll("option[data-alt-injected]"))
+        .forEach(o => { if (o.value !== opts.family) o.remove(); });
+      let opt = Array.from(familySel.options).find(o => o.value === opts.family);
+      if (!opt) {
+        // The suggested alternative isn't a BOM family, so it isn't in the list.
+        // Inject it (carrying the cores + real current limit) so the ticket can
+        // target the alternative SKU, then select it.
+        opt = document.createElement("option");
+        opt.value = opts.family;
+        const lbl = opts.label || opts.family;
+        opt.textContent = `${lbl} (${opts.family}) — suggested alt`;
+        opt.setAttribute("data-label", lbl);
+        opt.setAttribute("data-alt-injected", "1");
+        familySel.appendChild(opt);
+      }
+      if (opts.cores != null && Number.isFinite(Number(opts.cores))) {
+        opt.setAttribute("data-cores", String(Math.round(Number(opts.cores))));
+      }
+      if (opts.currentLimit != null && Number.isFinite(Number(opts.currentLimit))) {
+        opt.setAttribute("data-current-limit", String(Math.round(Number(opts.currentLimit))));
+      }
+      familySel.value = opts.family;
     }
     const limitInput = document.getElementById("sup-limit");
     if (limitInput) {
