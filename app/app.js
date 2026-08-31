@@ -3221,194 +3221,151 @@ function _renderQuotaHierarchy(result) {
     }
   }
 
-  function _quotaBadge(usage, limit, headroom, required) {
-    if (limit == null && usage == null) return `<span class="qh-quota qh-quota--na">N/A</span>`;
-    const u = _formatQuotaNumber(usage);
-    const l = _formatQuotaNumber(limit);
-    const h = headroom != null ? _formatQuotaNumber(headroom) : "?";
-    let cls = "qh-quota--ok";
-    if (headroom != null && required != null && headroom < required) cls = "qh-quota--fail";
-    else if (headroom != null && headroom === 0) cls = "qh-quota--warn";
-    return `<span class="qh-quota ${cls}">${escapeHtml(u)}/${escapeHtml(l)} (${escapeHtml(h)} free)</span>`;
-  }
-
-  // Group rows by quota group name
-  const groupMap = new Map();
-  for (const row of result.rows) {
-    const qg = row.quota_group || {};
-    const groupName = qg.group || "(No Quota Group)";
-    if (!groupMap.has(groupName)) groupMap.set(groupName, []);
-    groupMap.get(groupName).push(row);
-  }
-
-  // Build tree: Quota Group → SKU Family → Subscription → SKU
-  const groupNodes = [];
-  for (const [groupName, rows] of groupMap) {
-    const familyNodes = rows.map(row => {
-      const sub = row.subscription || {};
-      const qg = row.quota_group || {};
-      const altSub = row.alt_subscription || {};
-
-      // Subscription children with primary SKU
-      const skuChildren = [];
-      skuChildren.push(`<li class="qh-node">
-        <div class="qh-label">
-          <span class="qh-icon qh-icon--family">P</span>
-          <span>${escapeHtml(row.family_label || row.family || "—")}</span>
-          <span class="qh-tag qh-tag--primary">Primary</span>
-          ${_quotaBadge(sub.limit != null ? sub.usage : null, sub.limit, sub.headroom, row.required)}
-        </div>
-      </li>`);
-
-      // Fallback SKU under subscription
-      if (row.alt_label) {
-        skuChildren.push(`<li class="qh-node">
-          <div class="qh-label">
-            <span class="qh-icon qh-icon--fallback">F</span>
-            <span>${escapeHtml(row.alt_label)}</span>
-            <span class="qh-tag qh-tag--fallback">Fallback</span>
-            ${altSub.headroom != null
-              ? _quotaBadge(altSub.usage, altSub.limit, altSub.headroom, row.required)
-              : `<span class="qh-quota qh-quota--na">N/A</span>`}
-          </div>
-        </li>`);
-      }
-
-      // Subscription node wrapping the SKUs
-      const subscriptionNode = `<li class="qh-node">
-        <div class="qh-label">
-          <span class="qh-icon qh-icon--sub">S</span>
-          <span>${escapeHtml(subName || subId || "Subscription")}</span>
-        </div>
-        <ul class="qh-tree">${skuChildren.join("")}</ul>
-      </li>`;
-
-      // SKU Family node (quota group level) wrapping the subscription
-      return `<li class="qh-node">
-        <div class="qh-label">
-          <span class="qh-icon qh-icon--family">⬡</span>
-          <span>${escapeHtml(row.family_label || row.family || "—")}</span>
-          <span class="qh-tag qh-tag--required">Req: ${escapeHtml(_formatQuotaNumber(row.required))} cores</span>
-          ${_quotaBadge(qg.limit != null ? qg.usage : null, qg.limit, qg.headroom, qg.shortfall)}
-        </div>
-        <ul class="qh-tree">${subscriptionNode}</ul>
-      </li>`;
-    }).join("");
-
-    groupNodes.push(`<li class="qh-node qh-root">
-      <div class="qh-label">
-        <span class="qh-icon qh-icon--group">G</span>
-        <span>${escapeHtml(groupName)}</span>
-      </div>
-      <ul class="qh-tree">${familyNodes}</ul>
-    </li>`);
-  }
-
   const isCollapsed = !!STATE.quotaHierarchyCollapsed;
   const bodyClass = isCollapsed ? "quota-hierarchy__body hidden" : "quota-hierarchy__body";
 
-  // --- Right panel: non-BOM donor subscriptions ---
+  const regionDisplay =
+    (result.region && (result.region.name || result.region.display_name)) ||
+    (result.rows[0].region_short || "");
+  const regionShort = result.rows[0].region_short || "";
+
+  // ── Block 1: existing quota on THIS subscription for the BOM ──────────────
+  const famSummary = result.rows.map(row => {
+    const sub = row.subscription || {};
+    const free = sub.headroom != null ? sub.headroom : null;
+    const ok = row.overall_status === "sufficient";
+    const deficit = Number(row.deficit) || 0;
+    const pill = ok
+      ? `<span class="qd-pill qd-pill--ok">Sufficient</span>`
+      : `<span class="qd-pill qd-pill--fail">Short ${_formatQuotaNumber(deficit)}</span>`;
+    const altFree = row.alt_subscription && row.alt_subscription.headroom != null
+      ? row.alt_subscription.headroom : null;
+    const altNote = row.alt_label && altFree != null
+      ? `<div class="qd-fam-alt">fallback ${escapeHtml(row.alt_label)}: ${_formatQuotaNumber(altFree)} free</div>`
+      : "";
+    return `<div class="qd-fam">
+      <div class="qd-fam-main">
+        <span class="qd-fam-name">${escapeHtml(row.family_label || row.family || "—")}</span>
+        ${pill}
+      </div>
+      <div class="qd-fam-meta">${free != null ? _formatQuotaNumber(free) : "?"} free of ${_formatQuotaNumber(row.required)} required</div>
+      ${altNote}
+    </div>`;
+  }).join("");
+
+  const failingRows = result.rows.filter(r => r.overall_status === "insufficient");
+  const hasShortfall = failingRows.length > 0;
+
+  // ── Block 2: donor subscriptions (only meaningful when there's a shortfall) ─
   const snap = STATE.snapshot || {};
   const perSubResults = snap.per_sub_results || {};
-  // Gather all BOM subscription IDs from metadata + per_sub_results + focused sub
   const bomSubIds = new Set(Object.keys(perSubResults).map(id => id.toLowerCase()));
   if (subId) bomSubIds.add(subId.toLowerCase());
   const bomMeta = activeBomMeta();
-  for (const id of subscriptionList(bomMeta)) {
-    bomSubIds.add(id.toLowerCase());
-  }
+  for (const id of subscriptionList(bomMeta)) bomSubIds.add(id.toLowerCase());
   const allSubs = Array.isArray(window._loadedSubscriptions) ? window._loadedSubscriptions : [];
-  const regionShort = result.rows[0].region_short || "";
-
-  // Non-BOM subscriptions the user has access to
   const nonBomSubs = allSubs.filter(s => s && s.id && !bomSubIds.has(s.id.toLowerCase()));
 
-  // Needed family IDs for the scan
+  // case-insensitive family lookup within a donor's scanned families map
+  const famInfo = (fams, famId) => {
+    if (!fams || !famId) return null;
+    if (fams[famId]) return fams[famId];
+    const hit = Object.entries(fams).find(([k]) => k.toLowerCase() === famId.toLowerCase());
+    return hit ? hit[1] : null;
+  };
+
+  // We only scan for the families of the FAILING rows — that's all a donor can help with.
   const neededFamilies = [];
-  for (const row of result.rows) {
+  for (const row of failingRows) {
     if (row.family) neededFamilies.push(row.family);
     if (row.alt_family) neededFamilies.push(row.alt_family);
   }
+  const neededLabels = [...new Set(neededFamilies.map(f => _donorFamilyLabel(f, result.rows)))].join(", ");
 
-  // Build donor panel (scanned results stored in STATE.donorQuotaCache)
   const cacheKey = `${regionShort}::${subId}`;
   const cachedDonors = (STATE.donorQuotaCache || {})[cacheKey] || null;
 
   let donorHtml = "";
-  if (nonBomSubs.length > 0) {
-    if (cachedDonors && cachedDonors.status === "loaded") {
-      // Render scanned results
-      const donorCards = nonBomSubs.map(s => {
-        const scanResult = cachedDonors.results[s.id] || null;
-        if (!scanResult || scanResult.status !== "ok") {
-          return `<div class="qh-donor-card qh-donor-card--unscanned">
-            <div class="qh-donor-name"><span class="qh-icon qh-icon--sub" style="opacity:.5">S</span> <span class="qh-muted">${escapeHtml(s.name || s.id)}</span></div>
-            <div class="qh-muted" style="font-size:11px">${scanResult ? escapeHtml(scanResult.status) : "No data"}</div>
-          </div>`;
-        }
-        const familyEntries = Object.entries(scanResult.families || {});
-        if (!familyEntries.length) {
-          return `<div class="qh-donor-card qh-donor-card--unscanned">
-            <div class="qh-donor-name"><span class="qh-icon qh-icon--sub" style="opacity:.5">S</span> <span class="qh-muted">${escapeHtml(s.name || s.id)}</span></div>
-            <div class="qh-muted" style="font-size:11px">No matching families found</div>
-          </div>`;
-        }
-        const familyList = familyEntries.map(([fam, info]) => {
-          const headroom = info.headroom != null ? info.headroom : 0;
-          const cls = headroom > 0 ? "qh-quota--ok" : "qh-quota--warn";
-          // Show friendly family name if possible
-          const famLabel = _donorFamilyLabel(fam, result.rows);
-          return `<div class="qh-donor-family">
-            <span>${escapeHtml(famLabel)}</span>
-            <span class="qh-quota ${cls}">${escapeHtml(_formatQuotaNumber(info.usage))}/${escapeHtml(_formatQuotaNumber(info.limit))} (${escapeHtml(_formatQuotaNumber(headroom))} free)</span>
-          </div>`;
-        }).join("");
-        return `<div class="qh-donor-card">
-          <div class="qh-donor-name"><span class="qh-icon qh-icon--sub">S</span> ${escapeHtml(s.name || s.id)}</div>
-          ${familyList}
+  if (!hasShortfall) {
+    donorHtml = `<div class="qd-donor-note qd-donor-note--ok">✓ ${escapeHtml(subName)} already has enough quota for this BOM in ${escapeHtml(regionDisplay)} — no donor subscription needed.</div>`;
+  } else if (nonBomSubs.length === 0) {
+    donorHtml = `<div class="qd-donor-note">No other (non-BOM) subscriptions are available to pull quota from. Request an increase on this subscription instead.</div>`;
+  } else if (cachedDonors && cachedDonors.status === "loaded") {
+    const relevant = new Set();
+    failingRows.forEach(r => {
+      if (r.family) relevant.add(r.family.toLowerCase());
+      if (r.alt_family) relevant.add(r.alt_family.toLowerCase());
+    });
+    const evaluated = nonBomSubs.map(s => {
+      const scan = cachedDonors.results[s.id] || null;
+      if (!scan || scan.status !== "ok") return null;
+      const fams = scan.families || {};
+      let bestFree = 0;
+      const chips = [];
+      for (const [fam, info] of Object.entries(fams)) {
+        if (!relevant.has(fam.toLowerCase())) continue;
+        const fr = info && info.headroom != null ? info.headroom : 0;
+        if (fr > 0) { bestFree = Math.max(bestFree, fr); chips.push({ label: _donorFamilyLabel(fam, result.rows), free: fr }); }
+      }
+      if (bestFree <= 0) return null;
+      const coversAll = failingRows.every(r => {
+        const cands = [r.family, r.alt_family].filter(Boolean);
+        return cands.some(f => {
+          const info = famInfo(fams, f);
+          const fr = info && info.headroom != null ? info.headroom : 0;
+          return fr >= (Number(r.deficit) || 0);
+        });
+      });
+      chips.sort((a, b) => b.free - a.free);
+      return { s, chips, bestFree, coversAll };
+    }).filter(Boolean);
+
+    evaluated.sort((a, b) => (Number(b.coversAll) - Number(a.coversAll)) || (b.bestFree - a.bestFree));
+
+    if (!evaluated.length) {
+      donorHtml = `<div class="qd-donor-note">Scanned ${nonBomSubs.length} subscription${nonBomSubs.length === 1 ? "" : "s"} — none currently have free quota for ${escapeHtml(neededLabels)}.</div>`;
+    } else {
+      const cards = evaluated.map(({ s, chips, bestFree, coversAll }) => {
+        const badge = coversAll
+          ? `<span class="qd-donor-badge qd-donor-badge--ok">Can cover shortfall</span>`
+          : `<span class="qd-donor-badge qd-donor-badge--partial">Partial · ${_formatQuotaNumber(bestFree)} free</span>`;
+        const chipHtml = chips.map(c => `<span class="qd-chip">${escapeHtml(c.label)} · ${_formatQuotaNumber(c.free)} free</span>`).join("");
+        return `<div class="qd-donor">
+          <div class="qd-donor-head">
+            <span class="qd-donor-name">${escapeHtml(s.name || s.id)}</span>
+            ${badge}
+          </div>
+          <div class="qd-donor-chips">${chipHtml}</div>
         </div>`;
       }).join("");
-
-      donorHtml = `<div class="qh-donors">
-        <div class="qh-donors-title">Available Donor Subscriptions</div>
-        <div class="qh-donors-desc">Non-BOM subscriptions with quota for the required SKU families that could contribute via quota groups.</div>
-        ${donorCards}
-      </div>`;
-    } else if (cachedDonors && cachedDonors.status === "scanning") {
-      donorHtml = `<div class="qh-donors">
-        <div class="qh-donors-title">Available Donor Subscriptions</div>
-        <div class="qh-donors-desc">Scanning ${nonBomSubs.length} non-BOM subscription${nonBomSubs.length === 1 ? "" : "s"} for available quota…</div>
-        <div class="qh-donor-card qh-donor-card--unscanned" style="text-align:center;padding:20px">
-          <span class="quota-request-spinner" aria-hidden="true"></span> Scanning…
-        </div>
-      </div>`;
-    } else {
-      // Trigger scan
-      _scanDonorSubscriptions(nonBomSubs, regionShort, neededFamilies, cacheKey);
-      donorHtml = `<div class="qh-donors">
-        <div class="qh-donors-title">Available Donor Subscriptions</div>
-        <div class="qh-donors-desc">Scanning ${nonBomSubs.length} non-BOM subscription${nonBomSubs.length === 1 ? "" : "s"} for available quota…</div>
-        <div class="qh-donor-card qh-donor-card--unscanned" style="text-align:center;padding:20px">
-          <span class="quota-request-spinner" aria-hidden="true"></span> Scanning…
-        </div>
-      </div>`;
+      donorHtml = `<div class="qd-donor-list">${cards}</div>
+        <div class="qd-donor-foot">Quota is moved between subscriptions with an Azure <strong>quota group</strong>. Confirm the donor and BOM subscriptions share (or can join) the same quota group, then rebalance in the Azure portal.</div>`;
     }
+  } else if (cachedDonors && cachedDonors.status === "scanning") {
+    donorHtml = `<div class="qd-donor-note"><span class="quota-request-spinner" aria-hidden="true"></span> Scanning ${nonBomSubs.length} subscription${nonBomSubs.length === 1 ? "" : "s"} for available quota…</div>`;
+  } else {
+    _scanDonorSubscriptions(nonBomSubs, regionShort, neededFamilies, cacheKey);
+    donorHtml = `<div class="qd-donor-note"><span class="quota-request-spinner" aria-hidden="true"></span> Scanning ${nonBomSubs.length} subscription${nonBomSubs.length === 1 ? "" : "s"} for available quota…</div>`;
   }
-
-  const hasDonors = nonBomSubs.length > 0;
 
   panel.classList.remove("hidden");
   panel.innerHTML = `<div class="quota-hierarchy__card">
     <button type="button" class="quota-hierarchy__toggle" data-quota-hierarchy-toggle="1" aria-expanded="${isCollapsed ? "false" : "true"}">
-      <span>Quota Hierarchy</span>
+      <span>Quota &amp; donor options</span>
       <span aria-hidden="true">${isCollapsed ? "▸" : "▾"}</span>
     </button>
     <div class="${bodyClass}">
-      <div class="qh-split${hasDonors ? "" : " qh-split--single"}">
-        <div class="qh-split-left">
-          <ul class="qh-tree">${groupNodes.join("")}</ul>
-        </div>
-        ${hasDonors ? `<div class="qh-split-divider"></div><div class="qh-split-right">${donorHtml}</div>` : ""}
+      <div class="qd-grid">
+        <section class="qd-block">
+          <div class="qd-block-title">Your subscription quota for this BOM</div>
+          <div class="qd-block-sub">${escapeHtml(subName)} &middot; ${escapeHtml(regionDisplay)}</div>
+          <div class="qd-fam-list">${famSummary}</div>
+        </section>
+        <section class="qd-block">
+          <div class="qd-block-title">Pull quota from a donor subscription</div>
+          <div class="qd-block-sub">Cover the shortfall by rebalancing quota from another subscription you own.</div>
+          ${donorHtml}
+        </section>
       </div>
     </div>
   </div>`;
