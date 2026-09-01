@@ -107,18 +107,20 @@ def test_storage_verdict_unverifiable_when_empty_state():
 
 # ----------------------------------------------------------------- disk verdict
 
-def test_disk_verdict_available_with_zones():
-    state = {"premium_zrs": {"zones": ["1", "2", "3"], "restricted": False, "reason": ""}}
+def test_disk_verdict_available_when_offered():
+    # ZRS disks are zone-redundant (not zone-pinned), so they report an empty
+    # zones list even where fully supported — availability keys off `offered`.
+    state = {"premium_zrs": {"offered": True, "zones": [], "restricted": False, "reason": ""}}
     assert zc._disk_verdict(state, "Premium_ZRS")["verdict"] == "available"
 
 
-def test_disk_verdict_unavailable_without_zones():
-    state = {"premium_zrs": {"zones": [], "restricted": False, "reason": ""}}
+def test_disk_verdict_unavailable_when_not_offered():
+    state = {"premium_zrs": {"offered": False, "zones": [], "restricted": False, "reason": ""}}
     assert zc._disk_verdict(state, "Premium_ZRS")["verdict"] == "unavailable"
 
 
 def test_disk_verdict_blocked_when_restricted():
-    state = {"premium_zrs": {"zones": ["1"], "restricted": True, "reason": "NotAvailableForSubscription"}}
+    state = {"premium_zrs": {"offered": True, "zones": [], "restricted": True, "reason": "NotAvailableForSubscription"}}
     assert zc._disk_verdict(state, "Premium_ZRS")["verdict"] == "blocked"
 
 
@@ -435,18 +437,19 @@ def test_fetch_elasticsan_honours_locationinfo_restriction(monkeypatch):
 
 
 def test_elasticsan_verdict_available():
-    state = {"premium_zrs": {"zones": ["1", "2", "3"], "restricted": False, "reason": ""}}
+    # Zone-redundant Elastic SAN reports empty zones even where offered.
+    state = {"premium_zrs": {"offered": True, "zones": [], "restricted": False, "reason": ""}}
     assert zc._elasticsan_verdict(state, "Premium_ZRS")["verdict"] == "available"
 
 
-def test_elasticsan_verdict_unavailable_without_zones():
-    state = {"premium_zrs": {"zones": [], "restricted": False, "reason": ""}}
+def test_elasticsan_verdict_unavailable_when_not_offered():
+    state = {"premium_zrs": {"offered": False, "zones": [], "restricted": False, "reason": ""}}
     assert zc._elasticsan_verdict(state, "Premium_ZRS")["verdict"] == "unavailable"
 
 
 def test_evaluate_elasticsan(monkeypatch):
     monkeypatch.setattr(zc, "fetch_elasticsan_sku_state",
-                        lambda **k: {"premium_zrs": {"zones": ["1", "2", "3"], "restricted": False, "reason": ""}})
+                        lambda **k: {"premium_zrs": {"offered": True, "zones": [], "restricted": False, "reason": ""}})
     out = zc.evaluate(
         services=[{"name": "Azure Elastic SAN", "tier": "zrs"}],
         region="eastus", arm_token="t", subscription_id="s",

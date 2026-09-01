@@ -233,13 +233,26 @@ def fetch_disk_sku_state(
                 name = str(item.get("name") or "")
                 if not name:
                     continue
+                offered_here = False
                 zones: List[str] = []
                 for loc_info in item.get("locationInfo") or []:
                     if _normalize_region(str(loc_info.get("location") or "")) == region_norm:
+                        offered_here = True
                         zones = [str(z) for z in (loc_info.get("zones") or [])]
                 reason = _restriction_blocks_region(item.get("restrictions"), region_norm)
                 key = name.lower()
-                out[key] = {"zones": sorted(set(zones)), "restricted": bool(reason), "reason": reason or ""}
+                # A disk SKU can appear as several items (per size); OR the
+                # region-offered / restriction signals across them. Note ZRS
+                # disks are zone-redundant, not zone-pinned, so they expose an
+                # empty ``zones`` list even where fully supported — presence in
+                # the region's ``locationInfo`` (``offered``) is the real signal.
+                prev = out.get(key)
+                out[key] = {
+                    "offered": offered_here or (prev or {}).get("offered", False),
+                    "zones": sorted(set(zones) | set((prev or {}).get("zones", []))),
+                    "restricted": bool(reason) or (prev or {}).get("restricted", False),
+                    "reason": reason or (prev or {}).get("reason", ""),
+                }
             next_url = data.get("nextLink") or None
     return out
 
@@ -274,15 +287,28 @@ def fetch_elasticsan_sku_state(
         name = str(item.get("name") or "")
         if not name:
             continue
+        offered_here = False
         zones: List[str] = []
         loc_restrictions: List[Any] = []
         for loc_info in item.get("locationInfo") or []:
             if _normalize_region(str(loc_info.get("location") or "")) == region_norm:
+                offered_here = True
                 zones = [str(z) for z in (loc_info.get("zones") or [])]
                 loc_restrictions = loc_info.get("restrictions") or []
         reason = (_restriction_blocks_region(item.get("restrictions"), region_norm)
                   or _restriction_blocks_region(loc_restrictions, region_norm))
-        out[name.lower()] = {"zones": sorted(set(zones)), "restricted": bool(reason), "reason": reason or ""}
+        # This API returns ONE item per (SKU, region) pair, so we must aggregate
+        # across items for the same SKU name rather than overwrite. Like ZRS
+        # disks, a zone-redundant Elastic SAN is not zone-pinned and reports an
+        # empty ``zones`` list even where offered — key off ``offered``.
+        key = name.lower()
+        prev = out.get(key)
+        out[key] = {
+            "offered": offered_here or (prev or {}).get("offered", False),
+            "zones": sorted(set(zones) | set((prev or {}).get("zones", []))),
+            "restricted": bool(reason) or (prev or {}).get("restricted", False),
+            "reason": reason or (prev or {}).get("reason", ""),
+        }
     return out
 
 
@@ -553,37 +579,29 @@ def _disk_verdict(state: Dict[str, Dict[str, Any]], sku: str) -> Dict[str, Any]:
     entry = state.get(sku.lower())
     if not state:
         return {"verdict": "unverifiable", "message": "Disk SKU list unavailable for this subscription."}
-    if not entry or not entry.get("zones"):
-        if entry and entry.get("restricted"):
-            return {"verdict": "blocked",
-                    "message": f"{sku} is restricted for this subscription in the region "
-                               f"({entry.get('reason') or 'restricted'})."}
+    if not entry or not entry.get("offered"):
         return {"verdict": "unavailable",
-                "message": f"{sku} exposes no availability zones in this region — ZRS disks can't be created here."}
+                "message": f"{sku} is not offered in this region — ZRS disks can't be created here."}
     if entry.get("restricted"):
         return {"verdict": "blocked",
                 "message": f"{sku} is restricted for this subscription ({entry.get('reason') or 'restricted'})."}
     return {"verdict": "available",
-            "message": f"{sku} is offered across {len(entry['zones'])} zone(s) and unrestricted."}
+            "message": f"{sku} (zone-redundant) is offered and unrestricted for this subscription."}
 
 
 def _elasticsan_verdict(state: Dict[str, Dict[str, Any]], sku: str) -> Dict[str, Any]:
     entry = state.get(sku.lower())
     if not state:
         return {"verdict": "unverifiable", "message": "Elastic SAN SKU list unavailable for this subscription."}
-    if not entry or not entry.get("zones"):
-        if entry and entry.get("restricted"):
-            return {"verdict": "blocked",
-                    "message": f"{sku} is restricted for this subscription in the region "
-                               f"({entry.get('reason') or 'restricted'})."}
+    if not entry or not entry.get("offered"):
         return {"verdict": "unavailable",
-                "message": f"{sku} exposes no availability zones in this region — a zone-redundant "
+                "message": f"{sku} is not offered in this region — a zone-redundant "
                            f"Elastic SAN can't be created here."}
     if entry.get("restricted"):
         return {"verdict": "blocked",
                 "message": f"{sku} is restricted for this subscription ({entry.get('reason') or 'restricted'})."}
     return {"verdict": "available",
-            "message": f"{sku} is offered across {len(entry['zones'])} zone(s) and unrestricted."}
+            "message": f"{sku} (zone-redundant) is offered and unrestricted for this subscription."}
 
 
 def _sql_verdict(state: Dict[str, Dict[str, Any]], edition: str) -> Dict[str, Any]:
