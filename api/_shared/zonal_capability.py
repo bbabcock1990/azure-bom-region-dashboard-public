@@ -49,6 +49,7 @@ log = logging.getLogger(__name__)
 
 STORAGE_SKUS_API_VERSION = "2023-05-01"
 SQL_CAPABILITIES_API_VERSION = "2023-08-01-preview"
+FLEX_CAPABILITIES_API_VERSION = "2023-06-30"
 
 # ── Catalog tier → authoritative ARM target ─────────────────────────────────
 #
@@ -97,9 +98,23 @@ _SQL_SERVICES: Dict[str, Dict[str, str]] = {
     },
 }
 
+# Flexible-Server databases (PostgreSQL / MySQL): tier -> compute edition name
+# as it appears in the location capabilities feed. Zone-redundant HA is offered
+# only on the GeneralPurpose / MemoryOptimized editions — never Burstable.
+_FLEX_SERVICES: Dict[str, Dict[str, Any]] = {
+    "Azure Database for PostgreSQL": {
+        "provider": "Microsoft.DBforPostgreSQL",
+        "editions": {"general_purpose": "GeneralPurpose", "memory_optimized": "MemoryOptimized"},
+    },
+    "Azure Database for MySQL": {
+        "provider": "Microsoft.DBforMySQL",
+        "editions": {"general_purpose": "GeneralPurpose", "memory_optimized": "MemoryOptimized"},
+    },
+}
+
 
 def service_check_kind(name: str) -> Optional[str]:
-    """Return ``'storage' | 'disks' | 'sql'`` if the service has an
+    """Return ``'storage' | 'disks' | 'sql' | 'flex'`` if the service has an
     authoritative per-subscription zonal check, else ``None``."""
     if name in _STORAGE_SERVICES:
         return "storage"
@@ -107,6 +122,8 @@ def service_check_kind(name: str) -> Optional[str]:
         return "disks"
     if name in _SQL_SERVICES:
         return "sql"
+    if name in _FLEX_SERVICES:
+        return "flex"
     return None
 
 
@@ -276,12 +293,107 @@ def fetch_sql_edition_state(
     return out
 
 
+# ── PostgreSQL / MySQL Flexible Server capabilities ─────────────────────────
+
+_REGION_ZR_KEY = "__region_zr__"
+
+
+def _flag_to_bool(value: Any) -> Optional[bool]:
+    """Interpret Azure's ``zoneRedundantHaSupported`` which may be a bool or a
+    string ("Enabled"/"Disabled"). ``None`` means "not stated" → don't block."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("enabled", "true", "yes", "supported"):
+            return True
+        if v in ("disabled", "false", "no", "notsupported"):
+            return False
+    return None
+
+
+def _has_zone_redundant_ha(node: Any) -> bool:
+    """Recursively detect a ``ZoneRedundant`` high-availability mode anywhere in
+    a capability subtree (``supportedHaMode`` /
+    ``supportedHighAvailabilityModes`` lists of strings)."""
+    if isinstance(node, str):
+        return node.replace(" ", "").replace("_", "").lower() == "zoneredundant"
+    if isinstance(node, dict):
+        return any(_has_zone_redundant_ha(v) for v in node.values())
+    if isinstance(node, list):
+        return any(_has_zone_redundant_ha(v) for v in node)
+    return False
+
+
+def _iter_flex_editions(node: Any):
+    """Yield edition dicts (those carrying a ``name`` and a SKU list) from the
+    Flexible Server capability payload, whatever the api-version nesting."""
+    if isinstance(node, dict):
+        keys = set(node.keys())
+        if "name" in node and (
+            "supportedServerSkus" in keys or "supportedSkus" in keys
+            or "supportedServerVersions" in keys
+        ):
+            yield node
+        for v in node.values():
+            yield from _iter_flex_editions(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _iter_flex_editions(v)
+
+
+def fetch_flex_edition_state(
+    *, provider: str, arm_token: str, subscription_id: str, region: str,
+    timeout_s: float = DEFAULT_TIMEOUT_S,
+) -> Dict[str, Dict[str, Any]]:
+    """Return ``{edition_name_lower: {"zone_redundant": bool}}`` plus a
+    ``__region_zr__`` entry for a PostgreSQL/MySQL Flexible Server provider from
+    its per-subscription location capabilities. Degrades to ``{}`` (→
+    unverifiable) on any ARM error so the caller falls back to region-AZ."""
+    token = _strip_bearer(arm_token)
+    region_norm = _normalize_region(region)
+    url = (f"{ARM_BASE}/subscriptions/{subscription_id}/providers/{provider}"
+           f"/locations/{region_norm}/flexibleServerCapabilities")
+    params = {"api-version": FLEX_CAPABILITIES_API_VERSION}
+    try:
+        with httpx.Client(timeout=timeout_s, http2=False) as client:
+            r = client.get(url, params=params, headers=_headers(token))
+            if r.status_code >= 400:
+                log.warning("flex caps: ARM %d for %s sub=%s — unverifiable",
+                            r.status_code, provider, subscription_id)
+                return {}
+            data = r.json()
+    except Exception as ex:  # pragma: no cover - defensive
+        log.warning("flex caps request failed for %s: %r", provider, ex)
+        return {}
+
+    out: Dict[str, Dict[str, Any]] = {}
+    region_zr: Optional[bool] = None
+    for item in data.get("value") or [data]:
+        if not isinstance(item, dict):
+            continue
+        flag = _flag_to_bool(item.get("zoneRedundantHaSupported"))
+        if flag is not None:
+            region_zr = flag if region_zr is None else (region_zr or flag)
+        for ed in _iter_flex_editions(item):
+            name = str(ed.get("name") or "")
+            if not name:
+                continue
+            key = name.lower()
+            has_zr = _has_zone_redundant_ha(ed)
+            prev = out.get(key)
+            out[key] = {"zone_redundant": has_zr or (prev or {}).get("zone_redundant", False)}
+    out[_REGION_ZR_KEY] = {"value": region_zr}
+    return out
+
+
 # ── Verdict aggregation ─────────────────────────────────────────────────────
 
 _SOURCE_LABEL = {
     "storage": "Microsoft.Storage/skus",
     "disks": "Microsoft.Compute/skus (disks)",
     "sql": "Microsoft.Sql capabilities",
+    "flex": "Flexible Server capabilities",
 }
 
 
@@ -332,6 +444,26 @@ def _sql_verdict(state: Dict[str, Dict[str, Any]], edition: str) -> Dict[str, An
             "message": f"The {edition} edition supports zone-redundant deployment for this subscription."}
 
 
+def _flex_verdict(state: Dict[str, Dict[str, Any]], edition: str) -> Dict[str, Any]:
+    if not state:
+        return {"verdict": "unverifiable",
+                "message": "Flexible Server capabilities unavailable for this subscription/region."}
+    region_zr = (state.get(_REGION_ZR_KEY) or {}).get("value")
+    entry = state.get(edition.lower())
+    if region_zr is False:
+        return {"verdict": "blocked",
+                "message": "Zone-redundant HA is not supported in this region for this subscription."}
+    if not entry:
+        return {"verdict": "unavailable",
+                "message": f"The {edition} tier is not offered in this region for this subscription."}
+    if not entry.get("zone_redundant"):
+        return {"verdict": "blocked",
+                "message": f"The {edition} tier is available but no SKU here supports zone-redundant HA "
+                           f"for this subscription."}
+    return {"verdict": "available",
+            "message": f"The {edition} tier supports zone-redundant HA for this subscription."}
+
+
 def evaluate(
     *,
     services: List[Dict[str, Any]],
@@ -350,6 +482,7 @@ def evaluate(
     storage_state: Optional[Dict] = None
     disk_state: Optional[Dict] = None
     sql_state: Optional[Dict] = None
+    flex_state: Dict[str, Optional[Dict]] = {}
 
     results: List[Dict[str, Any]] = []
     for svc in services or []:
@@ -385,6 +518,18 @@ def evaluate(
                 sql_state = fetch_sql_edition_state(
                     arm_token=arm_token, subscription_id=subscription_id, region=region_norm, timeout_s=timeout_s)
             results.append({**base, "target": edition, **_sql_verdict(sql_state, edition)})
+        elif kind == "flex":
+            spec = _FLEX_SERVICES[name]
+            edition = spec["editions"].get(tier)
+            if not edition:
+                results.append({**base, "verdict": "not_verifiable", "message": "Selected tier is not zone-redundant."})
+                continue
+            provider = spec["provider"]
+            if provider not in flex_state:
+                flex_state[provider] = fetch_flex_edition_state(
+                    provider=provider, arm_token=arm_token, subscription_id=subscription_id,
+                    region=region_norm, timeout_s=timeout_s)
+            results.append({**base, "target": edition, **_flex_verdict(flex_state[provider], edition)})
         else:
             results.append({**base, "verdict": "not_verifiable",
                             "message": "No authoritative per-subscription API for this service — "

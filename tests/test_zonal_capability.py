@@ -236,3 +236,84 @@ def test_evaluate_uses_storage_state_once(monkeypatch):
     assert calls["n"] == 1  # single round-trip covers all storage selections
     assert all(v["verdict"] == "available" for v in out)
     assert out[0]["source"] == "Microsoft.Storage/skus"
+
+
+# ------------------------------------------------- flexible server (PostgreSQL)
+
+def test_service_check_kind_flex():
+    assert zc.service_check_kind("Azure Database for PostgreSQL") == "flex"
+    assert zc.service_check_kind("Azure Database for MySQL") == "flex"
+
+
+def test_flag_to_bool_variants():
+    assert zc._flag_to_bool(True) is True
+    assert zc._flag_to_bool("Enabled") is True
+    assert zc._flag_to_bool("Disabled") is False
+    assert zc._flag_to_bool("mystery") is None
+
+
+def test_has_zone_redundant_ha_detects_mode():
+    ed = {"name": "GeneralPurpose", "supportedServerSkus": [
+        {"name": "GP_D4ds_v5", "supportedHighAvailabilityModes": ["SameZone", "ZoneRedundant"]}]}
+    assert zc._has_zone_redundant_ha(ed) is True
+    ed2 = {"name": "Burstable", "supportedServerSkus": [
+        {"name": "B1ms", "supportedHighAvailabilityModes": ["SameZone"]}]}
+    assert zc._has_zone_redundant_ha(ed2) is False
+
+
+def test_fetch_flex_edition_state_parses(monkeypatch):
+    payload = {"value": [{
+        "zoneRedundantHaSupported": "Enabled",
+        "supportedServerEditions": [
+            {"name": "GeneralPurpose", "supportedServerSkus": [
+                {"name": "GP_D4ds_v5", "supportedHighAvailabilityModes": ["SameZone", "ZoneRedundant"]}]},
+            {"name": "Burstable", "supportedServerSkus": [
+                {"name": "B1ms", "supportedHighAvailabilityModes": ["SameZone"]}]},
+        ],
+    }]}
+    _mock_client(monkeypatch, payload)
+    state = zc.fetch_flex_edition_state(
+        provider="Microsoft.DBforPostgreSQL", arm_token="t", subscription_id="s", region="eastus")
+    assert state[zc._REGION_ZR_KEY]["value"] is True
+    assert state["generalpurpose"]["zone_redundant"] is True
+    assert state["burstable"]["zone_redundant"] is False
+
+
+def test_flex_verdict_blocked_when_region_disabled():
+    state = {zc._REGION_ZR_KEY: {"value": False}, "generalpurpose": {"zone_redundant": True}}
+    assert zc._flex_verdict(state, "GeneralPurpose")["verdict"] == "blocked"
+
+
+def test_flex_verdict_available_when_supported():
+    state = {zc._REGION_ZR_KEY: {"value": True}, "memoryoptimized": {"zone_redundant": True}}
+    assert zc._flex_verdict(state, "MemoryOptimized")["verdict"] == "available"
+
+
+def test_flex_verdict_blocked_when_edition_has_no_zr_sku():
+    state = {zc._REGION_ZR_KEY: {"value": None}, "generalpurpose": {"zone_redundant": False}}
+    assert zc._flex_verdict(state, "GeneralPurpose")["verdict"] == "blocked"
+
+
+def test_flex_verdict_unverifiable_on_empty():
+    assert zc._flex_verdict({}, "GeneralPurpose")["verdict"] == "unverifiable"
+
+
+def test_evaluate_flex_uses_provider_once(monkeypatch):
+    calls = {"n": 0}
+
+    def _fake(**k):
+        calls["n"] += 1
+        return {zc._REGION_ZR_KEY: {"value": True}, "generalpurpose": {"zone_redundant": True},
+                "memoryoptimized": {"zone_redundant": True}}
+
+    monkeypatch.setattr(zc, "fetch_flex_edition_state", _fake)
+    out = zc.evaluate(
+        services=[
+            {"name": "Azure Database for PostgreSQL", "tier": "general_purpose"},
+            {"name": "Azure Database for PostgreSQL", "tier": "memory_optimized"},
+        ],
+        region="eastus", arm_token="t", subscription_id="s",
+    )
+    assert calls["n"] == 1  # one round-trip per provider
+    assert all(v["verdict"] == "available" for v in out)
+    assert out[0]["source"] == "Flexible Server capabilities"

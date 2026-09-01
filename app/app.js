@@ -1233,6 +1233,8 @@ const _ZRS_LIVE_CHECKABLE = new Set([
   "Managed Disks (Premium SSD)",
   "Azure SQL Database",
   "Azure SQL Managed Instance",
+  "Azure Database for PostgreSQL",
+  "Azure Database for MySQL",
 ]);
 
 function _zrsKey(name, tier) { return `${name}||${tier}`; }
