@@ -1377,7 +1377,7 @@ function renderZrsReadinessSection(r) {
     return `<div class="key">${escapeHtml(s.name)} <span class="svc-tier-chip">${escapeHtml(s.tierLabel)}</span></div>` +
       `<div class="zrs-svc-slot" data-zrs-key="${escapeHtml(_zrsKey(s.name, s.tierId))}" data-zrs-svc-name="${escapeHtml(s.name)}" data-zrs-tier="${escapeHtml(s.tierId)}" data-zrs-live="${live ? "1" : "0"}" data-zrs-deep="${deep ? "1" : "0"}">${initial}</div>`;
   }).join("");
-  const legend = `<div class="note muted zrs-legend">✓ Verified deployable = confirmed live via an authoritative ARM capability/SKU API for your subscription. “region AZ” = documented Availability-Zone support only (no per-service API to verify).</div>`;
+  const legend = `<div class="note muted zrs-legend">✓ Verified deployable = confirmed live via an authoritative ARM capability/SKU API for your subscription. ✓ Verified deployable · pre-flight = confirmed by the deep check (a non-destructive ARM deployment validation — creates nothing, no cost); ⛔ Blocked · pre-flight flags a quota, SKU/zone or region restriction. “region AZ” = documented Availability-Zone support only — run the deep check below to verify.</div>`;
   const hasDeep = sels.some(s => _ZRS_DEEP_CHECKABLE.has(s.name));
   let deepBar = "";
   if (hasDeep && az !== false) {
