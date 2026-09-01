@@ -8120,6 +8120,99 @@ function _activeBomSubs() {
   return ids.length ? ids : (focusedSubscriptionId() ? [focusedSubscriptionId()] : []);
 }
 
+// ---------------------------------------------- Consolidated remediation plan
+// A cross-region view of every blocker grouped by the remediation action it
+// needs, with a typical Azure lead-time ETA and the affected regions. This
+// turns the per-region blocker list into an actionable, deduplicated plan.
+const _REMEDIATION_META = {
+  quota_insufficient: {
+    icon: "📊", label: "Request a quota increase",
+    eta: "Typically 1–3 business days", ticket: "quota",
+    how: "File a Compute-VM (cores/vCPUs) quota increase for the affected family.",
+  },
+  no_access: {
+    icon: "🔒", label: "Request zonal / restricted-SKU access",
+    eta: "Typically 3–5 business days", ticket: "technical",
+    how: "File a zonal access (subscription restriction) request for the SKU in the needed zones.",
+  },
+  zone_gap: {
+    icon: "⚠️", label: "Close an availability-zone gap",
+    eta: "Typically 3–5 business days", ticket: "technical",
+    how: "Request zonal access for the SKU, or accept the fallback SKU across all zones.",
+  },
+  sku_unavailable: {
+    icon: "⛔", label: "SKU not offered in region",
+    eta: "No ticket — choose an alternate region", ticket: "",
+    how: "This SKU isn't offered here. Pick an alternate region (see the region's suggestions) or a different family.",
+  },
+  missing_service: {
+    icon: "🚫", label: "Service not available in region",
+    eta: "No ticket — choose an alternate region", ticket: "",
+    how: "A required service isn't offered in this region. Deploy it in an alternate region.",
+  },
+  other: {
+    icon: "•", label: "Other checks to review",
+    eta: "Review manually", ticket: "",
+    how: "Open the region drilldown for details.",
+  },
+};
+
+function _buildRemediationPlan() {
+  const regions = (STATE.snapshot && STATE.snapshot.regions) || [];
+  const groups = new Map();
+  for (const r of regions) {
+    const dep = getDeploymentVerdictInfo(r);
+    (dep.blockers || []).forEach(b => {
+      const type = (b && b.type) || "other";
+      if (!groups.has(type)) groups.set(type, { type, regions: new Map(), messages: new Set() });
+      const g = groups.get(type);
+      g.regions.set(r.short || r.name, r.name);
+      if (b && b.message) g.messages.add(b.message);
+    });
+  }
+  // Order by remediation severity/priority.
+  const order = ["missing_service", "sku_unavailable", "no_access", "zone_gap", "quota_insufficient", "other"];
+  return order.filter(t => groups.has(t)).map(t => groups.get(t));
+}
+
+function _renderRemediationPlanHtml() {
+  const plan = _buildRemediationPlan();
+  if (!plan.length) {
+    return `<section class="support-section remediation-plan">
+      <h3>Remediation plan</h3>
+      <p class="muted">No blockers across the analyzed regions 🎉 Everything in your BOM can deploy as-is.</p>
+    </section>`;
+  }
+  const totalRegions = new Set();
+  plan.forEach(g => g.regions.forEach((_n, k) => totalRegions.add(k)));
+  const rows = plan.map(g => {
+    const meta = _REMEDIATION_META[g.type] || _REMEDIATION_META.other;
+    const regionChips = Array.from(g.regions.entries()).map(([short, name]) =>
+      `<button type="button" class="remedy-region-chip" data-remedy-region="${escapeHtml(short)}" data-remedy-kind="${meta.ticket}" title="${meta.ticket ? "Prefill a ticket for this region" : "Open region details"}">${escapeHtml(name)}</button>`
+    ).join("");
+    const action = meta.ticket
+      ? `<button type="button" class="btn btn--sm remedy-file-all" data-remedy-kind="${meta.ticket}" data-remedy-first="${escapeHtml(Array.from(g.regions.keys())[0] || "")}">File ${meta.ticket === "quota" ? "quota" : "access"} ticket →</button>`
+      : `<span class="muted">Alternate region recommended</span>`;
+    return `<tr>
+      <td class="remedy-action"><span class="remedy-icon">${meta.icon}</span> <strong>${escapeHtml(meta.label)}</strong>
+        <div class="remedy-how muted">${escapeHtml(meta.how)}</div></td>
+      <td class="remedy-eta">${escapeHtml(meta.eta)}</td>
+      <td class="remedy-regions">${regionChips}</td>
+      <td class="remedy-do">${action}</td>
+    </tr>`;
+  }).join("");
+  return `<section class="support-section remediation-plan">
+    <div class="support-section-head">
+      <h3>Remediation plan</h3>
+      <span class="muted">${plan.length} action type${plan.length === 1 ? "" : "s"} across ${totalRegions.size} region${totalRegions.size === 1 ? "" : "s"}</span>
+    </div>
+    <p class="muted">Every blocker grouped by the action it needs, with a typical Azure lead-time. Click a region to prefill its ticket.</p>
+    <table class="support-table remedy-table"><thead><tr>
+      <th>Action</th><th>Typical lead time</th><th>Affected regions</th><th></th>
+    </tr></thead><tbody>${rows}</tbody></table>
+  </section>`;
+}
+
 function _supportHtml() {
   const s = SUPPORT.settings || {};
   const demo = !!(APP_CONFIG && APP_CONFIG.demo_mode);
@@ -8170,6 +8263,8 @@ function _supportHtml() {
       or a <strong>zonal / restricted-SKU access</strong> ticket. Preview builds the exact request with no Azure call;
       submitting files it via <code>Microsoft.Support</code>.${demo ? " <strong>Demo mode: submission is disabled.</strong>" : ""}</p>
     </div>
+
+    ${_renderRemediationPlanHtml()}
 
     <section class="support-section">
       <div class="support-section-head">
@@ -8478,6 +8573,7 @@ async function _supportCreate(dryRun) {
       showToast("Preview built (no Azure call).", "success");
     } else {
       showToast(`Ticket submitted: ${ticket.azure_ticket_id || ticket.ticket_name}`, "success");
+      _autoRecheckAfterTicket(body.kind, body.region, body.subscription_id);
     }
     await _supportReloadTickets();
   } catch (e) {
@@ -8493,6 +8589,35 @@ async function _supportReloadTickets() {
     _updateSupportBadge();
     _supportLoadAzureTickets();
   } catch (e) { /* ignore */ }
+}
+
+// After a ticket is filed, automatically re-verify the affected region so the
+// dashboard reflects the new state as soon as access is granted. Zonal/SKU
+// access tickets are re-checked live (the authoritative capability API); quota
+// tickets need a full analysis re-run, so we tell the user rather than imply a
+// live confirmation we can't make.
+async function _autoRecheckAfterTicket(kind, regionShort, sub) {
+  const region = _findRegionByShort(regionShort);
+  if (!region) return;
+  const subId = sub || focusedSubscriptionId() || "";
+  if (kind === "technical") {
+    const key = `${String(regionShort).toLowerCase()}|${subId}`;
+    delete PRICING.zonalCap[key];  // force a fresh probe (don't reuse cached "blocked")
+    showToast(`Re-checking ${region.name} live…`, "info");
+    try { await _verifyZonalForRegion(region); } catch (_e) {}
+    applyFilters();
+    _persistVerifyAll(subId).catch(() => {});
+    const entry = PRICING.zonalCap[key];
+    const stillBlocked = entry && entry.map && Object.values(entry.map)
+      .some(v => v && (v.verdict === "blocked" || v.verdict === "unavailable"));
+    if (entry && entry.status === "done") {
+      showToast(stillBlocked
+        ? `${region.name}: still restricted — access usually takes 3–5 business days to apply.`
+        : `${region.name}: access looks granted — verdict updated ✅`, stillBlocked ? "warning" : "success");
+    }
+  } else if (kind === "quota") {
+    showToast(`${region.name}: quota changes apply after approval — re-run analysis to refresh quota verdicts.`, "info");
+  }
 }
 
 async function _supportSaveSettings() {
@@ -8645,6 +8770,23 @@ function _wireSupportTab(view) {
     const btn = ev.target.closest("[data-prefill]");
     if (!btn) return;
     _supportPrefill(btn.getAttribute("data-prefill"), btn.getAttribute("data-region"));
+  });
+
+  // Remediation plan: region chips + "File ticket" buttons prefill the form.
+  const remedy = view.querySelector(".remediation-plan");
+  if (remedy) remedy.addEventListener("click", (ev) => {
+    const chip = ev.target.closest("[data-remedy-region]");
+    if (chip) {
+      const kind = chip.getAttribute("data-remedy-kind");
+      const region = chip.getAttribute("data-remedy-region");
+      if (kind) _supportPrefill(kind, region);
+      else { const r = _findRegionByShort(region); if (r) { switchView("regions"); openDrilldown(r); } }
+      return;
+    }
+    const fileBtn = ev.target.closest(".remedy-file-all");
+    if (fileBtn) {
+      _supportPrefill(fileBtn.getAttribute("data-remedy-kind"), fileBtn.getAttribute("data-remedy-first"));
+    }
   });
 }
 

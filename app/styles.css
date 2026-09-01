@@ -1405,6 +1405,24 @@ table.region-table tbody tr.selected td { background: var(--ms-blue-light); }
 .br-remedy--ok { color: #1a8f52; }
 .br-open { align-self: flex-start; margin-top: 4px; }
 
+/* Consolidated remediation plan (Support tab) */
+.remediation-plan .remedy-table td { vertical-align: top; }
+.remedy-action { max-width: 320px; }
+.remedy-icon { font-size: 14px; }
+.remedy-how { font-size: 12px; margin-top: 3px; }
+.remedy-eta { white-space: nowrap; font-size: 13px; }
+.remedy-regions { display: flex; flex-wrap: wrap; gap: 5px; }
+.remedy-region-chip {
+  font-size: 12px;
+  padding: 2px 9px;
+  border-radius: 9px;
+  border: 1px solid rgba(90,120,180,.35);
+  background: rgba(90,120,180,.1);
+  color: var(--text, inherit);
+  cursor: pointer;
+}
+.remedy-region-chip:hover { background: rgba(90,120,180,.22); }
+
 /* =========================================================================
    Map
    ========================================================================= */
