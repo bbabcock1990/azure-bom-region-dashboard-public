@@ -1339,6 +1339,32 @@ table.region-table tbody tr.selected td { background: var(--ms-blue-light); }
 #drilldown .dd-prov-list { margin: 6px 0 0; padding-left: 18px; }
 #drilldown .dd-prov-list li { margin: 2px 0; font-size: 12px; }
 
+/* Verify-all scan toolbar + progress */
+.verify-all-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 10px;
+  flex-wrap: wrap;
+}
+.verify-all-note { font-size: 12px; color: var(--text-secondary); }
+.verify-progress { display: flex; align-items: center; gap: 8px; flex: 1 1 220px; min-width: 180px; }
+.verify-progress-track {
+  flex: 1 1 auto;
+  height: 8px;
+  background: rgba(120,120,120,.18);
+  border-radius: 5px;
+  overflow: hidden;
+}
+.verify-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #4a6bb0, #22a05a);
+  border-radius: 5px;
+  transition: width .25s ease;
+}
+.verify-progress-label { font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
+
 /* =========================================================================
    Map
    ========================================================================= */

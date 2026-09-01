@@ -2089,6 +2089,7 @@ def compile_snapshot(
     )
 
     snapshot_meta = {
+        "run_id": run_id,
         "subscription_id": subscription_id,
         "subscription_ids": [s["subscription_id"] for s in subscriptions],
         "per_sub_status": per_sub_status,

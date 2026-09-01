@@ -313,6 +313,7 @@ async function loadSnapshot(runId) {
   if (STATE.view === "quota") renderQuotaTab();
   fetchPricingEstimate();
   ensureZrsRefData();
+  _hydrateVerifyAll().catch(() => {});
 }
 
 // Preload the reference data the ZRS (zone-redundancy) readiness check needs:
@@ -1507,6 +1508,169 @@ async function _verifyZonalForRegion(r) {
   }
 }
 
+// ------------------------------------------------------ Verify-all scan
+// A read-only, throttle-aware batch that runs the live zone-redundancy probe
+// across every region to raise verdict confidence. Creates nothing (calls the
+// same /api/bom/zonal-capability endpoint used by a single drilldown).
+const _verifyAll = { running: false, cancel: false };
+
+function _sleep(ms) { return new Promise(res => setTimeout(res, ms)); }
+
+// Resolve one region's live entry in place, with bounded 429/5xx backoff.
+async function _fetchZonalEntryInto(entry, r, sub, checkable) {
+  const maxAttempts = 4;
+  const body = JSON.stringify({
+    subscription_id: sub,
+    region: r.short,
+    services: checkable.map(s => ({ name: s.name, tier: s.tierId })),
+  });
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const resp = await apiJson("/api/bom/zonal-capability", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+      });
+      entry.status = "done";
+      entry.map = {};
+      (resp.results || []).forEach(v => { entry.map[_zrsKey(v.name, v.tier)] = v; });
+      entry.ts = new Date().toISOString().replace("T", " ").slice(0, 16) + " UTC";
+      return entry;
+    } catch (e) {
+      const code = e && e.status;
+      if ((code === 429 || code === 502 || code === 503 || code === 504) && attempt < maxAttempts) {
+        await _sleep(600 * Math.pow(2, attempt - 1) + Math.random() * 300);
+        continue;
+      }
+      entry.status = "error";
+      entry.error = e;
+      return entry;
+    }
+  }
+  return entry;
+}
+
+function _setVerifyAllUI(running) {
+  const btn = document.getElementById("btn-verify-all");
+  const cancel = document.getElementById("btn-verify-cancel");
+  const prog = document.getElementById("verify-progress");
+  if (btn) btn.classList.toggle("hidden", running);
+  if (cancel) cancel.classList.toggle("hidden", !running);
+  if (prog) prog.classList.toggle("hidden", !running);
+}
+
+function _updateVerifyProgress(done, total) {
+  const fill = document.getElementById("verify-progress-fill");
+  const label = document.getElementById("verify-progress-label");
+  const pct = total ? Math.round((done / total) * 100) : 0;
+  if (fill) fill.style.width = `${pct}%`;
+  if (label) label.textContent = `${done}/${total} regions`;
+}
+
+async function verifyAllRegions() {
+  if (_verifyAll.running) return;
+  const noteEl = document.getElementById("verify-all-note");
+  const sub = focusedSubscriptionId() || "";
+  const sels = _zrsCapableSelections();
+  const checkable = sels.filter(s => _ZRS_LIVE_CHECKABLE.has(s.name));
+  const regions = (STATE.snapshot && STATE.snapshot.regions) || [];
+  if (!sub) { if (noteEl) noteEl.textContent = "Select a subscription first to run live verification."; return; }
+  if (!checkable.length) { if (noteEl) noteEl.textContent = "This BOM has no live-verifiable zone-redundant services."; return; }
+  if (!regions.length) return;
+
+  // Resumable: skip regions already verified for this subscription.
+  const todo = regions.filter(r => {
+    const c = PRICING.zonalCap[`${String(r.short).toLowerCase()}|${sub}`];
+    return !(c && c.status === "done");
+  });
+
+  _verifyAll.running = true;
+  _verifyAll.cancel = false;
+  _setVerifyAllUI(true);
+  if (noteEl) noteEl.textContent = "";
+  const total = regions.length;
+  let done = total - todo.length;
+  _updateVerifyProgress(done, total);
+
+  const CONC = 4;
+  let idx = 0;
+  const worker = async () => {
+    while (idx < todo.length && !_verifyAll.cancel) {
+      const r = todo[idx++];
+      const key = `${String(r.short).toLowerCase()}|${sub}`;
+      const entry = { status: "loading", map: {} };
+      PRICING.zonalCap[key] = entry;
+      await _fetchZonalEntryInto(entry, r, sub, checkable);
+      done++;
+      _updateVerifyProgress(done, total);
+      if (String(STATE.activeDrilldownRegion || "").toLowerCase() === String(r.short).toLowerCase()) {
+        _patchZonalCapability(r.short, entry);
+      }
+    }
+  };
+  const pool = [];
+  for (let i = 0; i < Math.min(CONC, todo.length); i++) pool.push(worker());
+  await Promise.all(pool);
+
+  const cancelled = _verifyAll.cancel;
+  _verifyAll.running = false;
+  _setVerifyAllUI(false);
+  applyFilters();
+  _persistVerifyAll(sub).catch(() => {});
+  if (noteEl) {
+    noteEl.textContent = cancelled
+      ? `Stopped — ${done}/${total} regions verified.`
+      : `Verified ${done}/${total} regions · ${new Date().toLocaleTimeString()}`;
+  }
+}
+
+function cancelVerifyAll() {
+  if (_verifyAll.running) _verifyAll.cancel = true;
+}
+
+// Persist verified live results so a page reload / snapshot re-open keeps the
+// raised confidence. Keyed by run_id + subscription; best-effort (ignored if
+// the backend store is unavailable).
+async function _persistVerifyAll(sub) {
+  const runId = (STATE.snapshot && STATE.snapshot.meta && STATE.snapshot.meta.run_id)
+    || (STATE.snapshot && STATE.snapshot.run_id) || "";
+  if (!runId || !sub) return;
+  const results = {};
+  Object.keys(PRICING.zonalCap).forEach(k => {
+    const [regionKey, keySub] = k.split("|");
+    const entry = PRICING.zonalCap[k];
+    if (keySub === sub && entry && entry.status === "done") {
+      results[regionKey] = { map: entry.map, ts: entry.ts };
+    }
+  });
+  if (!Object.keys(results).length) return;
+  try {
+    await apiJson("/api/bom/zonal-verifications", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ run_id: runId, subscription_id: sub, results }),
+    });
+  } catch (e) { /* best-effort */ }
+}
+
+// Rehydrate previously-persisted live results into PRICING.zonalCap when a
+// snapshot loads, so confidence survives reloads.
+async function _hydrateVerifyAll() {
+  const runId = (STATE.snapshot && STATE.snapshot.meta && STATE.snapshot.meta.run_id)
+    || (STATE.snapshot && STATE.snapshot.run_id) || "";
+  const sub = focusedSubscriptionId() || "";
+  if (!runId || !sub) return;
+  try {
+    const data = await apiJson(`/api/bom/zonal-verifications?run_id=${encodeURIComponent(runId)}&subscription_id=${encodeURIComponent(sub)}`);
+    const results = (data && data.results) || {};
+    Object.keys(results).forEach(regionKey => {
+      const rec = results[regionKey] || {};
+      PRICING.zonalCap[`${regionKey}|${sub}`] = { status: "done", map: rec.map || {}, ts: rec.ts, hydrated: true };
+    });
+    if (Object.keys(results).length) applyFilters();
+  } catch (e) { /* no persisted results yet */ }
+}
+
 // Opt-in, non-destructive deep deployability check (ARM validate — creates
 // nothing). Runs only on explicit user action + confirmation, for the
 // zone-redundant selections that have no read-only capability API (see
@@ -1551,6 +1715,17 @@ async function _runZrsDeepCheck(regionShort) {
     const az = _regionSupportsAz(r);
     const map = {};
     (resp.results || []).forEach(v => { map[_zrsKey(v.name, v.tier)] = v; });
+    // Merge deep-check verdicts into the live cache so verdict confidence and
+    // the verify-all scan consider them (keys never collide: a service is
+    // live-checkable XOR deep-checkable).
+    const cacheKey = `${String(r.short).toLowerCase()}|${sub}`;
+    const prev = PRICING.zonalCap[cacheKey];
+    const mergedMap = Object.assign({}, (prev && prev.map) || {}, map);
+    PRICING.zonalCap[cacheKey] = {
+      status: "done",
+      map: mergedMap,
+      ts: new Date().toISOString().replace("T", " ").slice(0, 16) + " UTC",
+    };
     document.querySelectorAll(".zrs-svc-slot[data-zrs-deep='1']").forEach((slot) => {
       const key = slot.getAttribute("data-zrs-key");
       const v = map[key];
@@ -1559,6 +1734,9 @@ async function _runZrsDeepCheck(regionShort) {
     const blocked = (resp.results || []).filter(v => v.verdict === "blocked").length;
     if (blocked) showToast(`Deep check complete — ${blocked} tier(s) blocked. Use “Create ticket” to request access.`, "warn");
     else showToast("Deep check complete — no blockers found.", "success");
+    // Reflect merged verdicts in the headline verdict + region table.
+    _patchZonalCapability(r.short, PRICING.zonalCap[cacheKey]);
+    applyFilters();
   } catch (e) {
     document.querySelectorAll(".zrs-svc-slot[data-zrs-deep='1']").forEach((slot) => {
       slot.innerHTML = `<span class="zrs-mark warn">⚠️ Deep check failed</span>`;
@@ -8425,6 +8603,8 @@ function init() {
   if (pricingSaveBtn) pricingSaveBtn.addEventListener("click", savePricingSettings);
   document.getElementById("btn-export-csv").addEventListener("click", exportCsv);
   document.getElementById("btn-export-xlsx").addEventListener("click", exportXlsx);
+  { const vb = document.getElementById("btn-verify-all"); if (vb) vb.addEventListener("click", verifyAllRegions); }
+  { const vc = document.getElementById("btn-verify-cancel"); if (vc) vc.addEventListener("click", cancelVerifyAll); }
   document.getElementById("drilldown-overlay").addEventListener("click", closeDrilldown);
   document.addEventListener("click", _handleRegisterProviderInteraction);
   document.getElementById("latency-source").addEventListener("change", refreshLatencyChart);

@@ -188,6 +188,15 @@
     </div>
 
     <div class="view hidden" id="view-table">
+      <div class="verify-all-bar" id="verify-all-bar">
+        <button id="btn-verify-all" class="btn btn--sm btn--primary" type="button" title="Run a read-only live zone-redundancy probe across every region to raise confidence. Creates nothing.">⚡ Verify all regions</button>
+        <button id="btn-verify-cancel" class="btn btn--sm hidden" type="button">Cancel</button>
+        <div class="verify-progress hidden" id="verify-progress">
+          <div class="verify-progress-track"><div class="verify-progress-fill" id="verify-progress-fill"></div></div>
+          <span class="verify-progress-label" id="verify-progress-label"></span>
+        </div>
+        <span class="verify-all-note" id="verify-all-note"></span>
+      </div>
       <table class="regions" id="regions-table">
         <thead>
           <tr>
