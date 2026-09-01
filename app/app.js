@@ -1719,9 +1719,11 @@ function renderTable() {
     tr.dataset.region = r.name;
     const deployment = getDeploymentVerdictInfo(r);
 
-    const zoneHtml = r.zone_health.map((z, i) =>
-      `<span class="zone-cell ${z}" title="AZ${i + 1}: ${z === "green" ? "OK" : "Blocked"}">${i + 1}</span>`
-    ).join("");
+    const zoneHtml = _regionSupportsAz(r) === false
+      ? `<span class="zone-noaz" title="This region has no Availability Zones — resources are regional (single-zone) only.">Regional only</span>`
+      : r.zone_health.map((z, i) =>
+          `<span class="zone-cell ${z}" title="AZ${i + 1}: ${z === "green" ? "OK" : "Blocked"}">${i + 1}</span>`
+        ).join("");
 
     let quotaCellHtml = "";
     if (showQuotaCol) {
@@ -1797,7 +1799,13 @@ function openDrilldown(r) {
     html += _ddSection("Zone-redundancy (ZRS/HA) readiness", zrsSection, { badge: zrsBadge });
   }
 
-  if (r.sku_zone_detail && Object.keys(r.sku_zone_detail).length) {
+  const _noAz = _regionSupportsAz(r) === false;
+  if (_noAz) {
+    // Region has no Availability Zones — per-AZ red/green grids are
+    // meaningless here, so replace them with an explicit regional-only note.
+    const zhHtml = `<div class="note danger"><strong>Regional only — no Availability Zones.</strong> ${escapeHtml(r.name)} does not offer Availability Zones, so zone-redundant (ZRS/HA, multi-AZ) deployments aren't possible here. Resources are single-zone (locally redundant) only. Choose an AZ-enabled region if your BOM requires zone redundancy.</div>`;
+    html += _ddSection("Zone Availability", zhHtml);
+  } else if (r.sku_zone_detail && Object.keys(r.sku_zone_detail).length) {
     // Determine which SKU families are BOM primary vs fallback
     const reqs = _getCoresRequirements(STATE.snapshot || {});
     const primaryLabels = new Set(reqs.map(rq => (rq.primary_label || "").toLowerCase()));
@@ -4864,13 +4872,16 @@ function renderCompareSlot(slot) {
 // ---------------------------------------------------------------- Export
 
 function buildExportRows() {
-  return STATE.filtered.map(r => ({
+  return STATE.filtered.map(r => {
+    const noAz = _regionSupportsAz(r) === false;
+    return {
     Region: r.name,
     Country: r.country,
     Geo: r.geo,
-    "AZ1 Health": r.zone_health[0],
-    "AZ2 Health": r.zone_health[1],
-    "AZ3 Health": r.zone_health[2],
+    "AZ Support": noAz ? "Regional only (no AZs)" : "AZ-enabled",
+    "AZ1 Health": noAz ? "n/a" : r.zone_health[0],
+    "AZ2 Health": noAz ? "n/a" : r.zone_health[1],
+    "AZ3 Health": noAz ? "n/a" : r.zone_health[2],
     Status: r.status,
     "SKU Recommendation": r.recommendation,
     "Chosen SKUs": (r.chosen_skus || []).join("; "),
@@ -4879,7 +4890,8 @@ function buildExportRows() {
     "Missing Services": (r.missing_services || []).map(m => `${m.service}: ${m.detail}`).join(" | "),
     "Zone Restrictions": (r.zone_restrictions || []).map((rest, i) => rest ? `AZ${i + 1}: ${rest}` : "").filter(Boolean).join(" | "),
     "Alternative Regions": (r.alt_regions || []).map(a => a.latency_ms != null ? `${a.region} (${a.latency_ms}ms)` : a.region).join("; "),
-  }));
+  };
+  });
 }
 
 function exportCsv() {

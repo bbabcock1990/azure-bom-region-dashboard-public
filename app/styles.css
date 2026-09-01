@@ -1102,6 +1102,19 @@ table.region-table tbody tr.selected td { background: var(--ms-blue-light); }
 .zone-cell.green { background: var(--green); }
 .zone-cell.red   { background: var(--brand-red); }
 
+.zone-noaz {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted, #9aa4b2);
+  background: rgba(154, 164, 178, .12);
+  border: 1px dashed rgba(154, 164, 178, .45);
+  border-radius: 4px;
+  padding: 2px 8px;
+  white-space: nowrap;
+  cursor: help;
+}
+
 .status-pill {
   font-size: 11px;
   padding: 3px 10px;
