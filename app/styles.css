@@ -1423,6 +1423,72 @@ table.region-table tbody tr.selected td { background: var(--ms-blue-light); }
 }
 .remedy-region-chip:hover { background: rgba(90,120,180,.22); }
 
+/* Best-region panel header actions + confidence legend */
+.br-header-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.br-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.br-legend-btn {
+  font-size: 12px;
+  border: 1px solid rgba(90,120,180,.4);
+  background: rgba(90,120,180,.1);
+  color: var(--text-secondary);
+  border-radius: 8px;
+  padding: 1px 8px;
+  margin-left: 8px;
+  cursor: pointer;
+  vertical-align: middle;
+}
+.br-legend-btn:hover { background: rgba(90,120,180,.2); }
+
+.conf-legend-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,.45);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1000;
+}
+.conf-legend-overlay.hidden { display: none; }
+.conf-legend-modal {
+  background: var(--panel-bg, #1e1e1e);
+  color: var(--text, #fff);
+  border: 1px solid var(--border, rgba(120,120,120,.3));
+  border-radius: 12px;
+  padding: 18px 20px;
+  max-width: 560px;
+  width: calc(100% - 40px);
+  box-shadow: 0 12px 40px rgba(0,0,0,.4);
+}
+.conf-legend-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.conf-legend-close { background: none; border: none; font-size: 16px; cursor: pointer; color: var(--text-secondary); }
+.conf-legend-list { list-style: none; padding: 0; margin: 10px 0; display: flex; flex-direction: column; gap: 10px; }
+.conf-legend-list li { display: grid; grid-template-columns: 120px 1fr; gap: 10px; align-items: start; }
+.conf-legend-desc { font-size: 13px; color: var(--text-secondary); }
+.conf-legend-foot { margin-top: 8px; font-size: 12px; }
+
+/* Overview cockpit strip */
+.overview-cockpit { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 14px; }
+.cockpit-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 13px;
+  padding: 6px 12px;
+  border-radius: 9px;
+  border: 1px solid var(--border, rgba(120,120,120,.25));
+  background: var(--card-bg, rgba(255,255,255,.02));
+}
+.cockpit-chip.cockpit-ok { border-color: rgba(34,160,90,.4); }
+.cockpit-chip.cockpit-warn { border-color: rgba(200,140,20,.45); background: rgba(200,140,20,.08); }
+.cockpit-ok-text { color: #1a8f52; }
+.cockpit-bad-text { color: #c33; }
+.cockpit-nudge {
+  margin-left: 8px;
+  font-size: 12px;
+  border: none;
+  background: rgba(200,140,20,.2);
+  color: #b8860b;
+  border-radius: 7px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.cockpit-nudge:hover { background: rgba(200,140,20,.32); }
+
 /* =========================================================================
    Map
    ========================================================================= */

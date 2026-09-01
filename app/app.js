@@ -815,6 +815,7 @@ function applyFilters() {
   refreshMap();
   renderOverviewCharts();
   renderBestRegionPanel();
+  renderOverviewCockpit();
   renderOverviewReco();
   updateStats();
 }
@@ -7982,7 +7983,15 @@ function renderBestRegionPanel() {
 
   el.innerHTML = `
     <div class="br-header">
-      <div class="br-title">Best regions for your BOM</div>
+      <div class="br-header-top">
+        <div class="br-title">Best regions for your BOM
+          <button type="button" class="br-legend-btn" id="br-legend-btn" title="What do the confidence levels mean?">ⓘ Confidence</button>
+        </div>
+        <div class="br-actions">
+          <button type="button" class="btn btn--sm" id="br-verify-cta" title="Run a read-only live probe across all regions to raise confidence">⚡ Raise confidence</button>
+          <button type="button" class="btn btn--sm btn--primary" id="br-deploy-plan" title="Download a customer-ready deployment plan">📄 Deploy plan</button>
+        </div>
+      </div>
       <div class="br-lead">${heading} <span class="br-sub">ranked by readiness, confidence, quota, latency & cost</span></div>
     </div>
     <div class="br-cards">${cards}</div>`;
@@ -7993,6 +8002,203 @@ function renderBestRegionPanel() {
       const region = _findRegionByShort(short);
       if (region) openDrilldown(region);
     });
+  });
+  const legendBtn = document.getElementById("br-legend-btn");
+  if (legendBtn) legendBtn.addEventListener("click", _openConfidenceLegend);
+  const verifyCta = document.getElementById("br-verify-cta");
+  if (verifyCta) verifyCta.addEventListener("click", () => {
+    switchView("regions");
+    if (typeof switchRegionsSub === "function") switchRegionsSub("table");
+    verifyAllRegions();
+  });
+  const planBtn = document.getElementById("br-deploy-plan");
+  if (planBtn) planBtn.addEventListener("click", exportDeployPlan);
+}
+
+// -------------------------------------------------- Confidence legend popover
+const _CONF_LEGEND = [
+  { cls: "conf-validated", text: "Verified live", desc: "A live per-subscription check confirmed the constrained tiers can (or cannot) deploy. Highest confidence." },
+  { cls: "conf-capability", text: "ARM metadata", desc: "Backed by ARM SKU / provider / quota metadata from the last analysis. Run “Raise confidence” for a live confirmation." },
+  { cls: "conf-metadata", text: "Baseline", desc: "Region/BOM baseline only — no ARM capability data. Re-run analysis for full signals." },
+  { cls: "conf-unverifiable", text: "Unverifiable", desc: "A live check was attempted but couldn’t determine deployability (restricted subscription, throttling, or no authoritative API). Treat with caution." },
+];
+
+function _openConfidenceLegend() {
+  let overlay = document.getElementById("conf-legend-overlay");
+  if (overlay) { overlay.classList.remove("hidden"); return; }
+  overlay = document.createElement("div");
+  overlay.id = "conf-legend-overlay";
+  overlay.className = "conf-legend-overlay";
+  const rows = _CONF_LEGEND.map(t =>
+    `<li><span class="conf-badge ${t.cls}">${escapeHtml(t.text)}</span><span class="conf-legend-desc">${escapeHtml(t.desc)}</span></li>`
+  ).join("");
+  overlay.innerHTML = `<div class="conf-legend-modal" role="dialog" aria-label="Confidence levels">
+      <div class="conf-legend-head">
+        <strong>How confident is each verdict?</strong>
+        <button type="button" class="conf-legend-close" aria-label="Close">✕</button>
+      </div>
+      <p class="muted">Verdicts are graded by the strength of the evidence behind them:</p>
+      <ul class="conf-legend-list">${rows}</ul>
+      <p class="muted conf-legend-foot">Use <strong>⚡ Raise confidence</strong> to run read-only live probes across every region — it creates nothing.</p>
+    </div>`;
+  document.body.appendChild(overlay);
+  const close = () => overlay.classList.add("hidden");
+  overlay.addEventListener("click", (ev) => { if (ev.target === overlay) close(); });
+  overlay.querySelector(".conf-legend-close").addEventListener("click", close);
+}
+
+// ------------------------------------------------------ Deploy plan (export)
+// A customer-ready Markdown plan: chosen region + runner-ups, per-region
+// verdict/confidence, the consolidated remediation plan with ETAs, and any
+// filed support tickets. This is the artifact a customer hands to their cloud
+// team to actually execute the deployment.
+function _mdEscape(s) { return String(s == null ? "" : s).replace(/\|/g, "\\|"); }
+
+function exportDeployPlan() {
+  const snap = STATE.snapshot;
+  const regions = (snap && snap.regions) || [];
+  if (!regions.length) { showToast("Run an analysis first — no regions to plan.", "warning"); return; }
+  const meta = (snap && snap.meta) || {};
+  const ranked = _rankRegionsForBom();
+  const best = ranked[0];
+  const genDate = _quotaRemediationGeneratedDate(snap);
+  const bomName = (STATE.activeBomId && typeof getBomMeta === "function" && (getBomMeta(STATE.activeBomId) || {}).name)
+    || meta.customer_name || "Azure BOM";
+  const subLabel = _supportSubLabel(focusedSubscriptionId());
+  const cur = (PRICING.estimate && PRICING.estimate.currency) || "USD";
+
+  const L = [];
+  L.push(`# Azure Deployment Plan — ${bomName}`);
+  L.push("");
+  L.push(`- **Generated:** ${genDate}`);
+  L.push(`- **Subscription:** ${subLabel}`);
+  if (meta.customer_name) L.push(`- **Customer:** ${meta.customer_name}`);
+  L.push(`- **Regions analyzed:** ${regions.length}`);
+  L.push("");
+
+  // Recommendation
+  L.push(`## Recommendation`);
+  if (best) {
+    const clean = best.verdictRank === 0;
+    L.push(clean
+      ? `**Deploy to ${best.r.name}** — it meets every requirement in your BOM.`
+      : `**${best.r.name}** is the closest fit, but no region is fully clean. Address the items below or accept the noted constraints.`);
+    L.push("");
+    L.push(`| Rank | Region | Verdict | Confidence | Quota | AZs | Est. $/mo | To address |`);
+    L.push(`|------|--------|---------|-----------|-------|-----|-----------|-----------|`);
+    ranked.slice(0, 5).forEach((s, i) => {
+      const cb = _confidenceBadge(s.dep);
+      const quotaTxt = { sufficient: "OK", insufficient: "Short", unknown: "Unknown" }[s.quotaBucket] || "Unknown";
+      const az = s.azRank ? "No AZs" : "AZ-enabled";
+      const cost = s.cost ? _fmtMoney(s.cost, cur) : "—";
+      L.push(`| ${i === 0 ? "★ 1" : i + 1} | ${_mdEscape(s.r.name)} | ${_mdEscape(s.dep.text)} | ${_mdEscape(cb.text)} | ${quotaTxt} | ${az} | ${cost} | ${s.remediation} |`);
+    });
+    L.push("");
+  }
+
+  // Remediation plan
+  const plan = _buildRemediationPlan();
+  L.push(`## Remediation plan`);
+  if (!plan.length) {
+    L.push(`No blockers across the analyzed regions — the BOM can deploy as-is. 🎉`);
+  } else {
+    L.push(`| Action | Typical lead time | Affected regions |`);
+    L.push(`|--------|-------------------|------------------|`);
+    plan.forEach(g => {
+      const m = _REMEDIATION_META[g.type] || _REMEDIATION_META.other;
+      const rgs = Array.from(g.regions.values()).join(", ");
+      L.push(`| ${_mdEscape(m.label)} | ${_mdEscape(m.eta)} | ${_mdEscape(rgs)} |`);
+    });
+    L.push("");
+    L.push(`> Lead times are typical Azure turnarounds and vary by region, SKU and subscription.`);
+  }
+  L.push("");
+
+  // Filed tickets
+  const tickets = (SUPPORT.tickets || []).filter(t => {
+    const st = String(t.status || "").toLowerCase();
+    return st && st !== "preview" && st !== "draft";
+  });
+  if (tickets.length) {
+    L.push(`## Support tickets filed`);
+    L.push(`| Ticket | Type | Status | Created |`);
+    L.push(`|--------|------|--------|---------|`);
+    tickets.forEach(t => {
+      L.push(`| ${_mdEscape(t.azure_ticket_id || t.ticket_name || "—")} | ${_mdEscape(t.kind || t.type || "—")} | ${_mdEscape(t.azure_status || t.status || "—")} | ${_mdEscape((t.created_at || "").slice(0, 10))} |`);
+    });
+    L.push("");
+  }
+
+  L.push(`---`);
+  L.push(`_Generated by the Azure BOM Region Support Dashboard. Verdicts reflect ARM capability metadata plus any live per-subscription verifications; confirm with a fresh analysis before deploying._`);
+
+  const blob = new Blob([L.join("\n")], { type: "text/markdown" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `deploy-plan-${snapshotStamp()}.md`;
+  a.click();
+  URL.revokeObjectURL(url);
+  showToast("Deploy plan downloaded (Markdown).", "success");
+}
+
+// -------------------------------------------------- Overview cockpit strip
+// A compact strip above the donuts: snapshot freshness (with a stale nudge)
+// and quota headroom at a glance, so the customer sees trust + capacity
+// without leaving the Overview.
+function _snapshotAgeDays(snap) {
+  const meta = (snap && snap.meta) || {};
+  const iso = meta.compiled_at || meta.created_at || "";
+  if (!iso) return null;
+  const dt = new Date(iso);
+  if (Number.isNaN(dt.getTime())) return null;
+  return Math.floor((Date.now() - dt.getTime()) / 86400000);
+}
+
+function renderOverviewCockpit() {
+  const el = document.getElementById("overview-cockpit");
+  if (!el) return;
+  const snap = STATE.snapshot;
+  const regions = (snap && snap.regions) || [];
+  if (!regions.length) { el.classList.add("hidden"); el.innerHTML = ""; return; }
+
+  const ageDays = _snapshotAgeDays(snap);
+  const stale = ageDays != null && ageDays >= 7;
+  let freshTxt, freshCls;
+  if (ageDays == null) { freshTxt = "Freshness unknown"; freshCls = "cockpit-warn"; }
+  else if (ageDays <= 0) { freshTxt = "Analyzed today"; freshCls = "cockpit-ok"; }
+  else if (ageDays === 1) { freshTxt = "Analyzed yesterday"; freshCls = "cockpit-ok"; }
+  else { freshTxt = `Analyzed ${ageDays} days ago`; freshCls = stale ? "cockpit-warn" : "cockpit-ok"; }
+
+  let suff = 0, insuff = 0, unk = 0;
+  regions.forEach(r => {
+    const b = _quotaFilterBucket(r);
+    if (b === "sufficient") suff++;
+    else if (b === "insufficient") insuff++;
+    else unk++;
+  });
+
+  // Live-verification coverage for the focused subscription.
+  const sub = focusedSubscriptionId() || "";
+  let verified = 0;
+  regions.forEach(r => {
+    const c = PRICING.zonalCap[`${String(r.short).toLowerCase()}|${sub}`];
+    if (c && c.status === "done") verified++;
+  });
+
+  const staleNudge = stale
+    ? `<button type="button" class="cockpit-nudge" id="cockpit-verify">Raise confidence →</button>`
+    : "";
+  el.innerHTML = `
+    <div class="cockpit-chip ${freshCls}" title="Snapshot age from the last analysis">🕒 ${escapeHtml(freshTxt)}${staleNudge}</div>
+    <div class="cockpit-chip" title="Quota verdicts across analyzed regions">📊 Quota: <strong class="cockpit-ok-text">${suff}</strong> OK · <strong class="cockpit-bad-text">${insuff}</strong> short · ${unk} unknown</div>
+    <div class="cockpit-chip" title="Regions confirmed by a live per-subscription probe">⚡ Live-verified: <strong>${verified}</strong>/${regions.length}</div>`;
+  el.classList.remove("hidden");
+  const nudge = document.getElementById("cockpit-verify");
+  if (nudge) nudge.addEventListener("click", () => {
+    switchView("regions");
+    if (typeof switchRegionsSub === "function") switchRegionsSub("table");
+    verifyAllRegions();
   });
 }
 
