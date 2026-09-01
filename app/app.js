@@ -1427,6 +1427,23 @@ function _patchZonalCapability(regionShort, entry) {
       pillEl.textContent = pill.text;
     }
   }
+  // Once live ZRS/HA results resolve, a restricted required tier must be
+  // reflected in the headline Deployment Readiness verdict (not just its own
+  // pill). Re-render the deployment section + pill for the active region.
+  if (String(STATE.activeDrilldownRegion || "").toLowerCase() === String(regionShort || "").toLowerCase()) {
+    const region = _findRegionByShort(regionShort);
+    if (region) {
+      const dep = getDeploymentVerdictInfo(region);
+      const secEl = document.getElementById("dd-deploy-section");
+      if (secEl) secEl.innerHTML = renderDeploymentReadinessSection(region, dep);
+      const depPill = document.getElementById("dd-deploy-pill");
+      if (depPill) {
+        depPill.className = `pill ${dep.cls}`;
+        depPill.title = dep.title;
+        depPill.textContent = dep.text;
+      }
+    }
+  }
 }
 
 // Kick off (or reuse cached) live zone-redundancy verification for the current
@@ -1773,9 +1790,10 @@ function openDrilldown(r) {
   const body = document.getElementById("dd-body");
   let html = "";
   const deployment = getDeploymentVerdictInfo(r);
-  const deploymentPill = `<span class="pill ${deployment.cls}" title="${escapeHtml(deployment.title)}">${escapeHtml(deployment.text)}</span>`;
+  const deploymentPill = `<span id="dd-deploy-pill" class="pill ${deployment.cls}" title="${escapeHtml(deployment.title)}">${escapeHtml(deployment.text)}</span>`;
   // All drilldown sections start collapsed so the panel opens compact.
-  html += _ddSection("Deployment Readiness", renderDeploymentReadinessSection(r, deployment),
+  html += _ddSection("Deployment Readiness",
+    `<div id="dd-deploy-section">${renderDeploymentReadinessSection(r, deployment)}</div>`,
     { badge: deploymentPill });
 
   const ddVerdict = getRegionQuotaVerdictForSubscription(STATE.snapshot, r.short, focusedSubscriptionId());
@@ -1980,9 +1998,10 @@ function getDeploymentVerdictInfo(region) {
   const reasons = Array.isArray(raw.reasons) ? raw.reasons : [];
   const constraints = Array.isArray(raw.constraints) ? raw.constraints : [];
   const blockers = Array.isArray(raw.blockers) ? raw.blockers : [];
+  let info;
   switch (verdict) {
     case "ready":
-      return {
+      info = {
         verdict,
         text: "Ready",
         cls: "pill-ok",
@@ -1991,8 +2010,9 @@ function getDeploymentVerdictInfo(region) {
         constraints,
         blockers,
       };
+      break;
     case "ready_with_constraints":
-      return {
+      info = {
         verdict,
         text: "Ready with constraints",
         cls: "pill-warn",
@@ -2001,8 +2021,9 @@ function getDeploymentVerdictInfo(region) {
         constraints,
         blockers,
       };
+      break;
     case "not_recommended":
-      return {
+      info = {
         verdict,
         text: "Not recommended",
         cls: "pill-fail",
@@ -2011,9 +2032,10 @@ function getDeploymentVerdictInfo(region) {
         constraints,
         blockers,
       };
+      break;
     case "needs_validation":
     default:
-      return {
+      info = {
         verdict: "needs_validation",
         text: "Needs validation",
         cls: "pill-muted",
@@ -2022,7 +2044,53 @@ function getDeploymentVerdictInfo(region) {
         constraints,
         blockers,
       };
+      break;
   }
+  return _augmentVerdictWithZrs(region, info);
+}
+
+// Read cached live zone-redundancy (ZRS/HA) results for the focused
+// subscription and return the selections that came back blocked/unavailable.
+// Returns [] when no live check has run yet (e.g. at table render time), so the
+// headline verdict is only downgraded once we actually have authoritative data.
+function _zrsBlockedForRegion(region) {
+  const sub = focusedSubscriptionId() || "";
+  if (!region || !sub) return [];
+  const key = `${String(region.short || "").toLowerCase()}|${sub}`;
+  const entry = (PRICING.zonalCap || {})[key];
+  if (!entry || entry.status !== "done" || !entry.map) return [];
+  const out = [];
+  for (const v of Object.values(entry.map)) {
+    if (v && (v.verdict === "blocked" || v.verdict === "unavailable")) out.push(v);
+  }
+  return out;
+}
+
+// A required zone-redundant / HA tier that is restricted for this subscription
+// is a genuine caveat: the region can still host non-HA tiers, but it is not
+// unconditionally "Ready". Downgrade Ready → Ready with constraints and surface
+// each restricted tier as a zone-gap blocker so it shows in the readiness list.
+function _augmentVerdictWithZrs(region, info) {
+  const blocks = _zrsBlockedForRegion(region);
+  if (!blocks.length) return info;
+  const blockers = Array.isArray(info.blockers) ? info.blockers.slice() : [];
+  for (const v of blocks) {
+    const tierTxt = v.tier ? ` (${v.tier})` : "";
+    const detail = v.message || "zone-redundant / HA tier is restricted for this subscription in this region.";
+    blockers.push({
+      type: "zone_gap",
+      severity: "warning",
+      message: `${v.name}${tierTxt}: ${detail}`,
+    });
+  }
+  const next = { ...info, blockers };
+  if (info.verdict === "ready") {
+    next.verdict = "ready_with_constraints";
+    next.text = "Ready with constraints";
+    next.cls = "pill-warn";
+    next.title = "Core requirements pass, but one or more zone-redundant (ZRS/HA) tiers are restricted for this subscription in this region.";
+  }
+  return next;
 }
 
 function inferDeploymentVerdict(region) {
