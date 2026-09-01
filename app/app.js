@@ -875,6 +875,10 @@ function _pricingRequestBody() {
     family: r.primary_family,
     label: r.primary_label,
     required_cores: r.required_cores,
+    // Availability fallback the backend prices when the primary generation
+    // isn't sold in a region (e.g. Dsv7 → Dsv6 in Austria East).
+    alt_family: r.alt_family || null,
+    alt_label: r.alt_label || null,
   }));
   return { regions, families, services: _bomServiceNames(snap) };
 }
@@ -953,6 +957,13 @@ function updateCostStat() {
   wrap.title = `Estimated monthly BOM cost (compute + non-compute) for ${best.region}, the cheapest Ready region. ${PRICING_DISCLAIMER}`;
 }
 
+// Friendly label of the BOM fallback family a region was priced on, if any.
+function _pricedAltLabel(info) {
+  const fams = (info && info.compute && info.compute.families) || [];
+  const alt = fams.find(f => f && f.priced_via_alt);
+  return alt ? (alt.priced_label || "") : "";
+}
+
 // The cost cell shown in the regions table for a region.
 function _costCellHtml(r) {
   if (!snapshotHasCoresRequirements(STATE.snapshot)) return `<td class="cost-col hidden num"></td>`;
@@ -963,8 +974,12 @@ function _costCellHtml(r) {
   else if (info && info.priced_any) {
     text = _fmtMoney(info.monthly_net, est.currency);
     if (!info.complete) { text += "*"; title = "Some families could not be priced. " + PRICING_DISCLAIMER; }
+    if (info.priced_via_alt) {
+      const altLbl = _pricedAltLabel(info);
+      badge += ` <span class="cost-alt-badge" title="Your primary SKU generation isn't sold in this region — cost is estimated on your BOM fallback${altLbl ? " (" + altLbl + ")" : ""}. Open the region for details.">↩ fallback</span>`;
+    }
     if (info.has_cheaper_alt && info.compute && info.compute.alt_savings_pct > 0) {
-      badge = ` <span class="cost-save-badge" title="A cheaper size-equivalent SKU is available in this region — save ~${_fmtMoney(info.compute.alt_savings_monthly_net, est.currency)}/mo. Open the region for details.">▼${info.compute.alt_savings_pct}%</span>`;
+      badge += ` <span class="cost-save-badge" title="A cheaper size-equivalent SKU is available in this region — save ~${_fmtMoney(info.compute.alt_savings_monthly_net, est.currency)}/mo. Open the region for details.">▼${info.compute.alt_savings_pct}%</span>`;
     }
   } else if (est) text = "n/a";
   return `<td class="cost-col num" title="${escapeHtml(title)}">${escapeHtml(text)}${badge}</td>`;
@@ -1123,7 +1138,7 @@ function _costBodyInner(r) {
   } else {
     const cur = est.currency, c = info.compute, nc = info.noncompute;
     const famRows = (c.families || []).map(f => f.priced
-      ? `<div class="key">${escapeHtml(f.label)} <span class="muted">(${f.required_cores} vCPU × ${_fmtMoney(f.per_core_hour, cur, { cents: true })}/hr)</span></div><div>${_fmtMoney(f.monthly_net, cur)}/mo</div>`
+      ? `<div class="key">${escapeHtml(f.label)}${f.priced_via_alt ? ` <span class="cost-alt-badge" title="${escapeHtml(f.label)} isn't sold in this region — priced on your BOM fallback ${escapeHtml(f.priced_label || "")}">↩ priced on ${escapeHtml(f.priced_label || "fallback")}</span>` : ""} <span class="muted">(${f.required_cores} vCPU × ${_fmtMoney(f.per_core_hour, cur, { cents: true })}/hr)</span></div><div>${_fmtMoney(f.monthly_net, cur)}/mo</div>`
       : `<div class="key">${escapeHtml(f.label)} <span class="muted">(${f.required_cores} vCPU)</span></div><div class="muted">not priced</div>`
     ).join("");
     const svcRows = (nc.items || []).map(s =>

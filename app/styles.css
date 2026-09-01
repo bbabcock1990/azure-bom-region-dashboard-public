@@ -3242,6 +3242,20 @@ html.filters-collapsed-init.bomnav-collapsed-init .layout { grid-template-column
   vertical-align: middle;
 }
 
+.cost-alt-badge {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: .72em;
+  font-weight: 700;
+  color: #e3c98f;
+  background: rgba(227, 201, 143, .14);
+  border: 1px solid rgba(227, 201, 143, .35);
+  border-radius: 999px;
+  padding: 0 6px;
+  vertical-align: middle;
+  cursor: help;
+}
+
 #drilldown .alt-title { color: #8fe3b0; margin-top: 14px; }
 #drilldown .alt-headline {
   font-weight: 600;

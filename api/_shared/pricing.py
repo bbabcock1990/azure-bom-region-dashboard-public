@@ -485,13 +485,21 @@ def estimate(
             cores = 0
         if not fid or cores <= 0:
             continue
+        alt_fid = str((f or {}).get("alt_family") or "").strip()
         norm_families.append({
             "family": fid,
             "label": str((f or {}).get("label") or fid).strip() or fid,
             "required_cores": cores,
+            # BOM availability fallback (e.g. Dsv6 when Dsv7 isn't offered/priced
+            # in a region). Distinct from the cheaper-equivalent "alternatives".
+            "alt_family": alt_fid or None,
+            "alt_label": str((f or {}).get("alt_label") or alt_fid).strip() or (alt_fid or None),
         })
 
     fam_ids = [f["family"] for f in norm_families]
+    # Price the BOM fallback families too, so a region that doesn't sell the
+    # primary generation can still be costed on the alt (flagged as fallback).
+    bom_alt_ids = [f["alt_family"] for f in norm_families if f.get("alt_family")]
     out_regions: Dict[str, dict] = {}
 
     # Cheaper-equivalent candidates: size-for-size substitutes for each BOM
@@ -526,7 +534,7 @@ def estimate(
                     alt_seen.add(key)
                     alt_ids.append(core)
 
-    price_ids = fam_ids + alt_ids
+    price_ids = fam_ids + bom_alt_ids + alt_ids
 
     # Resolve the unique region shorts up front and price them concurrently —
     # each region is an independent (cached) Retail Prices API call.
@@ -564,6 +572,20 @@ def estimate(
         any_unpriced = False
         for f in norm_families:
             info = priced.get(f["family"])
+            priced_family = f["family"]
+            priced_label = f["label"]
+            priced_via_alt = False
+            if not info and f.get("alt_family"):
+                # Primary generation isn't sold/priced in this region — fall
+                # back to the BOM's availability alt (e.g. Dsv7 → Dsv6), the
+                # same fallback the deployment analysis uses. Flagged so the UI
+                # can show "priced on fallback <alt>".
+                alt_info = priced.get(f["alt_family"])
+                if alt_info:
+                    info = alt_info
+                    priced_family = f["alt_family"]
+                    priced_label = f.get("alt_label") or f["alt_family"]
+                    priced_via_alt = True
             if not info:
                 any_unpriced = True
                 fam_rows.append({
@@ -616,12 +638,18 @@ def estimate(
                 "label": f["label"],
                 "required_cores": cores,
                 "anchor_size": info["anchor_size"],
-                "vendor": _cpu_vendor(f["family"])[0],
+                "vendor": _cpu_vendor(priced_family)[0],
                 "per_core_hour": round(info["per_core_hour"], 5),
                 "hourly_list": round(hourly, 4),
                 "monthly_list": round(m_list, 2),
                 "monthly_net": round(m_list * factor, 2),
                 "priced": True,
+                # When the primary generation isn't sold in this region we price
+                # the BOM fallback family instead; surface which family the cost
+                # is actually based on so the UI can label it.
+                "priced_via_alt": priced_via_alt,
+                "priced_family": priced_family,
+                "priced_label": priced_label,
                 "alternatives": alts,
             })
             month_list += m_list
@@ -645,6 +673,9 @@ def estimate(
                 optimized_list += m_list
             priced_any = True
         alt_savings_list = round(month_list - optimized_list, 2)
+        # True when at least one priced family fell back to its BOM alt because
+        # the primary generation isn't sold in this region.
+        priced_via_alt_any = any(r.get("priced_via_alt") for r in fam_rows)
         out_regions[short] = {
             "compute": {
                 "monthly_list": round(month_list, 2),
@@ -652,6 +683,7 @@ def estimate(
                 "hourly_list": round(month_list / hours, 4) if hours else 0.0,
                 "families": fam_rows,
                 "priced_any": priced_any,
+                "priced_via_alt": priced_via_alt_any,
                 "complete": priced_any and not any_unpriced,
                 # Compute cost if every family swapped to its cheapest equivalent.
                 "optimized_monthly_list": round(optimized_list, 2),
@@ -676,8 +708,8 @@ def estimate(
                 (month_list + itemized_total + month_list * uplift_frac) * factor, 2
             ),
             "priced_any": priced_any,
+            "priced_via_alt": priced_via_alt_any,
             "complete": priced_any and not any_unpriced,
-            # Headline savings signal for the region (cheapest-equivalent swaps).
             "alt_savings_monthly_net": round(alt_savings_list * factor, 2),
             "alt_savings_pct": round((alt_savings_list / month_list) * 100.0, 1) if month_list else 0.0,
             "has_cheaper_alt": bool(region_swaps),

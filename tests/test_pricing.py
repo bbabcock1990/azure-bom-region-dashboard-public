@@ -170,6 +170,52 @@ def test_estimate_unpriceable_family_marked_incomplete(monkeypatch):
     assert region["compute"]["families"][0]["priced"] is False
 
 
+def test_estimate_falls_back_to_alt_family_when_primary_unpriced(monkeypatch):
+    # Primary generation (Dsv7 -> Standard_D4s_v7) has no price in this region,
+    # but the BOM fallback (Dsv6 -> Standard_D4s_v6) does. The region should be
+    # priced on the fallback and flagged priced_via_alt.
+    _patch_prices(monkeypatch, {"Standard_D4s_v6": 0.20})
+    result = pricing_mod.estimate(
+        ["austriaeast"],
+        [{
+            "family": "Dsv7", "label": "Dsv7", "required_cores": 100,
+            "alt_family": "Dsv6", "alt_label": "Dsv6",
+        }],
+        hours_per_month=730,
+        acd_discount_pct=0.0,
+        noncompute_uplift_pct=0.0,
+        suggest_alternatives=False,
+    )
+    region = result["regions"]["austriaeast"]
+    assert region["priced_any"] is True
+    assert region["priced_via_alt"] is True
+    assert region["compute"]["priced_via_alt"] is True
+    # 100 cores * $0.05/vCPU-hr * 730h = $3650, on the Dsv6 fallback.
+    assert region["compute"]["monthly_list"] == 3650.0
+    f = region["compute"]["families"][0]
+    assert f["priced"] is True
+    assert f["priced_via_alt"] is True
+    assert f["priced_label"] == "Dsv6"
+    # The row still identifies the requested BOM family.
+    assert f["label"] == "Dsv7"
+
+
+def test_estimate_no_alt_fallback_stays_unpriced(monkeypatch):
+    # Neither primary nor alt priced -> region remains unpriced (no false cost).
+    _patch_prices(monkeypatch, {})
+    result = pricing_mod.estimate(
+        ["austriaeast"],
+        [{
+            "family": "Dsv7", "label": "Dsv7", "required_cores": 100,
+            "alt_family": "Dsv6", "alt_label": "Dsv6",
+        }],
+        suggest_alternatives=False,
+    )
+    region = result["regions"]["austriaeast"]
+    assert region["priced_any"] is False
+    assert region["priced_via_alt"] is False
+
+
 def test_estimate_multiple_regions(monkeypatch):
     _patch_prices(monkeypatch, {"Standard_D4s_v5": 0.20})
     result = pricing_mod.estimate(
