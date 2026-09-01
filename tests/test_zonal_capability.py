@@ -279,6 +279,40 @@ def test_fetch_flex_edition_state_parses(monkeypatch):
     assert state["burstable"]["zone_redundant"] is False
 
 
+def test_fetch_flex_edition_state_parses_mysql_zone_shape(monkeypatch):
+    # MySQL's capabilities feed is partitioned per zone: HA lives on the item
+    # (supportedHAMode), not per-SKU, and editions carry no HA fields.
+    payload = {"value": [{
+        "zone": "none",
+        "supportedHAMode": ["SameZone", "ZoneRedundant"],
+        "supportedFlexibleServerEditions": [
+            {"name": "GeneralPurpose", "supportedServerVersions": [{"name": "8.0.21"}]},
+            {"name": "MemoryOptimized", "supportedServerVersions": [{"name": "8.0.21"}]},
+        ],
+    }]}
+    _mock_client(monkeypatch, payload)
+    state = zc.fetch_flex_edition_state(
+        provider="Microsoft.DBforMySQL", arm_token="t", subscription_id="s", region="eastus")
+    assert state[zc._REGION_ZR_KEY]["value"] is True
+    assert state["generalpurpose"]["zone_redundant"] is True
+    assert state["memoryoptimized"]["zone_redundant"] is True
+
+
+def test_fetch_flex_edition_state_mysql_no_zr_when_zone_lacks_mode(monkeypatch):
+    payload = {"value": [{
+        "zone": "none",
+        "supportedHAMode": ["SameZone"],
+        "supportedFlexibleServerEditions": [
+            {"name": "GeneralPurpose", "supportedServerVersions": [{"name": "8.0.21"}]},
+        ],
+    }]}
+    _mock_client(monkeypatch, payload)
+    state = zc.fetch_flex_edition_state(
+        provider="Microsoft.DBforMySQL", arm_token="t", subscription_id="s", region="eastus")
+    assert state["generalpurpose"]["zone_redundant"] is False
+    assert zc._flex_verdict(state, "GeneralPurpose")["verdict"] == "blocked"
+
+
 def test_flex_verdict_blocked_when_region_disabled():
     state = {zc._REGION_ZR_KEY: {"value": False}, "generalpurpose": {"zone_redundant": True}}
     assert zc._flex_verdict(state, "GeneralPurpose")["verdict"] == "blocked"

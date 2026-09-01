@@ -49,7 +49,12 @@ log = logging.getLogger(__name__)
 
 STORAGE_SKUS_API_VERSION = "2023-05-01"
 SQL_CAPABILITIES_API_VERSION = "2023-08-01-preview"
-FLEX_CAPABILITIES_API_VERSION = "2023-06-30"
+FLEX_CAPABILITIES_API_VERSION = "2024-08-01"
+# Flexible-Server "capabilities by location" api-version differs per provider.
+_FLEX_API_VERSIONS = {
+    "Microsoft.DBforPostgreSQL": "2024-08-01",
+    "Microsoft.DBforMySQL": "2023-06-30",
+}
 ELASTICSAN_SKUS_API_VERSION = "2024-05-01"
 
 # ── Catalog tier → authoritative ARM target ─────────────────────────────────
@@ -376,6 +381,23 @@ def _has_zone_redundant_ha(node: Any) -> bool:
     return False
 
 
+def _has_ha_info(node: Any) -> bool:
+    """True if a capability subtree carries any per-SKU high-availability mode
+    listing (``supportedHaMode`` / ``supportedHighAvailabilityModes``).
+    PostgreSQL editions carry this (authoritative, per-edition); MySQL editions
+    do not (HA is signalled at the zone level instead)."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if str(k).replace("_", "").lower() in ("supportedhamode", "supportedhighavailabilitymodes"):
+                return True
+            if _has_ha_info(v):
+                return True
+        return False
+    if isinstance(node, list):
+        return any(_has_ha_info(v) for v in node)
+    return False
+
+
 def _iter_flex_editions(node: Any):
     """Yield edition dicts (those carrying a ``name`` and a SKU list) from the
     Flexible Server capability payload, whatever the api-version nesting."""
@@ -399,13 +421,25 @@ def fetch_flex_edition_state(
 ) -> Dict[str, Dict[str, Any]]:
     """Return ``{edition_name_lower: {"zone_redundant": bool}}`` plus a
     ``__region_zr__`` entry for a PostgreSQL/MySQL Flexible Server provider from
-    its per-subscription location capabilities. Degrades to ``{}`` (→
-    unverifiable) on any ARM error so the caller falls back to region-AZ."""
+    its per-subscription ``locations/{loc}/capabilities`` feed. Degrades to
+    ``{}`` (→ unverifiable) on any ARM error so the caller falls back to
+    region-AZ.
+
+    The two providers expose zone-redundant HA differently:
+      * PostgreSQL — a region-level ``zoneRedundantHaSupported`` flag plus a
+        per-SKU ``supportedHaMode`` list under each ``supportedServerEditions``.
+      * MySQL — the ``value`` feed is partitioned per zone; each item carries a
+        zone-level ``supportedHAMode`` list and a flat
+        ``supportedFlexibleServerEditions`` list (no per-SKU HA). Zone-redundant
+        HA therefore applies to every offered edition when the item's HA list
+        contains ``ZoneRedundant``.
+    """
     token = _strip_bearer(arm_token)
     region_norm = _normalize_region(region)
+    api_version = _FLEX_API_VERSIONS.get(provider, FLEX_CAPABILITIES_API_VERSION)
     url = (f"{ARM_BASE}/subscriptions/{subscription_id}/providers/{provider}"
-           f"/locations/{region_norm}/flexibleServerCapabilities")
-    params = {"api-version": FLEX_CAPABILITIES_API_VERSION}
+           f"/locations/{region_norm}/capabilities")
+    params = {"api-version": api_version}
     try:
         with httpx.Client(timeout=timeout_s, http2=False) as client:
             r = client.get(url, params=params, headers=_headers(token))
@@ -423,15 +457,34 @@ def fetch_flex_edition_state(
     for item in data.get("value") or [data]:
         if not isinstance(item, dict):
             continue
+        # Region-level ZR signal: PostgreSQL's explicit flag, or MySQL's
+        # zone-level supportedHAMode list containing "ZoneRedundant".
         flag = _flag_to_bool(item.get("zoneRedundantHaSupported"))
-        if flag is not None:
-            region_zr = flag if region_zr is None else (region_zr or flag)
+        zone_ha_zr = _has_zone_redundant_ha(
+            item.get("supportedHAMode") or item.get("supportedHaMode"))
+        if flag is True or zone_ha_zr:
+            item_zr: Optional[bool] = True
+        elif flag is False:
+            item_zr = False
+        else:
+            item_zr = None
+        if item_zr is True:
+            region_zr = True
+        elif item_zr is False and region_zr is None:
+            region_zr = False
+
         for ed in _iter_flex_editions(item):
             name = str(ed.get("name") or "")
             if not name:
                 continue
             key = name.lower()
-            has_zr = _has_zone_redundant_ha(ed)
+            # PostgreSQL carries authoritative per-SKU HA modes on the edition;
+            # trust those. MySQL editions carry none — fall back to the item's
+            # zone-level ZR signal for those.
+            if _has_ha_info(ed):
+                has_zr = _has_zone_redundant_ha(ed)
+            else:
+                has_zr = item_zr is True
             prev = out.get(key)
             out[key] = {"zone_redundant": has_zr or (prev or {}).get("zone_redundant", False)}
     out[_REGION_ZR_KEY] = {"value": region_zr}
