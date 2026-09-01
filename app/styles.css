@@ -1923,6 +1923,9 @@ html.filters-collapsed-init .filters-body { display: none; }
 .zrs-mark.ok { color: #b6e8c7; }
 .zrs-mark.warn { color: #f4d4a3; }
 .zrs-mark.danger { color: #f4b3b3; }
+.zrs-mark.checking { color: #a9c6e6; font-weight: 500; }
+.zrs-src { font-weight: 400; opacity: .7; font-size: .72rem; }
+.zrs-legend { margin-top: .5rem; font-size: .72rem; }
 #drilldown .note.ok { color: #b6e8c7; border-left-color: #2f7d52; }
 
 /* Regions picker — reuses .bom-services-list grid, adds AZ chip + delete-custom. */

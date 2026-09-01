@@ -58,6 +58,7 @@ ROUTES = [
     ("bom/import_xlsx", ["POST"], "bom_import_xlsx"),
     ("bom/sensitivity", ["GET"], "bom_sensitivity"),
     ("bom/sku_families", ["GET"], "bom_sku_families"),
+    ("bom/zonal-capability", ["POST"], "bom_zonal_capability"),
     ("bom/service_catalog/{name}", ["GET", "POST", "DELETE"], "bom_service_catalog"),
     ("bom/service_catalog", ["GET", "POST", "DELETE"], "bom_service_catalog"),
     ("bom/region_catalog/{name}", ["GET", "POST", "DELETE"], "bom_region_catalog"),

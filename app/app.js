@@ -815,7 +815,7 @@ function updateStats() {
 
 // ---------------------------------------------------------------- Cost estimate (pricing)
 
-const PRICING = { settings: null, estimate: null, loading: false, reqKey: "", altValidation: {} };
+const PRICING = { settings: null, estimate: null, loading: false, reqKey: "", altValidation: {}, zonalCap: {} };
 const PRICING_DISCLAIMER = "Estimate only — list price anchored to a representative VM size, not a quote. Excludes storage, egress, licensing & negotiated terms.";
 
 function _fmtMoney(n, currency, opts) {
@@ -1223,10 +1223,69 @@ function _regionSupportsAz(r) {
 
 // Overall ZRS pill for the region drilldown header, or null when the BOM has no
 // ZRS-capable tier selections (nothing to check).
-function _zrsReadinessPill(r) {
+// Services for which we have an authoritative, per-subscription live check
+// (must stay in sync with api/_shared/zonal_capability.py). Selections for
+// these get a real ARM verdict; everything else falls back to region-AZ.
+const _ZRS_LIVE_CHECKABLE = new Set([
+  "Azure Blob Storage",
+  "Azure Data Lake Storage Gen2",
+  "Azure Files",
+  "Managed Disks (Premium SSD)",
+  "Azure SQL Database",
+  "Azure SQL Managed Instance",
+]);
+
+function _zrsKey(name, tier) { return `${name}||${tier}`; }
+
+// Baseline (documented) mark from region-level AZ support — used for services
+// with no authoritative API, and as the fallback before the live check returns.
+function _zrsBaselineMark(az) {
+  if (az === false) return `<span class="zrs-mark danger">⛔ Not supported (no AZs)</span>`;
+  if (az === null) return `<span class="zrs-mark warn">⚠️ Unverified (region AZ unknown)</span>`;
+  return `<span class="zrs-mark ok" title="Region exposes Availability Zones (documented, not live-verified for this service)">✓ Zone-redundant capable <span class="zrs-src">· region AZ</span></span>`;
+}
+
+// Live per-service verdict → mark HTML.
+function _zrsLiveMark(v, az) {
+  if (!v) return _zrsBaselineMark(az);
+  const src = v.source ? ` <span class="zrs-src" title="Verified live via ${escapeHtml(v.source)}">· ${escapeHtml(v.source)}</span>` : "";
+  switch (v.verdict) {
+    case "available":
+      return `<span class="zrs-mark ok" title="${escapeHtml(v.message || "")}">✓ Verified deployable${src}</span>`;
+    case "blocked":
+      return `<span class="zrs-mark danger" title="${escapeHtml(v.message || "")}">⛔ Restricted for this subscription${src}</span>`;
+    case "unavailable":
+      return `<span class="zrs-mark danger" title="${escapeHtml(v.message || "")}">⛔ Not available in region${src}</span>`;
+    case "no_subscription":
+      return `<span class="zrs-mark warn" title="${escapeHtml(v.message || "")}">⚠️ Select a subscription to verify</span>`;
+    case "unverifiable":
+      return `<span class="zrs-mark warn" title="${escapeHtml(v.message || "")}">⚠️ Could not read capability</span>`;
+    default: // not_verifiable → documented region-AZ fallback
+      return _zrsBaselineMark(az);
+  }
+}
+
+// Overall pill. `entry` (if present) carries live results so the header pill can
+// reflect a real blocked/verified state rather than only region-AZ.
+function _zrsReadinessPill(r, entry) {
   const sels = _zrsCapableSelections();
   if (!sels.length) return null;
   const az = _regionSupportsAz(r);
+  if (entry && entry.status === "loading") {
+    return { cls: "pill-warn", text: "ZRS: checking…", title: "Verifying zone-redundant deployability live against your subscription." };
+  }
+  const results = (entry && entry.status === "done") ? (entry.map || {}) : null;
+  if (results) {
+    const vals = Object.values(results);
+    if (vals.some(v => v.verdict === "blocked" || v.verdict === "unavailable")) {
+      return { cls: "pill-fail", text: "ZRS: blocked", title: "One or more zone-redundant tiers can't be deployed here for this subscription — see details." };
+    }
+    const anyVerified = vals.some(v => v.verdict === "available");
+    // If nothing was blocked and at least one was live-verified (and region AZ isn't a hard no), we're good.
+    if (az !== false && anyVerified) {
+      return { cls: "pill-ok", text: "ZRS: verified", title: "Zone-redundant tiers verified deployable against your subscription." };
+    }
+  }
   if (az === false) return { cls: "pill-fail", text: "ZRS: no AZs", title: "This region has no Availability Zones — zone-redundant tiers can't be deployed here." };
   if (az === null) return { cls: "pill-warn", text: "ZRS: unverified", title: "Availability-Zone support for this region could not be confirmed." };
   return { cls: "pill-ok", text: "ZRS: ready", title: "This region supports Availability Zones — zone-redundant tiers can be deployed." };
@@ -1236,22 +1295,97 @@ function renderZrsReadinessSection(r) {
   const sels = _zrsCapableSelections();
   if (!sels.length) return "";
   const az = _regionSupportsAz(r);
+  const sub = focusedSubscriptionId() || "";
   let intro;
   if (az === false) {
     intro = `<div class="note danger">${escapeHtml(r.name)} has <strong>no Availability Zones</strong>. Zone-redundant (ZRS/HA) deployments aren't supported here — choose an AZ-enabled region for these tiers, or accept locally-redundant (single-zone) resilience.</div>`;
   } else if (az === null) {
     intro = `<div class="note">Availability-Zone support for this region couldn't be confirmed from the catalog. Verify AZ availability before committing to zone-redundant tiers.</div>`;
   } else {
-    intro = `<div class="note ok">${escapeHtml(r.name)} supports <strong>Availability Zones</strong>, so the zone-redundant tiers below can be deployed for zone resilience.</div>`;
+    intro = `<div class="note ok">${escapeHtml(r.name)} supports <strong>Availability Zones</strong>. Services below are verified live against your subscription where an authoritative API exists.</div>`;
   }
   const rows = sels.map(s => {
-    let mark;
-    if (az === false) mark = `<span class="zrs-mark danger">⛔ Not supported (no AZs)</span>`;
-    else if (az === null) mark = `<span class="zrs-mark warn">⚠️ Unverified</span>`;
-    else mark = `<span class="zrs-mark ok">✓ Zone-redundant capable</span>`;
-    return `<div class="key">${escapeHtml(s.name)} <span class="svc-tier-chip">${escapeHtml(s.tierLabel)}</span></div><div>${mark}</div>`;
+    const live = _ZRS_LIVE_CHECKABLE.has(s.name);
+    // Checkable services start in a "checking" state (filled by the live call);
+    // documented ones show the region-AZ baseline immediately.
+    const initial = live
+      ? (sub ? `<span class="zrs-mark checking">⏳ Verifying live…</span>` : _zrsLiveMark({ verdict: "no_subscription" }, az))
+      : _zrsBaselineMark(az);
+    return `<div class="key">${escapeHtml(s.name)} <span class="svc-tier-chip">${escapeHtml(s.tierLabel)}</span></div>` +
+      `<div class="zrs-svc-slot" data-zrs-key="${escapeHtml(_zrsKey(s.name, s.tierId))}" data-zrs-live="${live ? "1" : "0"}">${initial}</div>`;
   }).join("");
-  return `${intro}<div class="kv">${rows}</div>`;
+  const legend = `<div class="note muted zrs-legend">✓ Verified deployable = confirmed live via an authoritative ARM capability/SKU API for your subscription. “region AZ” = documented Availability-Zone support only (no per-service API to verify).</div>`;
+  return `${intro}<div class="kv">${rows}</div>${legend}`;
+}
+
+// Patch the per-service slots + header pill once the live check resolves.
+function _patchZonalCapability(regionShort, entry) {
+  const az = STATE._zrsAzForActive;
+  document.querySelectorAll(".zrs-svc-slot[data-zrs-live='1']").forEach((slot) => {
+    const key = slot.getAttribute("data-zrs-key");
+    if (!entry || entry.status === "loading") {
+      slot.innerHTML = `<span class="zrs-mark checking">⏳ Verifying live…</span>`;
+    } else if (entry.status === "error") {
+      slot.innerHTML = _zrsLiveMark({ verdict: "unverifiable", message: "Live check unavailable — verify manually." }, az);
+    } else {
+      slot.innerHTML = _zrsLiveMark((entry.map || {})[key], az);
+    }
+  });
+  const pillEl = document.getElementById("zrs-pill");
+  if (pillEl) {
+    const region = _findRegionByShort(regionShort);
+    const pill = region ? _zrsReadinessPill(region, entry) : null;
+    if (pill) {
+      pillEl.className = `pill ${pill.cls}`;
+      pillEl.title = pill.title;
+      pillEl.textContent = pill.text;
+    }
+  }
+}
+
+// Kick off (or reuse cached) live zone-redundancy verification for the current
+// BOM's zone-redundant selections in this region, then paint the result.
+async function _verifyZonalForRegion(r) {
+  if (!r) return;
+  const sels = _zrsCapableSelections();
+  const sub = focusedSubscriptionId() || "";
+  STATE._zrsAzForActive = _regionSupportsAz(r);
+  // Only the authoritatively-checkable selections need a round-trip.
+  const checkable = sels.filter(s => _ZRS_LIVE_CHECKABLE.has(s.name));
+  if (!checkable.length || !sub) return;
+  const key = `${String(r.short).toLowerCase()}|${sub}`;
+
+  const cached = PRICING.zonalCap[key];
+  if (cached && (cached.status === "done" || cached.status === "error" || cached.status === "loading")) {
+    _patchZonalCapability(r.short, cached);
+    if (cached.status !== "loading") return;
+    return;
+  }
+
+  const entry = { status: "loading", map: {} };
+  PRICING.zonalCap[key] = entry;
+  _patchZonalCapability(r.short, entry);
+
+  try {
+    const resp = await apiJson("/api/bom/zonal-capability", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        subscription_id: sub,
+        region: r.short,
+        services: checkable.map(s => ({ name: s.name, tier: s.tierId })),
+      }),
+    });
+    entry.status = "done";
+    entry.map = {};
+    (resp.results || []).forEach(v => { entry.map[_zrsKey(v.name, v.tier)] = v; });
+  } catch (e) {
+    entry.status = "error";
+    entry.error = e;
+  }
+  if (String(STATE.activeDrilldownRegion || "").toLowerCase() === String(r.short).toLowerCase()) {
+    _patchZonalCapability(r.short, entry);
+  }
 }
 
 // -------- Cost & pricing settings (gear → Settings → Cost & pricing) --------
@@ -1510,7 +1644,7 @@ function openDrilldown(r) {
   if (zrsSection) {
     const zrsPill = _zrsReadinessPill(r);
     const zrsBadge = zrsPill
-      ? `<span class="pill ${zrsPill.cls}" title="${escapeHtml(zrsPill.title)}">${escapeHtml(zrsPill.text)}</span>`
+      ? `<span id="zrs-pill" class="pill ${zrsPill.cls}" title="${escapeHtml(zrsPill.title)}">${escapeHtml(zrsPill.text)}</span>`
       : "";
     html += _ddSection("Zone-redundancy (ZRS/HA) readiness", zrsSection, { badge: zrsBadge });
   }
@@ -1597,6 +1731,7 @@ function openDrilldown(r) {
   renderSubscriptionSwitcher();
   _scanRegistrationCards(body);
   _validateAltsForRegion(r);
+  _verifyZonalForRegion(r);
   if (!body._ddSectionBound) {
     body.addEventListener("click", (ev) => {
       const head = ev.target.closest(".dd-section-head");
