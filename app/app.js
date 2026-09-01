@@ -7627,7 +7627,17 @@ async function renderSupportTab() {
 function _updateSupportBadge() {
   const badge = document.getElementById("support-tab-badge");
   if (!badge) return;
-  const open = (SUPPORT.tickets || []).filter(t => t.status !== "closed" && (t.azure_status || "").toLowerCase() !== "closed").length;
+  // Count only genuinely open Azure tickets. Exclude local-only drafts
+  // ("preview"), failed submission attempts ("failed"/"error"), and anything
+  // closed/cancelled — none of those represent a live, open support request,
+  // so they must not inflate the badge (previously any non-"closed" status,
+  // including previews and failures, was counted).
+  const NON_OPEN = new Set(["preview", "draft", "failed", "error", "closed", "cancelled", "canceled", "deleted"]);
+  const open = (SUPPORT.tickets || []).filter(t => {
+    const st = String(t.status || "").toLowerCase();
+    const az = String(t.azure_status || "").toLowerCase();
+    return !NON_OPEN.has(st) && az !== "closed" && az !== "cancelled" && az !== "canceled";
+  }).length;
   badge.textContent = String(open);
   badge.classList.toggle("hidden", open === 0);
 }
