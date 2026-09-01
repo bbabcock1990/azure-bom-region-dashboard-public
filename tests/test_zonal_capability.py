@@ -139,6 +139,27 @@ def test_sql_verdict_unavailable_when_missing_or_disabled():
     assert zc._sql_verdict({"premium": {"status": "Available", "zone_redundant": True}}, "Hyperscale")["verdict"] == "unavailable"
 
 
+def test_sql_verdict_blocked_when_region_access_disabled():
+    # Top-level location status "Disabled" is the portal's "your subscription does
+    # not have access to create a server in this region" — no edition is deployable
+    # even if it reports zone-redundant support.
+    state = {
+        zc._SQL_REGION_KEY: {"status": "Disabled", "reason": "Region not enabled for this subscription."},
+        "hyperscale": {"status": "Available", "zone_redundant": True},
+    }
+    v = zc._sql_verdict(state, "Hyperscale")
+    assert v["verdict"] == "blocked"
+    assert "Region not enabled" in v["message"]
+
+
+def test_sql_verdict_available_when_region_status_enabled():
+    state = {
+        zc._SQL_REGION_KEY: {"status": "Available", "reason": ""},
+        "businesscritical": {"status": "Available", "zone_redundant": True},
+    }
+    assert zc._sql_verdict(state, "BusinessCritical")["verdict"] == "available"
+
+
 # ---------------------------------------------------- parsers over mocked httpx
 
 def _mock_client(monkeypatch, payload, status=200):
@@ -200,6 +221,18 @@ def test_fetch_sql_edition_state_parses(monkeypatch):
     state = zc.fetch_sql_edition_state(arm_token="t", subscription_id="s", region="eastus")
     assert state["businesscritical"]["zone_redundant"] is True
     assert state["basic"]["zone_redundant"] is False
+
+
+def test_fetch_sql_edition_state_captures_region_status(monkeypatch):
+    payload = {"status": "Disabled", "reason": "The subscription does not have access to this region.",
+               "supportedServerVersions": [
+                   {"supportedEditions": [
+                       {"name": "Hyperscale", "status": "Available",
+                        "supportedServiceLevelObjectives": [{"name": "HS", "zoneRedundant": True, "status": "Available"}]}]}]}
+    _mock_client(monkeypatch, payload)
+    state = zc.fetch_sql_edition_state(arm_token="t", subscription_id="s", region="eastus")
+    assert state[zc._SQL_REGION_KEY]["status"] == "Disabled"
+    assert zc._sql_verdict(state, "Hyperscale")["verdict"] == "blocked"
 
 
 # ------------------------------------------------------------------- evaluate()

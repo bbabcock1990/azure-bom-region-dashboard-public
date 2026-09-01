@@ -288,6 +288,17 @@ def fetch_elasticsan_sku_state(
 
 # ── Microsoft.Sql/locations/{loc}/capabilities ──────────────────────────────
 
+# Sentinel key holding the top-level LocationCapabilities status/reason — the
+# authoritative per-subscription "region access" signal the portal surfaces as
+# "your subscription does not have access to create a server in this region".
+_SQL_REGION_KEY = "__sql_region__"
+
+_DISABLED_REGION_MSG = (
+    "Your subscription does not have access to create a SQL server in this "
+    "region — request access via a support ticket before deploying."
+)
+
+
 def _find_zone_redundant(node: Any) -> bool:
     """Recursively scan a SQL capability subtree for any ``zoneRedundant: true``
     on an available service objective."""
@@ -325,6 +336,13 @@ def fetch_sql_edition_state(
         data = r.json()
 
     out: Dict[str, Dict[str, Any]] = {}
+    # Top-level location status/reason is the authoritative "can this subscription
+    # use this region for SQL" signal — a "Disabled" status is exactly the portal's
+    # "your subscription does not have access to create a server in this region".
+    out[_SQL_REGION_KEY] = {
+        "status": str(data.get("status") or ""),
+        "reason": str(data.get("reason") or ""),
+    }
 
     def _record_editions(editions: Any) -> None:
         for ed in editions or []:
@@ -335,10 +353,12 @@ def fetch_sql_edition_state(
                 continue
             key = name.lower()
             status = str(ed.get("status") or "Available")
+            reason = str(ed.get("reason") or "")
             zr = _find_zone_redundant(ed)
             prev = out.get(key)
             out[key] = {
                 "status": status if not prev else prev["status"],
+                "reason": reason or (prev or {}).get("reason", ""),
                 "zone_redundant": zr or (prev or {}).get("zone_redundant", False),
             }
 
@@ -554,12 +574,20 @@ def _elasticsan_verdict(state: Dict[str, Dict[str, Any]], sku: str) -> Dict[str,
 
 
 def _sql_verdict(state: Dict[str, Dict[str, Any]], edition: str) -> Dict[str, Any]:
-    entry = state.get(edition.lower())
     if not state:
         return {"verdict": "unverifiable", "message": "SQL capabilities unavailable for this subscription/region."}
+    # Region-access gate first: a "Disabled" top-level location status means the
+    # subscription cannot create a SQL server in this region at all — no edition
+    # is deployable regardless of its own zone-redundancy capability.
+    region_meta = state.get(_SQL_REGION_KEY) or {}
+    if str(region_meta.get("status", "")).lower() == "disabled":
+        return {"verdict": "blocked",
+                "message": region_meta.get("reason") or _DISABLED_REGION_MSG}
+    entry = state.get(edition.lower())
     if not entry or str(entry.get("status", "")).lower() == "disabled":
+        reason = (entry or {}).get("reason") if entry else ""
         return {"verdict": "unavailable",
-                "message": f"The {edition} edition is not available in this region for this subscription."}
+                "message": reason or f"The {edition} edition is not available in this region for this subscription."}
     if not entry.get("zone_redundant"):
         return {"verdict": "blocked",
                 "message": f"The {edition} edition is available but zone-redundant deployment isn't offered "
