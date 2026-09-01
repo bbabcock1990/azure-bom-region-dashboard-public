@@ -1241,11 +1241,25 @@ const _ZRS_LIVE_CHECKABLE = new Set([
 // Services with no read-only capability API, but which can be verified by an
 // opt-in, non-destructive ARM pre-flight *validation* (creates nothing). These
 // are surfaced with a "Run deep check" button rather than checked automatically.
+// Must stay in sync with _VALIDATE_SERVICES + _ADVISORY_SERVICES in
+// api/_shared/deploy_validation.py.
 const _ZRS_DEEP_CHECKABLE = new Set([
   "Azure App Service",
+  "App Service Environment",
+  "Azure Logic Apps",
   "Azure Cache for Redis",
   "Azure Service Bus",
   "Azure Event Hubs",
+  "Azure Container Registry",
+  "Azure SignalR Service",
+  "Azure Spring Apps",
+  "Public IP Addresses",
+  "Azure Load Balancer (Standard)",
+  "Application Gateway (WAF v2)",
+  "Azure VPN Gateway",
+  "Azure ExpressRoute",
+  "Azure AI Search",
+  "Azure API Management",
   "Azure Cosmos DB",
 ]);
 
@@ -1368,7 +1382,7 @@ function renderZrsReadinessSection(r) {
   let deepBar = "";
   if (hasDeep && az !== false) {
     deepBar = `<div class="zrs-deepbar note">
-      <div><strong>Deep deployability check</strong> — for App Service, Redis, Service Bus, Event Hubs and Cosmos DB there is no read-only capability API. Run a <strong>non-destructive</strong> ARM pre-flight validation (creates nothing, no cost) to confirm the zone-redundant tier actually deploys for your subscription here.</div>
+      <div><strong>Deep deployability check</strong> — for services with no read-only capability API (App Service, Logic Apps, Container Registry, SignalR, API Management, AI Search, Public IP, Load Balancer, Application Gateway, VPN Gateway, ExpressRoute, Redis, Service Bus, Event Hubs, Cosmos DB, and more) run a <strong>non-destructive</strong> ARM pre-flight validation (creates nothing, no cost) to confirm the zone-redundant tier actually deploys for your subscription here — catching quota, SKU/zone and region restrictions before you commit.</div>
       <button type="button" class="btn btn--accent btn--sm" id="zrs-deepcheck-btn" data-region-short="${escapeHtml(r.short)}">🔬 Run deep check</button>
     </div>`;
   }
@@ -1446,9 +1460,9 @@ async function _verifyZonalForRegion(r) {
 }
 
 // Opt-in, non-destructive deep deployability check (ARM validate — creates
-// nothing). Runs only on explicit user action + confirmation, for services with
-// no read-only capability API (App Service, Redis, Service Bus, Event Hubs) and
-// advisory-only Cosmos DB.
+// nothing). Runs only on explicit user action + confirmation, for the
+// zone-redundant selections that have no read-only capability API (see
+// _ZRS_DEEP_CHECKABLE) plus advisory-only Cosmos DB.
 async function _runZrsDeepCheck(regionShort) {
   const r = _findRegionByShort(regionShort);
   if (!r) return;

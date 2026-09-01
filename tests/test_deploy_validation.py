@@ -182,3 +182,92 @@ def test_evaluate_deep_unknown_service_not_verifiable(monkeypatch):
                            region="eastus", resource_group="rg", subscription_id="sub",
                            arm_token="t")
     assert out[0]["verdict"] == "not_verifiable"
+
+
+# ------------------------------------------------- extended service coverage
+
+# Every service/tier the frontend offers a deep check for must have a template
+# here (or be advisory) — otherwise the UI would show "Run deep check" but the
+# backend would answer not_verifiable. Keep this list in sync with
+# _ZRS_DEEP_CHECKABLE in app/app.js.
+_EXPECTED_VALIDATE = {
+    "Azure Container Registry": ["premium"],
+    "Azure SignalR Service": ["premium"],
+    "Public IP Addresses": ["standard"],
+    "Azure Load Balancer (Standard)": ["standard"],
+    "Application Gateway (WAF v2)": ["standard_v2", "waf_v2"],
+    "Azure VPN Gateway": ["vpngw1az", "vpngw2az", "vpngw3az"],
+    "Azure ExpressRoute": ["ergw1az", "ergw2az", "ergw3az"],
+    "Azure AI Search": ["standard_s1", "standard_s2", "standard_s3", "storage_l1", "storage_l2"],
+    "Azure API Management": ["premium", "premium_v2"],
+    "Azure Spring Apps": ["standard", "enterprise"],
+    "App Service Environment": ["ase_v3"],
+    "Azure Logic Apps": ["standard"],
+}
+
+
+def test_all_expected_services_have_validate_templates():
+    for svc, tiers in _EXPECTED_VALIDATE.items():
+        assert dv.service_validate_kind(svc) == "validate", svc
+        for tier in tiers:
+            assert tier in dv._VALIDATE_SERVICES[svc], f"{svc}/{tier}"
+
+
+def test_builders_return_well_formed_resources():
+    for svc, tiers in _EXPECTED_VALIDATE.items():
+        for tier in tiers:
+            built = dv._VALIDATE_SERVICES[svc][tier]("westus3", "probe")
+            resources = built if isinstance(built, list) else [built]
+            assert resources, f"{svc}/{tier} produced no resources"
+            for res in resources:
+                assert res.get("type"), f"{svc}/{tier} resource missing type"
+                assert res.get("apiVersion"), f"{svc}/{tier} resource missing apiVersion"
+                assert res.get("location") == "westus3", f"{svc}/{tier} wrong location"
+                assert res.get("name"), f"{svc}/{tier} resource missing name"
+
+
+def test_gateway_and_ase_are_multi_resource():
+    # These need dependent infrastructure, so their builders must return a list
+    # (VNet + subnet [+ Public IP] + the zonal resource).
+    for svc, tier in (("Azure VPN Gateway", "vpngw1az"),
+                      ("Azure ExpressRoute", "ergw1az"),
+                      ("Application Gateway (WAF v2)", "waf_v2"),
+                      ("App Service Environment", "ase_v3")):
+        built = dv._VALIDATE_SERVICES[svc][tier]("eastus", "probe")
+        assert isinstance(built, list) and len(built) >= 2, f"{svc}/{tier}"
+
+
+def test_validate_accepts_multi_resource_list(monkeypatch):
+    _mock_post(monkeypatch, status=200, payload={"properties": {"provisioningState": "Succeeded"}})
+    resources = dv._VALIDATE_SERVICES["Azure VPN Gateway"]["vpngw1az"]("eastus", "probe")
+    out = dv.validate_resource(resource=resources, region="eastus", resource_group="rg",
+                               subscription_id="sub", arm_token="t")
+    assert out["verdict"] == "available"
+
+
+def test_evaluate_deep_runs_validate_for_new_service(monkeypatch):
+    payload = {"error": {"code": "SubscriptionIsOverQuotaForSku",
+                         "message": "Operation would exceed 'standard2' tier service quota."}}
+    _mock_post(monkeypatch, status=400, payload=payload)
+    out = dv.evaluate_deep(services=[{"name": "Azure AI Search", "tier": "standard_s2"}],
+                           region="eastus", resource_group="rg", subscription_id="sub",
+                           arm_token="t")
+    assert out[0]["verdict"] == "blocked"
+    assert out[0]["block_type"] == "quota"
+
+
+def test_frontend_deep_checkable_set_matches_backend():
+    """Every service the UI marks deep-checkable must be backed by a validate
+    template or an advisory entry — otherwise the button lies."""
+    app_js = os.path.join(_ROOT, "app", "app.js")
+    with open(app_js, encoding="utf-8") as fh:
+        src = fh.read()
+    marker = "const _ZRS_DEEP_CHECKABLE = new Set(["
+    start = src.index(marker) + len(marker)
+    block = src[start:src.index("]);", start)]
+    import re as _re
+    names = _re.findall(r'"([^"]+)"', block)
+    assert names, "could not parse _ZRS_DEEP_CHECKABLE"
+    for name in names:
+        kind = dv.service_validate_kind(name)
+        assert kind in ("validate", "advisory"), f"UI offers deep check for {name!r} but backend has no template"

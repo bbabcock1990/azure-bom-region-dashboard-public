@@ -51,13 +51,23 @@ log = logging.getLogger(__name__)
 
 VALIDATE_API_VERSION = "2021-04-01"
 
-# ── Catalog (service, tier) → minimal zone-redundant ARM resource ───────────
+
+def _uid(n: int = 12) -> str:
+    return uuid.uuid4().hex[:n]
+
+
+# ── Catalog (service, tier) → minimal zone-redundant ARM resource(s) ─────────
 #
-# Each entry is a callable ``(region, name) -> resource dict``. We enable the
-# zone-redundant knob for the tier so validation exercises the *AZ* capacity
-# path (that is the whole point — a non-ZR SKU would pre-flight fine while the
-# ZR one is quota-blocked). Names are random + unique so validate never trips on
-# a name collision.
+# Each entry is a callable ``(region, name) -> resource dict | [resource dict]``.
+# We enable the zone-redundant knob for the tier so validation exercises the
+# *AZ* capacity path (that is the whole point — a non-ZR SKU would pre-flight
+# fine while the ZR one is quota/zone blocked). Builders that need dependent
+# infrastructure (a VNet + GatewaySubnet + zonal Public IP for the gateway
+# families, a delegated subnet for App Service Environment) return a **list** of
+# resources; ``validate_resource`` accepts either shape. All names are random +
+# unique so validate never trips on a name collision. ``name`` is accepted for
+# signature symmetry but builders that need provider-specific name rules
+# generate their own conformant identifiers.
 
 def _serverfarm(sku_name: str, sku_tier: str):
     def build(region: str, name: str) -> Dict[str, Any]:
@@ -109,12 +119,197 @@ def _eventhub(region: str, name: str) -> Dict[str, Any]:
     }
 
 
+def _acr(region: str, name: str) -> Dict[str, Any]:
+    # ACR names: 5-50 alphanumerics, globally unique.
+    return {
+        "type": "Microsoft.ContainerRegistry/registries",
+        "apiVersion": "2023-07-01",
+        "name": "acr" + _uid(12),
+        "location": region,
+        "sku": {"name": "Premium"},
+        "properties": {"zoneRedundancy": "Enabled"},
+    }
+
+
+def _signalr(region: str, name: str) -> Dict[str, Any]:
+    # Premium SignalR is zone-redundant by default in AZ regions.
+    return {
+        "type": "Microsoft.SignalRService/signalR",
+        "apiVersion": "2023-02-01",
+        "name": "sr" + _uid(12),
+        "location": region,
+        "sku": {"name": "Premium_P1", "tier": "Premium", "capacity": 1},
+        "properties": {},
+    }
+
+
+def _public_ip(region: str, name: str) -> Dict[str, Any]:
+    # A zone-redundant Standard Public IP — also the shared building block that
+    # front-ends the zonal gateway/load-balancer families.
+    return {
+        "type": "Microsoft.Network/publicIPAddresses",
+        "apiVersion": "2023-09-01",
+        "name": "pip" + _uid(10),
+        "location": region,
+        "sku": {"name": "Standard", "tier": "Regional"},
+        "zones": ["1", "2", "3"],
+        "properties": {"publicIPAllocationMethod": "Static"},
+    }
+
+
+def _load_balancer(region: str, name: str) -> Dict[str, Any]:
+    return {
+        "type": "Microsoft.Network/loadBalancers",
+        "apiVersion": "2023-09-01",
+        "name": "lb" + _uid(10),
+        "location": region,
+        "sku": {"name": "Standard", "tier": "Regional"},
+        "properties": {},
+    }
+
+
+def _search(sku_name: str):
+    def build(region: str, name: str) -> Dict[str, Any]:
+        # replicaCount 3 forces the zone-redundant replica distribution path.
+        return {
+            "type": "Microsoft.Search/searchServices",
+            "apiVersion": "2023-11-01",
+            "name": "srch" + _uid(10),
+            "location": region,
+            "sku": {"name": sku_name},
+            "properties": {"replicaCount": 3, "partitionCount": 1},
+        }
+    return build
+
+
+def _apim(sku_name: str):
+    def build(region: str, name: str) -> Dict[str, Any]:
+        return {
+            "type": "Microsoft.ApiManagement/service",
+            "apiVersion": "2023-05-01-preview",
+            "name": "apim" + _uid(10),
+            "location": region,
+            "sku": {"name": sku_name, "capacity": 3},
+            "zones": ["1", "2", "3"],
+            "properties": {"publisherEmail": "bomcheck@example.com", "publisherName": "bomcheck"},
+        }
+    return build
+
+
+def _spring(sku_name: str, sku_tier: str):
+    def build(region: str, name: str) -> Dict[str, Any]:
+        return {
+            "type": "Microsoft.AppPlatform/Spring",
+            "apiVersion": "2023-12-01",
+            "name": "spr" + _uid(10),
+            "location": region,
+            "sku": {"name": sku_name, "tier": sku_tier},
+            "properties": {"zoneRedundant": True},
+        }
+    return build
+
+
+def _gateway(gateway_type: str, sku_name: str, prefix: str):
+    """Build a VNet + GatewaySubnet + zonal Public IP + zone-redundant
+    virtualNetworkGateway (VPN or ExpressRoute). Returns a resource list."""
+    def build(region: str, name: str) -> List[Dict[str, Any]]:
+        vnet = f"{prefix}vnet{_uid(8)}"
+        pip = f"{prefix}pip{_uid(8)}"
+        gw = f"{prefix}gw{_uid(8)}"
+        return [
+            {"type": "Microsoft.Network/virtualNetworks", "apiVersion": "2023-09-01",
+             "name": vnet, "location": region,
+             "properties": {"addressSpace": {"addressPrefixes": ["10.60.0.0/16"]},
+                            "subnets": [{"name": "GatewaySubnet",
+                                         "properties": {"addressPrefix": "10.60.255.0/27"}}]}},
+            {"type": "Microsoft.Network/publicIPAddresses", "apiVersion": "2023-09-01",
+             "name": pip, "location": region, "sku": {"name": "Standard"}, "zones": ["1", "2", "3"],
+             "properties": {"publicIPAllocationMethod": "Static"}},
+            {"type": "Microsoft.Network/virtualNetworkGateways", "apiVersion": "2023-09-01",
+             "name": gw, "location": region,
+             "dependsOn": [f"[resourceId('Microsoft.Network/virtualNetworks','{vnet}')]",
+                           f"[resourceId('Microsoft.Network/publicIPAddresses','{pip}')]"],
+             "properties": {
+                 "gatewayType": gateway_type,
+                 **({"vpnType": "RouteBased"} if gateway_type == "Vpn" else {}),
+                 "sku": {"name": sku_name, "tier": sku_name},
+                 "ipConfigurations": [{"name": "default", "properties": {
+                     "privateIPAllocationMethod": "Dynamic",
+                     "subnet": {"id": f"[resourceId('Microsoft.Network/virtualNetworks/subnets','{vnet}','GatewaySubnet')]"},
+                     "publicIPAddress": {"id": f"[resourceId('Microsoft.Network/publicIPAddresses','{pip}')]"}}}]}},
+        ]
+    return build
+
+
+def _app_gateway(sku_name: str):
+    """VNet + subnet + zonal Public IP + zone-spanning Application Gateway."""
+    def build(region: str, name: str) -> List[Dict[str, Any]]:
+        vnet = f"agw-vnet-{_uid(8)}"
+        pip = f"agw-pip-{_uid(8)}"
+        agw = f"agw-{_uid(8)}"
+        sub_id = f"[resourceId('Microsoft.Network/virtualNetworks/subnets','{vnet}','agw')]"
+        pip_id = f"[resourceId('Microsoft.Network/publicIPAddresses','{pip}')]"
+        agw_id = f"[resourceId('Microsoft.Network/applicationGateways','{agw}')]"
+        return [
+            {"type": "Microsoft.Network/virtualNetworks", "apiVersion": "2023-09-01",
+             "name": vnet, "location": region,
+             "properties": {"addressSpace": {"addressPrefixes": ["10.61.0.0/16"]},
+                            "subnets": [{"name": "agw", "properties": {"addressPrefix": "10.61.0.0/24"}}]}},
+            {"type": "Microsoft.Network/publicIPAddresses", "apiVersion": "2023-09-01",
+             "name": pip, "location": region, "sku": {"name": "Standard"}, "zones": ["1", "2", "3"],
+             "properties": {"publicIPAllocationMethod": "Static"}},
+            {"type": "Microsoft.Network/applicationGateways", "apiVersion": "2023-09-01",
+             "name": agw, "location": region, "zones": ["1", "2", "3"],
+             "dependsOn": [f"[resourceId('Microsoft.Network/virtualNetworks','{vnet}')]", pip_id],
+             "properties": {
+                 "sku": {"name": sku_name, "tier": sku_name, "capacity": 2},
+                 "gatewayIPConfigurations": [{"name": "gw", "properties": {"subnet": {"id": sub_id}}}],
+                 "frontendIPConfigurations": [{"name": "fe", "properties": {"publicIPAddress": {"id": pip_id}}}],
+                 "frontendPorts": [{"name": "p80", "properties": {"port": 80}}],
+                 "backendAddressPools": [{"name": "bp", "properties": {}}],
+                 "backendHttpSettingsCollection": [{"name": "bs", "properties": {"port": 80, "protocol": "Http"}}],
+                 "httpListeners": [{"name": "l", "properties": {
+                     "frontendIPConfiguration": {"id": f"{agw_id}/frontendIPConfigurations/fe"},
+                     "frontendPort": {"id": f"{agw_id}/frontendPorts/p80"}, "protocol": "Http"}}],
+                 "requestRoutingRules": [{"name": "r", "properties": {"ruleType": "Basic", "priority": 100,
+                     "httpListener": {"id": f"{agw_id}/httpListeners/l"},
+                     "backendAddressPool": {"id": f"{agw_id}/backendAddressPools/bp"},
+                     "backendHttpSettings": {"id": f"{agw_id}/backendHttpSettingsCollection/bs"}}}]}},
+        ]
+    return build
+
+
+def _ase_v3(region: str, name: str) -> List[Dict[str, Any]]:
+    """VNet + delegated subnet + zone-redundant App Service Environment v3."""
+    vnet = f"ase-vnet-{_uid(8)}"
+    ase = f"ase{_uid(10)}"
+    return [
+        {"type": "Microsoft.Network/virtualNetworks", "apiVersion": "2023-09-01",
+         "name": vnet, "location": region,
+         "properties": {"addressSpace": {"addressPrefixes": ["10.62.0.0/16"]},
+                        "subnets": [{"name": "ase", "properties": {"addressPrefix": "10.62.0.0/24",
+                            "delegations": [{"name": "d", "properties": {
+                                "serviceName": "Microsoft.Web/hostingEnvironments"}}]}}]}},
+        {"type": "Microsoft.Web/hostingEnvironments", "apiVersion": "2023-12-01",
+         "name": ase, "location": region, "kind": "ASEV3",
+         "dependsOn": [f"[resourceId('Microsoft.Network/virtualNetworks','{vnet}')]"],
+         "properties": {"internalLoadBalancingMode": "None", "zoneRedundant": True,
+             "virtualNetwork": {"id": f"[resourceId('Microsoft.Network/virtualNetworks/subnets','{vnet}','ase')]"}}},
+    ]
+
+
 # service name -> {tier_id -> resource-builder}
 _VALIDATE_SERVICES: Dict[str, Dict[str, Any]] = {
     "Azure App Service": {
         "premium_v2": _serverfarm("P1v2", "PremiumV2"),
         "premium_v3": _serverfarm("P1v3", "PremiumV3"),
         "isolated_v2": _serverfarm("I1v2", "IsolatedV2"),
+    },
+    "App Service Environment": {
+        "ase_v3": _ase_v3,
+    },
+    "Azure Logic Apps": {
+        "standard": _serverfarm("WS1", "WorkflowStandard"),
     },
     "Azure Cache for Redis": {
         "premium": _redis("Premium"),
@@ -125,6 +320,47 @@ _VALIDATE_SERVICES: Dict[str, Dict[str, Any]] = {
     "Azure Event Hubs": {
         "premium": _eventhub,
         "dedicated": _eventhub,
+    },
+    "Azure Container Registry": {
+        "premium": _acr,
+    },
+    "Azure SignalR Service": {
+        "premium": _signalr,
+    },
+    "Azure Spring Apps": {
+        "standard": _spring("S0", "Standard"),
+        "enterprise": _spring("E0", "Enterprise"),
+    },
+    "Public IP Addresses": {
+        "standard": _public_ip,
+    },
+    "Azure Load Balancer (Standard)": {
+        "standard": _load_balancer,
+    },
+    "Application Gateway (WAF v2)": {
+        "standard_v2": _app_gateway("Standard_v2"),
+        "waf_v2": _app_gateway("WAF_v2"),
+    },
+    "Azure VPN Gateway": {
+        "vpngw1az": _gateway("Vpn", "VpnGw1AZ", "vpn"),
+        "vpngw2az": _gateway("Vpn", "VpnGw2AZ", "vpn"),
+        "vpngw3az": _gateway("Vpn", "VpnGw3AZ", "vpn"),
+    },
+    "Azure ExpressRoute": {
+        "ergw1az": _gateway("ExpressRoute", "ErGw1AZ", "er"),
+        "ergw2az": _gateway("ExpressRoute", "ErGw2AZ", "er"),
+        "ergw3az": _gateway("ExpressRoute", "ErGw3AZ", "er"),
+    },
+    "Azure AI Search": {
+        "standard_s1": _search("standard"),
+        "standard_s2": _search("standard2"),
+        "standard_s3": _search("standard3"),
+        "storage_l1": _search("storage_optimized_l1"),
+        "storage_l2": _search("storage_optimized_l2"),
+    },
+    "Azure API Management": {
+        "premium": _apim("Premium"),
+        "premium_v2": _apim("PremiumV2"),
     },
 }
 
@@ -205,7 +441,7 @@ def _random_name(prefix: str) -> str:
 
 def validate_resource(
     *,
-    resource: Dict[str, Any],
+    resource: Any,
     region: str,
     resource_group: str,
     subscription_id: str,
@@ -214,11 +450,15 @@ def validate_resource(
 ) -> Dict[str, Any]:
     """Issue a single ARM ``validate`` for ``resource`` and classify the result.
 
-    Returns a dict with at least ``verdict`` and ``message``; ``blocked`` results
-    also carry ``block_type``, ``ticket`` and ``help_url``. Never creates
-    anything. Degrades to ``unverifiable`` on auth/permission/transport errors."""
+    ``resource`` may be a single resource dict or a **list** of resource dicts
+    (for services whose zone-redundant tier needs dependent infrastructure, e.g.
+    a gateway that requires a VNet + zonal Public IP). Returns a dict with at
+    least ``verdict`` and ``message``; ``blocked`` results also carry
+    ``block_type``, ``ticket`` and ``help_url``. Never creates anything. Degrades
+    to ``unverifiable`` on auth/permission/transport errors."""
     token = _strip_bearer(arm_token)
     dep_name = _random_name("bomcheck")
+    resources = resource if isinstance(resource, list) else [resource]
     url = (f"{ARM_BASE}/subscriptions/{subscription_id}/resourcegroups/"
            f"{resource_group}/providers/Microsoft.Resources/deployments/"
            f"{dep_name}/validate")
@@ -228,7 +468,7 @@ def validate_resource(
             "template": {
                 "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
                 "contentVersion": "1.0.0.0",
-                "resources": [resource],
+                "resources": resources,
             },
             "parameters": {},
         }
