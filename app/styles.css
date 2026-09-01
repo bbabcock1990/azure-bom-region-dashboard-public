@@ -1365,6 +1365,46 @@ table.region-table tbody tr.selected td { background: var(--ms-blue-light); }
 }
 .verify-progress-label { font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
 
+/* Best-region recommendation panel (Overview) */
+.best-region-panel {
+  margin: 0 0 16px;
+  padding: 16px 18px;
+  border: 1px solid var(--border, rgba(120,120,120,.25));
+  border-radius: 12px;
+  background: var(--card-bg, rgba(255,255,255,.02));
+}
+.br-header { margin-bottom: 12px; }
+.br-title { font-size: 15px; font-weight: 700; }
+.br-lead { font-size: 13px; margin-top: 3px; }
+.br-good { color: #1a8f52; font-weight: 600; }
+.br-warn { color: #b8860b; font-weight: 600; }
+.br-sub { color: var(--text-secondary); font-weight: 400; }
+.br-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }
+.br-card {
+  border: 1px solid var(--border, rgba(120,120,120,.25));
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: var(--bg, rgba(0,0,0,.02));
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.br-card--best { border-color: rgba(34,160,90,.5); box-shadow: 0 0 0 1px rgba(34,160,90,.25); }
+.br-rank { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--text-secondary); }
+.br-card--best .br-rank { color: #1a8f52; }
+.br-name { font-size: 15px; font-weight: 700; }
+.br-geo { font-size: 12px; color: var(--text-secondary); }
+.br-chips { display: flex; flex-wrap: wrap; gap: 5px; margin: 4px 0; }
+.br-chip { font-size: 11px; padding: 2px 8px; border-radius: 9px; border: 1px solid transparent; white-space: nowrap; }
+.br-chip.chip-ok { background: rgba(34,160,90,.13); color: #1a8f52; }
+.br-chip.chip-warn { background: rgba(200,140,20,.14); color: #b8860b; }
+.br-chip.chip-bad { background: rgba(200,50,40,.13); color: #c33; }
+.br-chip.chip-neutral { background: rgba(120,120,120,.13); color: var(--text-secondary); }
+.br-chip.chip-conf { background: rgba(90,120,180,.12); }
+.br-remedy { font-size: 12px; color: var(--text-secondary); }
+.br-remedy--ok { color: #1a8f52; }
+.br-open { align-self: flex-start; margin-top: 4px; }
+
 /* =========================================================================
    Map
    ========================================================================= */

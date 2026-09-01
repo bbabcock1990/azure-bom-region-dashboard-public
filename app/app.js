@@ -814,6 +814,7 @@ function applyFilters() {
   renderTable();
   refreshMap();
   renderOverviewCharts();
+  renderBestRegionPanel();
   renderOverviewReco();
   updateStats();
 }
@@ -7878,6 +7879,121 @@ function _supportSubLabel(subId) {
   try { name = _subNameById(subId) || ""; } catch (e) {}
   const shortId = subId.length >= 12 ? subId.slice(0, 8) + "…" + subId.slice(-4) : subId;
   return name && name !== subId ? `${name} · ${shortId}` : shortId;
+}
+
+// ---------------------------------------------- Best region recommendation
+// Rank every region for the current BOM on a composite of deployment verdict,
+// verdict confidence, quota, AZ support, remediation effort, latency and cost,
+// then surface the top picks with an at-a-glance trade-off explanation.
+const _VERDICT_RANK = { ready: 0, ready_with_constraints: 1, needs_validation: 2, not_recommended: 3 };
+const _CONF_RANK = { validated: 0, capability: 1, metadata: 2 };
+const _QUOTA_RANK = { sufficient: 0, unknown: 1, insufficient: 2 };
+
+function _latencyForRegion(regionName) {
+  const sel = document.getElementById("latency-source");
+  const src = sel && sel.value ? sel.value : "";
+  if (!src) return null;
+  const matrix = (STATE.snapshot && STATE.snapshot.latency_matrix) || {};
+  const map = buildDisplayToLatency();
+  const srcL = map[src.toLowerCase()];
+  const dstL = map[String(regionName).toLowerCase()];
+  if (!srcL || !dstL || !matrix[srcL]) return null;
+  const ms = matrix[srcL][dstL];
+  return (ms == null) ? null : ms;
+}
+
+function _scoreRegionForBom(r) {
+  const dep = getDeploymentVerdictInfo(r);
+  const conf = dep.confidence || (r._conf && r._conf.tier) || "metadata";
+  const verdictRank = _VERDICT_RANK[dep.verdict] != null ? _VERDICT_RANK[dep.verdict] : 3;
+  const confRank = _CONF_RANK[conf] != null ? _CONF_RANK[conf] : 2;
+  const quotaBucket = _quotaFilterBucket(r);
+  const quotaRank = _QUOTA_RANK[quotaBucket] != null ? _QUOTA_RANK[quotaBucket] : 1;
+  const azRank = (_regionSupportsAz(r) === false) ? 1 : 0;
+  const remediation = ((dep.blockers || []).length) + ((dep.constraints || []).length);
+  const unverifiablePenalty = (dep.liveNote === "unverifiable") ? 1 : 0;
+  const latency = _latencyForRegion(r.name);
+  const cost = Number(r.est_monthly) || 0;
+  // Composite: verdict dominates, then confidence, quota, remediation, AZ.
+  const score = verdictRank * 1000
+    + confRank * 120
+    + quotaRank * 80
+    + unverifiablePenalty * 60
+    + remediation * 15
+    + azRank * 8;
+  return { r, dep, conf, verdictRank, quotaBucket, azRank, remediation, latency, cost, score };
+}
+
+function _rankRegionsForBom() {
+  const regions = (STATE.snapshot && STATE.snapshot.regions) || [];
+  const scored = regions.map(_scoreRegionForBom);
+  scored.sort((a, b) => {
+    if (a.score !== b.score) return a.score - b.score;
+    // Tie-breakers: lower latency (if known), then lower cost, then name.
+    const al = a.latency == null ? Infinity : a.latency;
+    const bl = b.latency == null ? Infinity : b.latency;
+    if (al !== bl) return al - bl;
+    if (a.cost !== b.cost) return a.cost - b.cost;
+    return String(a.r.name).localeCompare(String(b.r.name));
+  });
+  return scored;
+}
+
+function _bestRegionTradeoffs(s) {
+  const bits = [];
+  const dep = s.dep;
+  bits.push({ label: dep.text, cls: `chip-verdict ${dep.cls}` });
+  const cb = _confidenceBadge(dep);
+  if (cb) bits.push({ label: cb.text + " confidence", cls: `chip-conf ${cb.cls}` });
+  const quotaTxt = { sufficient: "Quota OK", insufficient: "Quota short", unknown: "Quota unknown" }[s.quotaBucket] || "Quota unknown";
+  bits.push({ label: quotaTxt, cls: s.quotaBucket === "sufficient" ? "chip-ok" : (s.quotaBucket === "insufficient" ? "chip-bad" : "chip-warn") });
+  bits.push({ label: s.azRank ? "No AZs (regional)" : "AZ-enabled", cls: s.azRank ? "chip-warn" : "chip-ok" });
+  if (s.latency != null) bits.push({ label: `${s.latency} ms`, cls: s.latency < 50 ? "chip-ok" : (s.latency < 120 ? "chip-warn" : "chip-bad") });
+  if (s.cost) bits.push({ label: `${_fmtMoney(s.cost, (PRICING.estimate && PRICING.estimate.currency) || "USD")}/mo`, cls: "chip-neutral" });
+  return bits;
+}
+
+function renderBestRegionPanel() {
+  const el = document.getElementById("best-region-panel");
+  if (!el) return;
+  const ranked = _rankRegionsForBom();
+  if (!ranked.length) { el.classList.add("hidden"); el.innerHTML = ""; return; }
+
+  const top = ranked.slice(0, 3);
+  const best = top[0];
+  const cards = top.map((s, i) => {
+    const chips = _bestRegionTradeoffs(s).map(c => `<span class="br-chip ${c.cls}">${escapeHtml(c.label)}</span>`).join("");
+    const remedy = s.remediation
+      ? `<div class="br-remedy">${s.remediation} item${s.remediation === 1 ? "" : "s"} to address — open region for the plan</div>`
+      : `<div class="br-remedy br-remedy--ok">No blockers or constraints</div>`;
+    return `<div class="br-card${i === 0 ? " br-card--best" : ""}" data-region-short="${escapeHtml(s.r.short || "")}">
+        <div class="br-rank">${i === 0 ? "★ Best match" : "#" + (i + 1)}</div>
+        <div class="br-name">${escapeHtml(s.r.name)}</div>
+        <div class="br-geo">${escapeHtml(s.r.geo || "")}${s.r.country ? " • " + escapeHtml(s.r.country) : ""}</div>
+        <div class="br-chips">${chips}</div>
+        ${remedy}
+        <button type="button" class="btn btn--sm br-open" data-region-short="${escapeHtml(s.r.short || "")}">View details →</button>
+      </div>`;
+  }).join("");
+
+  const heading = best.verdictRank === 0
+    ? `<span class="br-good">✅ ${escapeHtml(best.r.name)} is your best fit</span>`
+    : `<span class="br-warn">⚠️ No region is fully clean — ${escapeHtml(best.r.name)} is the closest</span>`;
+
+  el.innerHTML = `
+    <div class="br-header">
+      <div class="br-title">Best regions for your BOM</div>
+      <div class="br-lead">${heading} <span class="br-sub">ranked by readiness, confidence, quota, latency & cost</span></div>
+    </div>
+    <div class="br-cards">${cards}</div>`;
+  el.classList.remove("hidden");
+  el.querySelectorAll(".br-open").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const short = btn.getAttribute("data-region-short");
+      const region = _findRegionByShort(short);
+      if (region) openDrilldown(region);
+    });
+  });
 }
 
 // Plain-language recommendation banner rendered above the Overview donuts.
