@@ -50,6 +50,7 @@ log = logging.getLogger(__name__)
 STORAGE_SKUS_API_VERSION = "2023-05-01"
 SQL_CAPABILITIES_API_VERSION = "2023-08-01-preview"
 FLEX_CAPABILITIES_API_VERSION = "2023-06-30"
+ELASTICSAN_SKUS_API_VERSION = "2024-05-01"
 
 # ── Catalog tier → authoritative ARM target ─────────────────────────────────
 #
@@ -84,6 +85,12 @@ _DISK_SERVICES: Dict[str, Dict[str, str]] = {
     },
 }
 
+# service name -> {tier_id -> Elastic SAN SKU name}. Same locationInfo/zones
+# shape as Compute disks, but under its own resource provider.
+_ELASTICSAN_SERVICES: Dict[str, Dict[str, str]] = {
+    "Azure Elastic SAN": {"zrs": "Premium_ZRS"},
+}
+
 # service name -> {tier_id -> SQL edition name}
 _SQL_SERVICES: Dict[str, Dict[str, str]] = {
     "Azure SQL Database": {
@@ -114,12 +121,14 @@ _FLEX_SERVICES: Dict[str, Dict[str, Any]] = {
 
 
 def service_check_kind(name: str) -> Optional[str]:
-    """Return ``'storage' | 'disks' | 'sql' | 'flex'`` if the service has an
-    authoritative per-subscription zonal check, else ``None``."""
+    """Return ``'storage' | 'disks' | 'elasticsan' | 'sql' | 'flex'`` if the
+    service has an authoritative per-subscription zonal check, else ``None``."""
     if name in _STORAGE_SERVICES:
         return "storage"
     if name in _DISK_SERVICES:
         return "disks"
+    if name in _ELASTICSAN_SERVICES:
+        return "elasticsan"
     if name in _SQL_SERVICES:
         return "sql"
     if name in _FLEX_SERVICES:
@@ -227,6 +236,48 @@ def fetch_disk_sku_state(
                 key = name.lower()
                 out[key] = {"zones": sorted(set(zones)), "restricted": bool(reason), "reason": reason or ""}
             next_url = data.get("nextLink") or None
+    return out
+
+
+# ── Microsoft.ElasticSan/skus ───────────────────────────────────────────────
+
+def fetch_elasticsan_sku_state(
+    *, arm_token: str, subscription_id: str, region: str,
+    timeout_s: float = DEFAULT_TIMEOUT_S,
+) -> Dict[str, Dict[str, Any]]:
+    """Return ``{sku_lower: {"zones": [..], "restricted": bool, "reason": str}}``
+    for the region from ``Microsoft.ElasticSan/skus``. Restrictions may sit at
+    the item level or inside ``locationInfo``; both are honoured. Degrades to
+    ``{}`` (→ unverifiable) on any ARM error."""
+    token = _strip_bearer(arm_token)
+    region_norm = _normalize_region(region)
+    url = f"{ARM_BASE}/subscriptions/{subscription_id}/providers/Microsoft.ElasticSan/skus"
+    params = {"api-version": ELASTICSAN_SKUS_API_VERSION}
+    try:
+        with httpx.Client(timeout=timeout_s, http2=False) as client:
+            r = client.get(url, params=params, headers=_headers(token))
+            if r.status_code >= 400:
+                log.warning("elasticsan skus: ARM %d for sub=%s — unverifiable", r.status_code, subscription_id)
+                return {}
+            data = r.json()
+    except Exception as ex:  # pragma: no cover - defensive
+        log.warning("elasticsan skus request failed: %r", ex)
+        return {}
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for item in data.get("value") or []:
+        name = str(item.get("name") or "")
+        if not name:
+            continue
+        zones: List[str] = []
+        loc_restrictions: List[Any] = []
+        for loc_info in item.get("locationInfo") or []:
+            if _normalize_region(str(loc_info.get("location") or "")) == region_norm:
+                zones = [str(z) for z in (loc_info.get("zones") or [])]
+                loc_restrictions = loc_info.get("restrictions") or []
+        reason = (_restriction_blocks_region(item.get("restrictions"), region_norm)
+                  or _restriction_blocks_region(loc_restrictions, region_norm))
+        out[name.lower()] = {"zones": sorted(set(zones)), "restricted": bool(reason), "reason": reason or ""}
     return out
 
 
@@ -392,6 +443,7 @@ def fetch_flex_edition_state(
 _SOURCE_LABEL = {
     "storage": "Microsoft.Storage/skus",
     "disks": "Microsoft.Compute/skus (disks)",
+    "elasticsan": "Microsoft.ElasticSan/skus",
     "sql": "Microsoft.Sql capabilities",
     "flex": "Flexible Server capabilities",
 }
@@ -422,6 +474,25 @@ def _disk_verdict(state: Dict[str, Dict[str, Any]], sku: str) -> Dict[str, Any]:
                                f"({entry.get('reason') or 'restricted'})."}
         return {"verdict": "unavailable",
                 "message": f"{sku} exposes no availability zones in this region — ZRS disks can't be created here."}
+    if entry.get("restricted"):
+        return {"verdict": "blocked",
+                "message": f"{sku} is restricted for this subscription ({entry.get('reason') or 'restricted'})."}
+    return {"verdict": "available",
+            "message": f"{sku} is offered across {len(entry['zones'])} zone(s) and unrestricted."}
+
+
+def _elasticsan_verdict(state: Dict[str, Dict[str, Any]], sku: str) -> Dict[str, Any]:
+    entry = state.get(sku.lower())
+    if not state:
+        return {"verdict": "unverifiable", "message": "Elastic SAN SKU list unavailable for this subscription."}
+    if not entry or not entry.get("zones"):
+        if entry and entry.get("restricted"):
+            return {"verdict": "blocked",
+                    "message": f"{sku} is restricted for this subscription in the region "
+                               f"({entry.get('reason') or 'restricted'})."}
+        return {"verdict": "unavailable",
+                "message": f"{sku} exposes no availability zones in this region — a zone-redundant "
+                           f"Elastic SAN can't be created here."}
     if entry.get("restricted"):
         return {"verdict": "blocked",
                 "message": f"{sku} is restricted for this subscription ({entry.get('reason') or 'restricted'})."}
@@ -481,6 +552,7 @@ def evaluate(
     region_norm = _normalize_region(region)
     storage_state: Optional[Dict] = None
     disk_state: Optional[Dict] = None
+    elasticsan_state: Optional[Dict] = None
     sql_state: Optional[Dict] = None
     flex_state: Dict[str, Optional[Dict]] = {}
 
@@ -509,6 +581,15 @@ def evaluate(
                 disk_state = fetch_disk_sku_state(
                     arm_token=arm_token, subscription_id=subscription_id, region=region_norm, timeout_s=timeout_s)
             results.append({**base, "target": sku, **_disk_verdict(disk_state, sku)})
+        elif kind == "elasticsan":
+            sku = _ELASTICSAN_SERVICES[name].get(tier)
+            if not sku:
+                results.append({**base, "verdict": "not_verifiable", "message": "Selected tier is not zone-redundant."})
+                continue
+            if elasticsan_state is None:
+                elasticsan_state = fetch_elasticsan_sku_state(
+                    arm_token=arm_token, subscription_id=subscription_id, region=region_norm, timeout_s=timeout_s)
+            results.append({**base, "target": sku, **_elasticsan_verdict(elasticsan_state, sku)})
         elif kind == "sql":
             edition = _SQL_SERVICES[name].get(tier)
             if not edition:

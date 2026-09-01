@@ -1235,6 +1235,7 @@ const _ZRS_LIVE_CHECKABLE = new Set([
   "Azure SQL Managed Instance",
   "Azure Database for PostgreSQL",
   "Azure Database for MySQL",
+  "Azure Elastic SAN",
 ]);
 
 function _zrsKey(name, tier) { return `${name}||${tier}`; }

@@ -34,7 +34,7 @@ def test_service_check_kind_maps_known_services():
 
 def test_service_check_kind_none_for_documented_only():
     assert zc.service_check_kind("Azure Firewall") is None
-    assert zc.service_check_kind("Azure Elastic SAN") is None
+    assert zc.service_check_kind("Azure Cache for Redis") is None
     assert zc.service_check_kind("") is None
 
 
@@ -317,3 +317,55 @@ def test_evaluate_flex_uses_provider_once(monkeypatch):
     assert calls["n"] == 1  # one round-trip per provider
     assert all(v["verdict"] == "available" for v in out)
     assert out[0]["source"] == "Flexible Server capabilities"
+
+
+# ---------------------------------------------------------------- Elastic SAN
+
+def test_service_check_kind_elasticsan():
+    assert zc.service_check_kind("Azure Elastic SAN") == "elasticsan"
+
+
+def test_fetch_elasticsan_sku_state_parses(monkeypatch):
+    payload = {"value": [
+        {"name": "Premium_ZRS", "locationInfo": [
+            {"location": "eastus", "zones": ["1", "2", "3"], "restrictions": []}]},
+        {"name": "Premium_LRS", "locationInfo": [
+            {"location": "eastus", "zones": [], "restrictions": []}]},
+    ]}
+    _mock_client(monkeypatch, payload)
+    state = zc.fetch_elasticsan_sku_state(arm_token="t", subscription_id="s", region="eastus")
+    assert state["premium_zrs"]["zones"] == ["1", "2", "3"]
+    assert state["premium_zrs"]["restricted"] is False
+
+
+def test_fetch_elasticsan_honours_locationinfo_restriction(monkeypatch):
+    payload = {"value": [
+        {"name": "Premium_ZRS", "locationInfo": [
+            {"location": "eastus", "zones": ["1", "2", "3"],
+             "restrictions": [{"type": "Location", "reasonCode": "NotAvailableForSubscription",
+                               "restrictionInfo": {"locations": ["eastus"]}}]}]},
+    ]}
+    _mock_client(monkeypatch, payload)
+    state = zc.fetch_elasticsan_sku_state(arm_token="t", subscription_id="s", region="eastus")
+    assert state["premium_zrs"]["restricted"] is True
+
+
+def test_elasticsan_verdict_available():
+    state = {"premium_zrs": {"zones": ["1", "2", "3"], "restricted": False, "reason": ""}}
+    assert zc._elasticsan_verdict(state, "Premium_ZRS")["verdict"] == "available"
+
+
+def test_elasticsan_verdict_unavailable_without_zones():
+    state = {"premium_zrs": {"zones": [], "restricted": False, "reason": ""}}
+    assert zc._elasticsan_verdict(state, "Premium_ZRS")["verdict"] == "unavailable"
+
+
+def test_evaluate_elasticsan(monkeypatch):
+    monkeypatch.setattr(zc, "fetch_elasticsan_sku_state",
+                        lambda **k: {"premium_zrs": {"zones": ["1", "2", "3"], "restricted": False, "reason": ""}})
+    out = zc.evaluate(
+        services=[{"name": "Azure Elastic SAN", "tier": "zrs"}],
+        region="eastus", arm_token="t", subscription_id="s",
+    )
+    assert out[0]["verdict"] == "available"
+    assert out[0]["source"] == "Microsoft.ElasticSan/skus"
