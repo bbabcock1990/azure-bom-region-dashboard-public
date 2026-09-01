@@ -59,6 +59,7 @@ ROUTES = [
     ("bom/sensitivity", ["GET"], "bom_sensitivity"),
     ("bom/sku_families", ["GET"], "bom_sku_families"),
     ("bom/zonal-capability", ["POST"], "bom_zonal_capability"),
+    ("bom/deep-check", ["POST"], "bom_deep_check"),
     ("bom/service_catalog/{name}", ["GET", "POST", "DELETE"], "bom_service_catalog"),
     ("bom/service_catalog", ["GET", "POST", "DELETE"], "bom_service_catalog"),
     ("bom/region_catalog/{name}", ["GET", "POST", "DELETE"], "bom_region_catalog"),

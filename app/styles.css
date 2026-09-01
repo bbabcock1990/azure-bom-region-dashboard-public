@@ -2910,6 +2910,16 @@ html.filters-collapsed-init.bomnav-collapsed-init .layout { grid-template-column
   font-size: 12px; font-weight: 600; color: var(--text-secondary, #aab3c8);
 }
 .settings-owner-grid input, .settings-owner-grid select { width: 100%; }
+.settings-owner-grid label.settings-owner-wide { grid-column: 1 / -1; }
+.settings-owner-grid label.settings-owner-wide small { font-weight: 400; }
+.zrs-deepbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  flex-wrap: wrap; margin: 10px 0;
+}
+.zrs-deepbar > div { flex: 1 1 320px; min-width: 260px; }
+.zrs-deepbar .btn { flex: 0 0 auto; white-space: nowrap; }
+.btn--xs { padding: .12rem .45rem; font-size: .72rem; line-height: 1.4; }
+.zrs-ticket-btn { margin-left: 4px; vertical-align: middle; }
 .settings-danger {
   margin-top: 22px;
   padding: 14px 16px;

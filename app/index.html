@@ -314,6 +314,10 @@
                     <option value="critical">Critical</option>
                   </select>
                 </label>
+                <label class="settings-owner-wide">Validation resource group
+                  <input type="text" id="owner-valrg" maxlength="90" autocomplete="off" placeholder="e.g. rg-bom-validation" />
+                  <small class="muted">An <strong>existing</strong> resource group used for the opt-in <strong>deep deployability check</strong>. That check runs Azure pre-flight validation only — it never creates resources or incurs cost. Leave blank to keep read-only checks only.</small>
+                </label>
               </div>
               <div class="support-form-actions">
                 <button type="button" class="btn btn--accent" id="owner-save">Save owner</button>

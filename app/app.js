@@ -1238,6 +1238,17 @@ const _ZRS_LIVE_CHECKABLE = new Set([
   "Azure Elastic SAN",
 ]);
 
+// Services with no read-only capability API, but which can be verified by an
+// opt-in, non-destructive ARM pre-flight *validation* (creates nothing). These
+// are surfaced with a "Run deep check" button rather than checked automatically.
+const _ZRS_DEEP_CHECKABLE = new Set([
+  "Azure App Service",
+  "Azure Cache for Redis",
+  "Azure Service Bus",
+  "Azure Event Hubs",
+  "Azure Cosmos DB",
+]);
+
 function _zrsKey(name, tier) { return `${name}||${tier}`; }
 
 // Baseline (documented) mark from region-level AZ support — used for services
@@ -1264,6 +1275,35 @@ function _zrsLiveMark(v, az) {
     case "unverifiable":
       return `<span class="zrs-mark warn" title="${escapeHtml(v.message || "")}">⚠️ Could not read capability</span>`;
     default: // not_verifiable → documented region-AZ fallback
+      return _zrsBaselineMark(az);
+  }
+}
+
+// Deep (validate-based) per-service verdict → mark HTML. Blocked results carry a
+// block_type + ticket hint so we can offer a one-click support-ticket path.
+function _zrsDeepMark(v, az) {
+  if (!v) return _zrsBaselineMark(az);
+  const msg = escapeHtml(v.message || "");
+  switch (v.verdict) {
+    case "available":
+      return `<span class="zrs-mark ok" title="${msg}">✓ Verified deployable <span class="zrs-src">· pre-flight</span></span>`;
+    case "blocked": {
+      const bt = v.block_type === "quota" ? "quota" : (v.block_type === "sku_restriction" ? "SKU/zone restriction" : "region restriction");
+      const btn = `<button type="button" class="btn btn--xs zrs-ticket-btn" data-zrs-ticket="${escapeHtml(v.block_type || "")}" data-zrs-svc="${escapeHtml(v.name || "")}" title="Open a pre-filled Azure support ticket for this blocker">🎫 Create ticket</button>`;
+      const help = v.help_url ? ` <a href="${escapeHtml(v.help_url)}" target="_blank" rel="noopener" class="zrs-src">learn more</a>` : "";
+      return `<span class="zrs-mark danger" title="${msg}">⛔ Blocked (${escapeHtml(bt)}) <span class="zrs-src">· pre-flight</span></span> ${btn}${help}`;
+    }
+    case "advisory": {
+      const help = v.help_url ? ` <a href="${escapeHtml(v.help_url)}" target="_blank" rel="noopener" class="zrs-src">region access</a>` : "";
+      return `<span class="zrs-mark warn" title="${msg}">ℹ️ Not provable pre-deploy${help}</span>`;
+    }
+    case "no_resource_group":
+      return `<span class="zrs-mark warn" title="${msg}">⚙️ Set a validation resource group in Settings</span>`;
+    case "no_subscription":
+      return `<span class="zrs-mark warn" title="${msg}">⚠️ Select a subscription to verify</span>`;
+    case "unverifiable":
+      return `<span class="zrs-mark warn" title="${msg}">⚠️ Pre-flight inconclusive</span>`;
+    default:
       return _zrsBaselineMark(az);
   }
 }
@@ -1309,16 +1349,25 @@ function renderZrsReadinessSection(r) {
   }
   const rows = sels.map(s => {
     const live = _ZRS_LIVE_CHECKABLE.has(s.name);
+    const deep = _ZRS_DEEP_CHECKABLE.has(s.name);
     // Checkable services start in a "checking" state (filled by the live call);
     // documented ones show the region-AZ baseline immediately.
     const initial = live
       ? (sub ? `<span class="zrs-mark checking">⏳ Verifying live…</span>` : _zrsLiveMark({ verdict: "no_subscription" }, az))
-      : _zrsBaselineMark(az);
+      : (deep ? `<span class="zrs-mark">${_zrsBaselineMark(az)}<span class="zrs-src"> · deep check available</span></span>` : _zrsBaselineMark(az));
     return `<div class="key">${escapeHtml(s.name)} <span class="svc-tier-chip">${escapeHtml(s.tierLabel)}</span></div>` +
-      `<div class="zrs-svc-slot" data-zrs-key="${escapeHtml(_zrsKey(s.name, s.tierId))}" data-zrs-live="${live ? "1" : "0"}">${initial}</div>`;
+      `<div class="zrs-svc-slot" data-zrs-key="${escapeHtml(_zrsKey(s.name, s.tierId))}" data-zrs-svc-name="${escapeHtml(s.name)}" data-zrs-tier="${escapeHtml(s.tierId)}" data-zrs-live="${live ? "1" : "0"}" data-zrs-deep="${deep ? "1" : "0"}">${initial}</div>`;
   }).join("");
   const legend = `<div class="note muted zrs-legend">✓ Verified deployable = confirmed live via an authoritative ARM capability/SKU API for your subscription. “region AZ” = documented Availability-Zone support only (no per-service API to verify).</div>`;
-  return `${intro}<div class="kv">${rows}</div>${legend}`;
+  const hasDeep = sels.some(s => _ZRS_DEEP_CHECKABLE.has(s.name));
+  let deepBar = "";
+  if (hasDeep && az !== false) {
+    deepBar = `<div class="zrs-deepbar note">
+      <div><strong>Deep deployability check</strong> — for App Service, Redis, Service Bus, Event Hubs and Cosmos DB there is no read-only capability API. Run a <strong>non-destructive</strong> ARM pre-flight validation (creates nothing, no cost) to confirm the zone-redundant tier actually deploys for your subscription here.</div>
+      <button type="button" class="btn btn--accent btn--sm" id="zrs-deepcheck-btn" data-region-short="${escapeHtml(r.short)}">🔬 Run deep check</button>
+    </div>`;
+  }
+  return `${intro}<div class="kv">${rows}</div>${deepBar}${legend}`;
 }
 
 // Patch the per-service slots + header pill once the live check resolves.
@@ -1388,6 +1437,68 @@ async function _verifyZonalForRegion(r) {
   }
   if (String(STATE.activeDrilldownRegion || "").toLowerCase() === String(r.short).toLowerCase()) {
     _patchZonalCapability(r.short, entry);
+  }
+}
+
+// Opt-in, non-destructive deep deployability check (ARM validate — creates
+// nothing). Runs only on explicit user action + confirmation, for services with
+// no read-only capability API (App Service, Redis, Service Bus, Event Hubs) and
+// advisory-only Cosmos DB.
+async function _runZrsDeepCheck(regionShort) {
+  const r = _findRegionByShort(regionShort);
+  if (!r) return;
+  const sub = focusedSubscriptionId() || "";
+  if (!sub) { showToast("Select a subscription first to run the deep check.", "warn"); return; }
+  const deepSels = _zrsCapableSelections().filter(s => _ZRS_DEEP_CHECKABLE.has(s.name));
+  if (!deepSels.length) return;
+
+  try { await ensureSupportSettings(); } catch (_e) {}
+  const valRg = ((SUPPORT.settings || {}).validation_resource_group || "").trim();
+  const rgNote = valRg
+    ? `Validation resource group: "${valRg}".`
+    : `No validation resource group is configured — services needing pre-flight will report that instead. Set one under Settings → Ticket owner to enable full checks.`;
+  const ok = window.confirm(
+    `Run a NON-DESTRUCTIVE deep deployability check in ${r.name}?\n\n` +
+    `This calls Azure Resource Manager pre-flight validation for your ${deepSels.length} zone-redundant selection(s). ` +
+    `It creates NO resources and incurs NO cost.\n\n${rgNote}`
+  );
+  if (!ok) return;
+
+  const btn = document.getElementById("zrs-deepcheck-btn");
+  if (btn) { btn.disabled = true; btn.textContent = "⏳ Validating…"; }
+  document.querySelectorAll(".zrs-svc-slot[data-zrs-deep='1']").forEach((slot) => {
+    slot.innerHTML = `<span class="zrs-mark checking">⏳ Pre-flight validating…</span>`;
+  });
+
+  try {
+    const resp = await apiJson("/api/bom/deep-check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        subscription_id: sub,
+        region: r.short,
+        resource_group: valRg,
+        services: deepSels.map(s => ({ name: s.name, tier: s.tierId })),
+      }),
+    });
+    const az = _regionSupportsAz(r);
+    const map = {};
+    (resp.results || []).forEach(v => { map[_zrsKey(v.name, v.tier)] = v; });
+    document.querySelectorAll(".zrs-svc-slot[data-zrs-deep='1']").forEach((slot) => {
+      const key = slot.getAttribute("data-zrs-key");
+      const v = map[key];
+      slot.innerHTML = v ? _zrsDeepMark(v, az) : _zrsBaselineMark(az);
+    });
+    const blocked = (resp.results || []).filter(v => v.verdict === "blocked").length;
+    if (blocked) showToast(`Deep check complete — ${blocked} tier(s) blocked. Use “Create ticket” to request access.`, "warn");
+    else showToast("Deep check complete — no blockers found.", "success");
+  } catch (e) {
+    document.querySelectorAll(".zrs-svc-slot[data-zrs-deep='1']").forEach((slot) => {
+      slot.innerHTML = `<span class="zrs-mark warn">⚠️ Deep check failed</span>`;
+    });
+    showToast(e.message || "Deep check failed.", "error");
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "🔬 Run deep check"; }
   }
 }
 
@@ -1788,6 +1899,26 @@ function openDrilldown(r) {
       });
     });
     body._altTicketBound = true;
+  }
+  if (!body._zrsDeepBound) {
+    body.addEventListener("click", (ev) => {
+      const runBtn = ev.target.closest("#zrs-deepcheck-btn");
+      if (runBtn) {
+        ev.preventDefault();
+        _runZrsDeepCheck(runBtn.getAttribute("data-region-short") || STATE.activeDrilldownRegion || "");
+        return;
+      }
+      const tkBtn = ev.target.closest(".zrs-ticket-btn");
+      if (tkBtn) {
+        ev.preventDefault();
+        const blockType = tkBtn.getAttribute("data-zrs-ticket") || "";
+        const regionShort = STATE.activeDrilldownRegion || "";
+        const kind = blockType === "sku_restriction" ? "technical" : "quota";
+        closeDrilldown();
+        _supportPrefill(kind, regionShort);
+      }
+    });
+    body._zrsDeepBound = true;
   }
   document.getElementById("drilldown").classList.remove("hidden");
   document.getElementById("drilldown-overlay").classList.add("open");
@@ -6964,6 +7095,7 @@ async function loadOwnerSettings() {
   set("owner-country", s.country || "US");
   set("owner-tz", s.preferred_timezone || "Pacific Standard Time");
   set("owner-sev", s.default_severity || "moderate");
+  set("owner-valrg", s.validation_resource_group || "");
   const pathEl = document.getElementById("owner-storage-path");
   if (pathEl) {
     const dir = (APP_CONFIG && (APP_CONFIG.snapshots_dir || APP_CONFIG.storage_dir)) || "";
@@ -6983,6 +7115,7 @@ async function saveOwnerSettings() {
     country: val("owner-country") || "US",
     preferred_timezone: val("owner-tz"),
     default_severity: (document.getElementById("owner-sev") || {}).value || "moderate",
+    validation_resource_group: val("owner-valrg"),
   };
   if (status) status.textContent = "Saving…";
   try {

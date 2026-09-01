@@ -44,6 +44,7 @@ _FIELDS = (
     "preferred_contact_method",  # "email" | "phone"
     "preferred_language",  # e.g. "en-us"
     "default_severity",    # one of VALID_SEVERITIES
+    "validation_resource_group",  # existing RG used for non-destructive ARM validate deep-checks
 )
 
 DEFAULTS: Dict[str, Any] = {
@@ -57,6 +58,7 @@ DEFAULTS: Dict[str, Any] = {
     "preferred_contact_method": "email",
     "preferred_language": "en-us",
     "default_severity": "moderate",
+    "validation_resource_group": "",
 }
 
 
