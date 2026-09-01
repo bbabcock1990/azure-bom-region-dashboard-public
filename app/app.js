@@ -1297,8 +1297,13 @@ function _zrsDeepMark(v, az) {
       const help = v.help_url ? ` <a href="${escapeHtml(v.help_url)}" target="_blank" rel="noopener" class="zrs-src">region access</a>` : "";
       return `<span class="zrs-mark warn" title="${msg}">ℹ️ Not provable pre-deploy${help}</span>`;
     }
-    case "no_resource_group":
-      return `<span class="zrs-mark warn" title="${msg}">⚙️ Set a validation resource group in Settings</span>`;
+    case "no_resource_group": {
+      const notFound = /not found/i.test(v.message || "");
+      const label = notFound
+        ? "⚙️ Validation RG not found — pick an existing one in Settings"
+        : "⚙️ Set a validation resource group in Settings";
+      return `<span class="zrs-mark warn" title="${msg}">${label}</span>`;
+    }
     case "no_subscription":
       return `<span class="zrs-mark warn" title="${msg}">⚠️ Select a subscription to verify</span>`;
     case "unverifiable":
@@ -7100,6 +7105,33 @@ async function loadOwnerSettings() {
   if (pathEl) {
     const dir = (APP_CONFIG && (APP_CONFIG.snapshots_dir || APP_CONFIG.storage_dir)) || "";
     pathEl.textContent = dir || "(path unavailable — run a live, non-demo analysis to persist snapshots locally)";
+  }
+  _loadValidationRgOptions();
+}
+
+// Populate the validation-RG datalist from the focused subscription so the user
+// picks an existing RG instead of typing one that may not exist (which 404s at
+// validate time and shows a misleading "not configured" state).
+async function _loadValidationRgOptions() {
+  const list = document.getElementById("owner-valrg-list");
+  const hint = document.getElementById("owner-valrg-hint");
+  if (!list) return;
+  const sub = focusedSubscriptionId() || "";
+  if (!sub) {
+    if (hint) hint.textContent = "Select a subscription on the dashboard to load its resource groups.";
+    return;
+  }
+  if (hint) hint.textContent = "Loading resource groups…";
+  try {
+    const resp = await apiJson(`/api/az/resource-groups?subscription_id=${encodeURIComponent(sub)}`);
+    const rgs = (resp && resp.resource_groups) || [];
+    list.innerHTML = rgs.map(g =>
+      `<option value="${escapeHtml(g.name)}">${escapeHtml(g.location || "")}</option>`).join("");
+    if (hint) hint.textContent = rgs.length
+      ? `${rgs.length} resource group(s) available in the focused subscription.`
+      : "No resource groups found in the focused subscription.";
+  } catch (e) {
+    if (hint) hint.textContent = "Could not load resource groups (you can still type a name).";
   }
 }
 
