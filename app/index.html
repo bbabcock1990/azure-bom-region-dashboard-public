@@ -318,6 +318,13 @@
                   <input type="text" id="owner-valrg" list="owner-valrg-list" maxlength="90" autocomplete="off" placeholder="Pick or type an existing resource group" />
                   <datalist id="owner-valrg-list"></datalist>
                   <small class="muted">An <strong>existing</strong> resource group (in your focused subscription) used for the opt-in <strong>deep deployability check</strong>. That check runs Azure pre-flight validation only — it never creates resources or incurs cost. Pick one from the list, or leave blank to keep read-only checks only. <span id="owner-valrg-hint"></span></small>
+                  <div class="owner-valrg-create">
+                    <input type="text" id="owner-valrg-loc" list="owner-valrg-loc-list" maxlength="40" autocomplete="off" placeholder="Location (e.g. eastus)" />
+                    <datalist id="owner-valrg-loc-list"></datalist>
+                    <button type="button" class="btn btn--sm" id="owner-valrg-create">➕ Create if it doesn't exist</button>
+                    <span class="muted" id="owner-valrg-create-status"></span>
+                  </div>
+                  <small class="muted">Creating a resource group is free and holds nothing — it just gives the deep check somewhere to validate. You need Contributor on the subscription.</small>
                 </label>
               </div>
               <div class="support-form-actions">

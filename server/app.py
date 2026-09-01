@@ -55,7 +55,7 @@ ROUTES = [
     ("subscription_metadata", ["GET", "POST", "PUT", "DELETE"], "subscription_metadata"),
     ("subscriptions", ["GET"], "subscriptions_list"),
     ("az/subscriptions", ["GET"], "az_subscriptions"),
-    ("az/resource-groups", ["GET"], "az_resource_groups"),
+    ("az/resource-groups", ["GET", "POST"], "az_resource_groups"),
     ("bom/import_xlsx", ["POST"], "bom_import_xlsx"),
     ("bom/sensitivity", ["GET"], "bom_sensitivity"),
     ("bom/sku_families", ["GET"], "bom_sku_families"),

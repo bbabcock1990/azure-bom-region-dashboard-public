@@ -7115,6 +7115,17 @@ async function loadOwnerSettings() {
 async function _loadValidationRgOptions() {
   const list = document.getElementById("owner-valrg-list");
   const hint = document.getElementById("owner-valrg-hint");
+  // Populate the location datalist from the BOM's regions so a created RG can be
+  // homed in a familiar region (RG location is metadata only — the deep check
+  // validates resources in any region regardless of the RG's location).
+  const locList = document.getElementById("owner-valrg-loc-list");
+  if (locList) {
+    const regions = (STATE.snapshot && STATE.snapshot.regions) || [];
+    const shorts = Array.from(new Set(regions.map(r => r.short).filter(Boolean))).sort();
+    locList.innerHTML = shorts.map(s => `<option value="${escapeHtml(s)}"></option>`).join("");
+    const locInput = document.getElementById("owner-valrg-loc");
+    if (locInput && !locInput.value && shorts.length) locInput.value = shorts[0];
+  }
   if (!list) return;
   const sub = focusedSubscriptionId() || "";
   if (!sub) {
@@ -7132,6 +7143,51 @@ async function _loadValidationRgOptions() {
       : "No resource groups found in the focused subscription.";
   } catch (e) {
     if (hint) hint.textContent = "Could not load resource groups (you can still type a name).";
+  }
+}
+
+// Create the validation resource group named in the field if it doesn't exist.
+// A resource group is free and empty until resources are deployed — the deep
+// check only validates against it. Gated by an explicit confirmation.
+async function _createValidationRg() {
+  const status = document.getElementById("owner-valrg-create-status");
+  const name = ((document.getElementById("owner-valrg") || {}).value || "").trim();
+  const location = ((document.getElementById("owner-valrg-loc") || {}).value || "").trim();
+  const sub = focusedSubscriptionId() || "";
+  if (!sub) { if (status) status.textContent = "Select a subscription first."; return; }
+  if (!name) { if (status) status.textContent = "Enter a resource group name above first."; return; }
+  if (!location) { if (status) status.textContent = "Enter a location (e.g. eastus)."; return; }
+  const ok = window.confirm(
+    `Create resource group "${name}" in ${location}?\n\n` +
+    `This is a free, empty resource group used only so the deep check has somewhere to run Azure ` +
+    `pre-flight validation. No resources are deployed and nothing is billed. Requires Contributor on the subscription.`
+  );
+  if (!ok) return;
+  const btn = document.getElementById("owner-valrg-create");
+  if (btn) btn.disabled = true;
+  if (status) status.textContent = "Creating…";
+  try {
+    const res = await apiJson("/api/az/resource-groups", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subscription_id: sub, name, location }),
+    });
+    if (status) status.textContent = res.created ? `✓ Created in ${res.location}` : `✓ Already exists in ${res.location}`;
+    // Persist it as the validation RG so the deep check uses it immediately.
+    try {
+      const saved = await apiJson("/api/support/settings", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ validation_resource_group: res.name }),
+      });
+      SUPPORT.settings = saved.settings;
+    } catch (_e) {}
+    await _loadValidationRgOptions();
+    showToast(res.created ? "Validation resource group created and saved." : "Resource group already existed — saved as your validation RG.", "success");
+  } catch (e) {
+    if (status) status.textContent = `❌ ${e.message}`;
+    showToast(e.message || "Could not create resource group.", "error");
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -8143,6 +8199,8 @@ function init() {
   if (openSettingsBtn) openSettingsBtn.addEventListener("click", () => switchView("settings"));
   const ownerSaveBtn = document.getElementById("owner-save");
   if (ownerSaveBtn) ownerSaveBtn.addEventListener("click", saveOwnerSettings);
+  const ownerValRgCreateBtn = document.getElementById("owner-valrg-create");
+  if (ownerValRgCreateBtn) ownerValRgCreateBtn.addEventListener("click", _createValidationRg);
   const ownerWipeBtn = document.getElementById("owner-wipe");
   if (ownerWipeBtn) ownerWipeBtn.addEventListener("click", _supportWipe);
   document.querySelectorAll("[data-settings-tab]").forEach(btn => {

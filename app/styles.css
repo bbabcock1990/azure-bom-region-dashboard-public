@@ -2912,6 +2912,11 @@ html.filters-collapsed-init.bomnav-collapsed-init .layout { grid-template-column
 .settings-owner-grid input, .settings-owner-grid select { width: 100%; }
 .settings-owner-grid label.settings-owner-wide { grid-column: 1 / -1; }
 .settings-owner-grid label.settings-owner-wide small { font-weight: 400; }
+.owner-valrg-create {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 6px 0 2px;
+}
+.owner-valrg-create input { width: auto; flex: 0 0 200px; }
+.owner-valrg-create .btn { flex: 0 0 auto; white-space: nowrap; }
 .zrs-deepbar {
   display: flex; align-items: center; justify-content: space-between; gap: 14px;
   flex-wrap: wrap; margin: 10px 0;
