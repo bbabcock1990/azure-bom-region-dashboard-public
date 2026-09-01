@@ -753,14 +753,26 @@ function readFilters() {
   const search = (document.getElementById("filter-search").value || "").toLowerCase();
   const verdictChecked = Array.from(document.querySelectorAll('[data-filter="verdict"]:checked')).map(e => e.value);
   const continentChecked = Array.from(document.querySelectorAll('[data-filter="continent"]:checked')).map(e => e.value);
+  const quotaChecked = Array.from(document.querySelectorAll('[data-filter="quota"]:checked')).map(e => e.value);
+  const azChecked = Array.from(document.querySelectorAll('[data-filter="az"]:checked')).map(e => e.value);
   return {
     search,
     verdict: new Set(verdictChecked),
     continent: new Set(continentChecked),
-    v6Only: document.getElementById("filter-v6-only").checked,
+    quota: new Set(quotaChecked),
+    az: new Set(azChecked),
+    missingOnly: document.getElementById("filter-missing-services").checked,
     v5Fallback: document.getElementById("filter-v5-fallback").checked,
     restrictedOnly: document.getElementById("filter-restricted-only").checked,
   };
+}
+
+// Collapse the detailed quota verdict into the three buckets the filter offers.
+function _quotaFilterBucket(r) {
+  const v = getRegionQuotaVerdict(STATE.snapshot, r.short || "").verdict;
+  if (v === "pass" || v === "none") return "sufficient";
+  if (v === "fail" || v === "partial" || v === "no_group") return "insufficient";
+  return "unknown"; // unknown, not_accessible, no_sub
 }
 
 function applyFilters() {
@@ -773,12 +785,15 @@ function applyFilters() {
     if (f.search && !r.name.toLowerCase().includes(f.search)) return false;
     if (f.verdict.size && !f.verdict.has(deployment.verdict)) return false;
     if (f.continent.size && !f.continent.has(r.geo)) return false;
-    // primary_used / fell_back are the generic fields emitted by current
-    // engine. Fall back to legacy v6_viable / sku_fallbacks shape so old
-    // snapshots keep filtering correctly.
-    const primaryUsed = (r.primary_used != null) ? r.primary_used : r.v6_viable;
+    if (f.quota.size && !f.quota.has(_quotaFilterBucket(r))) return false;
+    if (f.az.size) {
+      const azBucket = (_regionSupportsAz(r) === false) ? "regional" : "has_az";
+      if (!f.az.has(azBucket)) return false;
+    }
+    if (f.missingOnly && !((r.missing_services || []).length > 0)) return false;
+    // fell_back is the generic engine field. Fall back to legacy
+    // sku_fallbacks shape so old snapshots keep filtering correctly.
     const fellBack = (r.fell_back != null) ? r.fell_back : ((r.sku_fallbacks || []).length > 0);
-    if (f.v6Only && !primaryUsed) return false;
     if (f.v5Fallback) {
       if (r.deployment_health !== "Yes" || !fellBack) return false;
     }
@@ -1762,7 +1777,8 @@ function renderTable() {
       <td class="rec-cell">${escapeHtml(r.recommendation || "—")}</td>
       ${_costCellHtml(r)}
       <td class="alt-cell">${escapeHtml((r.alt_regions || []).map(a =>
-        a.latency_ms != null ? `${a.region} (${a.latency_ms}ms)` : a.region
+        a.latency_ms != null ? `${a.region} (${a.latency_ms}ms)`
+          : (a.source === "least_bad" && a.caveat ? `${a.region} (${a.caveat})` : a.region)
       ).join(", "))}</td>
     `;
     tr.addEventListener("click", () => openDrilldown(r));
@@ -1886,11 +1902,23 @@ function openDrilldown(r) {
   }
 
   if (r.alt_regions && r.alt_regions.length) {
+    const isLeastBad = r.alt_regions.some(a => a.source === "least_bad");
     const altHtml = r.alt_regions.map(a => {
-      const ms = a.latency_ms != null ? `${a.latency_ms} ms` : "geo proximity";
-      return `<div class="alt-row"><span>${escapeHtml(a.region)}</span><span class="ms">${ms}</span></div>`;
+      const prox = a.latency_ms != null
+        ? `${a.latency_ms} ms`
+        : (a.distance_km != null ? `~${a.distance_km} km` : "geo proximity");
+      const caveat = a.source === "least_bad" && a.caveat
+        ? `<span class="alt-caveat" title="Residual gaps in this region">${escapeHtml(a.caveat)}</span>`
+        : "";
+      return `<div class="alt-row"><span>${escapeHtml(a.region)}${caveat}</span><span class="ms">${prox}</span></div>`;
     }).join("");
-    html += _ddSection("Alternative regions based on health and latency", altHtml);
+    const title = isLeastBad
+      ? "Closest-to-deployable regions (no region is fully healthy)"
+      : "Alternative regions based on health and latency";
+    const intro = isLeastBad
+      ? `<div class="note warn">No region in this snapshot is fully deployment-ready for your BOM. These are the <strong>least-bad</strong> options — ranked by fewest remaining gaps — but each still has caveats to resolve.</div>`
+      : "";
+    html += _ddSection(title, intro + altHtml);
   }
 
   const quotaResult = buildQuotaGroupRowsForRegion(STATE.snapshot, r.short);
@@ -4957,7 +4985,7 @@ function buildExportRows() {
     "Fallbacks Used": (r.sku_fallbacks || []).join(" | "),
     "Missing Services": (r.missing_services || []).map(m => `${m.service}: ${m.detail}`).join(" | "),
     "Zone Restrictions": (r.zone_restrictions || []).map((rest, i) => rest ? `AZ${i + 1}: ${rest}` : "").filter(Boolean).join(" | "),
-    "Alternative Regions": (r.alt_regions || []).map(a => a.latency_ms != null ? `${a.region} (${a.latency_ms}ms)` : a.region).join("; "),
+    "Alternative Regions": (r.alt_regions || []).map(a => a.latency_ms != null ? `${a.region} (${a.latency_ms}ms)` : (a.source === "least_bad" && a.caveat ? `${a.region} (least-bad: ${a.caveat})` : a.region)).join("; "),
   };
   });
 }
@@ -5050,13 +5078,14 @@ function toggleBomnav() {
 
 function clearAllFilters() {
   document.getElementById("filter-search").value = "";
-  STATE.activeSubscription = null;
-  syncActiveSubscription();
-  renderSubscriptionFilter();
-  renderSubscriptionSwitcher();
+  // Subscription is deployment CONTEXT (drives quota verdicts), not a region
+  // filter — keep the user's selection so "clear" doesn't silently change the
+  // quota picture. It only resets the region-list filters below.
   document.querySelectorAll('[data-filter="verdict"]').forEach(el => { el.checked = true; });
   document.querySelectorAll('[data-filter="continent"]').forEach(el => { el.checked = true; });
-  document.getElementById("filter-v6-only").checked = false;
+  document.querySelectorAll('[data-filter="quota"]').forEach(el => { el.checked = true; });
+  document.querySelectorAll('[data-filter="az"]').forEach(el => { el.checked = true; });
+  document.getElementById("filter-missing-services").checked = false;
   document.getElementById("filter-v5-fallback").checked = false;
   document.getElementById("filter-restricted-only").checked = false;
   applyFilters();
@@ -8296,7 +8325,9 @@ function init() {
     }
   });
   document.querySelectorAll('[data-filter="verdict"]').forEach(el => el.addEventListener("change", applyFilters));
-  document.getElementById("filter-v6-only").addEventListener("change", applyFilters);
+  document.querySelectorAll('[data-filter="quota"]').forEach(el => el.addEventListener("change", applyFilters));
+  document.querySelectorAll('[data-filter="az"]').forEach(el => el.addEventListener("change", applyFilters));
+  document.getElementById("filter-missing-services").addEventListener("change", applyFilters);
   document.getElementById("filter-v5-fallback").addEventListener("change", applyFilters);
   document.getElementById("filter-restricted-only").addEventListener("change", applyFilters);
   document.getElementById("pending-quota-panel").addEventListener("click", (ev) => {

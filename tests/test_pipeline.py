@@ -191,6 +191,55 @@ def test_alternatives_returns_empty_when_no_healthy_regions():
     assert model.alternatives("East US", latency={}, healthy=[], top_n=3) == []
 
 
+# ── _least_bad_alternatives() — fallback when NO region is healthy ───────────
+
+def _mk_analysis(name, gap_score, gap_summary):
+    return {"name": name, "gap_score": gap_score, "gap_summary": gap_summary}
+
+
+def test_least_bad_ranks_by_fewest_gaps():
+    """When no region is healthy, suggest only regions with strictly fewer
+    gaps than the source, ordered by gap score (then latency)."""
+    analyses = [
+        _mk_analysis("East US", 300, "3 missing services"),
+        _mk_analysis("East US 2", 100, "1 missing service"),
+        _mk_analysis("Central US", 200, "2 SKU gaps"),
+        _mk_analysis("West US 3", 400, "4 missing services"),
+    ]
+    latency = {"East US": {"East US 2": 12, "Central US": 28}}
+    out = model._least_bad_alternatives("East US", analyses, latency, top_n=3)
+    # West US 3 (worse than source) is excluded; results sorted by gap_score.
+    assert [a["region"] for a in out] == ["East US 2", "Central US"]
+    assert out[0]["source"] == "least_bad"
+    assert out[0]["caveat"] == "1 missing service"
+    assert out[0]["latency_ms"] == 12
+
+
+def test_least_bad_excludes_regions_no_better_than_source():
+    analyses = [
+        _mk_analysis("East US", 100, "1 missing service"),
+        _mk_analysis("Central US", 100, "1 SKU gap"),   # equal — not suggested
+        _mk_analysis("West US 3", 150, "1 SKU gap, 5 zones restricted"),
+    ]
+    out = model._least_bad_alternatives("East US", analyses, latency={}, top_n=3)
+    assert out == []
+
+
+def test_least_bad_uses_distance_when_no_latency():
+    analyses = [
+        _mk_analysis("Indonesia Central", 300, "3 missing services"),
+        _mk_analysis("Southeast Asia", 100, "1 missing service"),
+        _mk_analysis("Japan East", 100, "1 missing service"),
+    ]
+    out = model._least_bad_alternatives("Indonesia Central", analyses, latency={}, top_n=3)
+    assert {a["region"] for a in out} == {"Southeast Asia", "Japan East"}
+    for a in out:
+        assert a["latency_ms"] is None
+        assert isinstance(a["distance_km"], int) and a["distance_km"] > 0
+    # Nearest (Southeast Asia / Singapore) should rank first within equal score.
+    assert out[0]["region"] == "Southeast Asia"
+
+
 def test_alternatives_falls_through_when_curated_geo_fallback_has_no_healthy():
     """If GEO_FALLBACK has entries but none of them are healthy right now,
     the distance fallback must run (don't return empty)."""

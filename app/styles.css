@@ -1298,6 +1298,12 @@ table.region-table tbody tr.selected td { background: var(--ms-blue-light); }
 }
 #drilldown .alt-row:last-child { border-bottom: none; }
 #drilldown .alt-row .ms { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+#drilldown .alt-caveat {
+  display: block;
+  font-size: 11px;
+  color: var(--warn, #b8860b);
+  margin-top: 2px;
+}
 
 /* =========================================================================
    Map

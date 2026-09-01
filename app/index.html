@@ -505,13 +505,20 @@
       <h3>Geo / Continent</h3>
       <div id="filter-continents"></div>
 
-      <h3>SKU Selection</h3>
-      <div class="filter-subtitle muted" id="filter-sku-subtitle"></div>
-      <label class="checkrow"><input type="checkbox" id="filter-v6-only" /> Only show regions using primary SKUs</label>
-      <label class="checkrow" id="filter-fallback-row"><input type="checkbox" id="filter-v5-fallback" /> Only show regions on fallback SKUs</label>
+      <h3>Quota</h3>
+      <label class="checkrow"><input type="checkbox" data-filter="quota" value="sufficient" checked /> Sufficient</label>
+      <label class="checkrow"><input type="checkbox" data-filter="quota" value="insufficient" checked /> Insufficient</label>
+      <label class="checkrow"><input type="checkbox" data-filter="quota" value="unknown" checked /> Unknown / not accessible</label>
 
-      <h3>Zone Restrictions</h3>
-      <label class="checkrow"><input type="checkbox" id="filter-restricted-only" /> Only with restriction</label>
+      <h3>Availability Zones</h3>
+      <label class="checkrow"><input type="checkbox" data-filter="az" value="has_az" checked /> Zone-enabled regions</label>
+      <label class="checkrow"><input type="checkbox" data-filter="az" value="regional" checked /> Regional only (no AZs)</label>
+
+      <h3>Deployment Constraints</h3>
+      <div class="filter-subtitle muted" id="filter-sku-subtitle"></div>
+      <label class="checkrow"><input type="checkbox" id="filter-missing-services" /> Only regions missing BOM services</label>
+      <label class="checkrow" id="filter-fallback-row"><input type="checkbox" id="filter-v5-fallback" /> Only regions relying on a fallback SKU</label>
+      <label class="checkrow"><input type="checkbox" id="filter-restricted-only" /> Only regions with zone restrictions</label>
 
       <div class="stats" id="stats">
         <div class="stat"><span>Showing</span><strong id="stat-shown">0</strong></div>
