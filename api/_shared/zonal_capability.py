@@ -293,6 +293,19 @@ def fetch_elasticsan_sku_state(
 # "your subscription does not have access to create a server in this region".
 _SQL_REGION_KEY = "__sql_region__"
 
+# Substrings Azure uses in the top-level location ``reason`` when a subscription
+# cannot actually provision a SQL server in the region. Critically, the region
+# still reports status "Visible" (not "Disabled") in this case — the ``reason``
+# is the only reliable signal, and it is the exact text the portal surfaces as
+# "your subscription does not have access to create a server in this region".
+_REGION_RESTRICTED_MARKERS = (
+    "provisioning is restricted",
+    "not accepting",
+    "does not have access",
+    "not available in this region",
+    "not allow provisioning",
+)
+
 _DISABLED_REGION_MSG = (
     "Your subscription does not have access to create a SQL server in this "
     "region — request access via a support ticket before deploying."
@@ -576,13 +589,23 @@ def _elasticsan_verdict(state: Dict[str, Dict[str, Any]], sku: str) -> Dict[str,
 def _sql_verdict(state: Dict[str, Dict[str, Any]], edition: str) -> Dict[str, Any]:
     if not state:
         return {"verdict": "unverifiable", "message": "SQL capabilities unavailable for this subscription/region."}
-    # Region-access gate first: a "Disabled" top-level location status means the
-    # subscription cannot create a SQL server in this region at all — no edition
-    # is deployable regardless of its own zone-redundancy capability.
+    # Region-access gate first: the subscription may be unable to create a SQL
+    # server in this region at all — no edition is deployable regardless of its
+    # own zone-redundancy capability. Azure signals this on the top-level
+    # location capability via either status "Disabled" OR (more commonly for
+    # provisioning-restricted regions) status "Visible" with a populated
+    # ``reason`` such as "Provisioning is restricted in this region.".
     region_meta = state.get(_SQL_REGION_KEY) or {}
-    if str(region_meta.get("status", "")).lower() == "disabled":
+    region_status = str(region_meta.get("status", "")).lower()
+    region_reason = str(region_meta.get("reason", "") or "")
+    region_reason_l = region_reason.lower()
+    region_restricted = (
+        region_status == "disabled"
+        or any(m in region_reason_l for m in _REGION_RESTRICTED_MARKERS)
+    )
+    if region_restricted:
         return {"verdict": "blocked",
-                "message": region_meta.get("reason") or _DISABLED_REGION_MSG}
+                "message": region_reason or _DISABLED_REGION_MSG}
     entry = state.get(edition.lower())
     if not entry or str(entry.get("status", "")).lower() == "disabled":
         reason = (entry or {}).get("reason") if entry else ""

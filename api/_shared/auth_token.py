@@ -724,10 +724,23 @@ def _resolve_subscription_tenant(subscription_id: str, *, force_refresh: bool = 
         with httpx.Client(timeout=20.0) as client:
             resp = client.get(url, headers={"Authorization": f"Bearer {default.token}"})
         if resp.status_code == 200:
-            return resp.json().get("tenantId") or None
+            tid = resp.json().get("tenantId")
+            if tid:
+                _sub_tenant_map[subscription_id] = tid
+                return tid
     except Exception:
-        return None
-    return None
+        pass
+    # Foreign/guest subscriptions return 401/403 for a home-tenant token (and no
+    # tenant-discovery WWW-Authenticate header), so the direct GET above can't see
+    # them. Fall back to the authoritative cross-tenant enumeration, which lists
+    # subs per tenant and populates ``_sub_tenant_map`` — this is what lets a
+    # guest subscription in a foreign tenant resolve to the tenant where the user
+    # actually holds RBAC (otherwise ARM calls run in the wrong tenant → 403).
+    try:
+        list_subscriptions()
+    except Exception:
+        pass
+    return _sub_tenant_map.get(subscription_id)
 
 
 def list_subscriptions() -> list:

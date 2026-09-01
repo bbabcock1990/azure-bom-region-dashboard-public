@@ -160,6 +160,23 @@ def test_sql_verdict_available_when_region_status_enabled():
     assert zc._sql_verdict(state, "BusinessCritical")["verdict"] == "available"
 
 
+def test_sql_verdict_blocked_when_region_reason_restricted_despite_visible_status():
+    # Real MCAPS behaviour: a provisioning-restricted region still reports the
+    # top-level status "Visible" (NOT "Disabled") but carries a populated reason.
+    # The reason is the authoritative "RegionDoesNotAllowProvisioning" signal the
+    # portal surfaces, so the region must be blocked even though status != Disabled.
+    state = {
+        zc._SQL_REGION_KEY: {
+            "status": "Visible",
+            "reason": "Provisioning is restricted in this region. Please choose a different region.",
+        },
+        "hyperscale": {"status": "Available", "zone_redundant": True},
+    }
+    v = zc._sql_verdict(state, "Hyperscale")
+    assert v["verdict"] == "blocked"
+    assert "Provisioning is restricted" in v["message"]
+
+
 # ---------------------------------------------------- parsers over mocked httpx
 
 def _mock_client(monkeypatch, payload, status=200):
