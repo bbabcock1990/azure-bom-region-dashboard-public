@@ -1305,6 +1305,40 @@ table.region-table tbody tr.selected td { background: var(--ms-blue-light); }
   margin-top: 2px;
 }
 
+/* Confidence tier badges + dots (verdict provenance) */
+.conf-badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  vertical-align: middle;
+  margin-left: 6px;
+}
+.conf-badge.conf-validated { background: rgba(34,160,90,.15); color: #1a8f52; border-color: rgba(34,160,90,.35); }
+.conf-badge.conf-capability { background: rgba(90,120,180,.14); color: #4a6bb0; border-color: rgba(90,120,180,.3); }
+.conf-badge.conf-metadata { background: rgba(140,140,140,.14); color: var(--text-secondary); border-color: rgba(140,140,140,.3); }
+.conf-badge.conf-unverifiable { background: rgba(200,140,20,.15); color: #b8860b; border-color: rgba(200,140,20,.35); }
+
+.conf-dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  margin-left: 6px;
+  vertical-align: middle;
+  border: 1px solid rgba(0,0,0,.15);
+}
+.conf-dot.conf-validated { background: #22a05a; }
+.conf-dot.conf-capability { background: #6b8fd0; }
+.conf-dot.conf-metadata { background: #b9b9b9; }
+.conf-dot.conf-unverifiable { background: #e0a020; }
+
+#drilldown .dd-provenance { margin: 6px 0 2px; font-size: 12px; }
+#drilldown .dd-provenance summary { cursor: pointer; color: var(--text-secondary); }
+#drilldown .dd-prov-list { margin: 6px 0 0; padding-left: 18px; }
+#drilldown .dd-prov-list li { margin: 2px 0; font-size: 12px; }
+
 /* =========================================================================
    Map
    ========================================================================= */

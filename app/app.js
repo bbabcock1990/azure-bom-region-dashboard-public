@@ -1497,6 +1497,7 @@ async function _verifyZonalForRegion(r) {
     entry.status = "done";
     entry.map = {};
     (resp.results || []).forEach(v => { entry.map[_zrsKey(v.name, v.tier)] = v; });
+    entry.ts = new Date().toISOString().replace("T", " ").slice(0, 16) + " UTC";
   } catch (e) {
     entry.status = "error";
     entry.error = e;
@@ -1770,7 +1771,7 @@ function renderTable() {
       <td class="region-cell">${escapeHtml(r.name)}
         <div class="country">${escapeHtml(r.country || "")}</div>
       </td>
-      <td><span class="pill ${deployment.cls}" title="${escapeHtml(deployment.title)}">${escapeHtml(deployment.text)}</span></td>
+      <td><span class="pill ${deployment.cls}" title="${escapeHtml(deployment.title)}">${escapeHtml(deployment.text)}</span><span class="conf-dot ${_confidenceBadge(deployment).cls}" title="${escapeHtml(_confidenceBadge(deployment).text + " — " + _confidenceBadge(deployment).title)}"></span></td>
       <td>${escapeHtml(r.geo || "")}</td>
       <td><span class="zone-cells">${zoneHtml}</span></td>
       ${quotaCellHtml}
@@ -2077,6 +2078,55 @@ function getDeploymentVerdictInfo(region) {
   return _augmentVerdictWithZrs(region, info);
 }
 
+// Confidence tier + provenance for a region's verdict. The compile-time verdict
+// is "capability" (ARM metadata-backed). A live ZRS/HA check promotes it to
+// "validated" when we got a definitive answer, or notes "unverifiable" when a
+// live probe was attempted but inconclusive (403 / throttle / no API).
+function _regionConfidence(region) {
+  const raw = (region && region.deployment_verdict) || {};
+  let tier = raw.confidence || ((region && region.deployment_verdict) ? "capability" : "metadata");
+  const provenance = Array.isArray(raw.provenance) ? raw.provenance.slice() : [];
+  let liveNote = null;
+  const sub = focusedSubscriptionId() || "";
+  const key = sub ? `${String((region && region.short) || "").toLowerCase()}|${sub}` : "";
+  const entry = key ? (PRICING.zonalCap || {})[key] : null;
+  if (entry) {
+    if (entry.status === "error") {
+      liveNote = "unverifiable";
+    } else if (entry.status === "done" && entry.map) {
+      const vals = Object.values(entry.map);
+      const definitive = vals.some(v => v && ["available", "blocked", "unavailable"].includes(v.verdict));
+      const inconclusive = vals.some(v => v && ["unverifiable", "not_verifiable", "no_resource_group", "no_subscription", "advisory"].includes(v.verdict));
+      if (definitive) {
+        tier = "validated";
+        provenance.push({
+          signal: "Live ZRS/HA deployability",
+          source: `verified against subscription${entry.ts ? ` · ${entry.ts}` : ""}`,
+        });
+        if (inconclusive) liveNote = "partial";
+      } else if (inconclusive) {
+        liveNote = "unverifiable";
+      }
+    }
+  }
+  return { tier, provenance, liveNote };
+}
+
+// Presentation for a confidence tier → pill.
+function _confidenceBadge(info) {
+  const tier = (info && info.confidence) || "capability";
+  const map = {
+    validated: { cls: "conf-validated", text: "Verified live", title: "A live per-subscription check confirmed the constrained tiers — highest confidence." },
+    capability: { cls: "conf-capability", text: "ARM metadata", title: "Backed by ARM SKU / provider / quota metadata from the last snapshot. Run Verify all for a live per-subscription confirmation." },
+    metadata: { cls: "conf-metadata", text: "Baseline", title: "Region/BOM baseline only — no ARM capability data. Re-run analysis for full signals." },
+  };
+  const base = map[tier] || map.capability;
+  if (info && info.liveNote === "unverifiable") {
+    return { cls: "conf-unverifiable", text: "Unverifiable", title: "A live check was attempted but couldn't determine deployability (restricted subscription, throttling, or no authoritative API). Treat with caution." };
+  }
+  return base;
+}
+
 // Read cached live zone-redundancy (ZRS/HA) results for the focused
 // subscription and return the selections that came back blocked/unavailable.
 // Returns [] when no live check has run yet (e.g. at table render time), so the
@@ -2099,6 +2149,10 @@ function _zrsBlockedForRegion(region) {
 // unconditionally "Ready". Downgrade Ready → Ready with constraints and surface
 // each restricted tier as a zone-gap blocker so it shows in the readiness list.
 function _augmentVerdictWithZrs(region, info) {
+  const conf = _regionConfidence(region);
+  info.confidence = conf.tier;
+  info.provenance = conf.provenance;
+  info.liveNote = conf.liveNote;
   const blocks = _zrsBlockedForRegion(region);
   if (!blocks.length) return info;
   const blockers = Array.isArray(info.blockers) ? info.blockers.slice() : [];
@@ -2162,11 +2216,22 @@ function renderDeploymentReadinessSection(region, deployment) {
     needs_validation: "Automated checks could not fully validate this region.",
   };
 
+  const conf = _confidenceBadge(deployment);
+  const provenance = Array.isArray(deployment.provenance) ? deployment.provenance : [];
+  const provHtml = provenance.length
+    ? `<details class="dd-provenance"><summary>How do we know? (${provenance.length})</summary>
+        <ul class="dd-prov-list">${provenance.map(p =>
+          `<li><strong>${escapeHtml(p.signal || "")}</strong> — <span class="muted">${escapeHtml(p.source || "")}</span></li>`
+        ).join("")}</ul></details>`
+    : "";
+
   let html = `<div class="deployment-readiness">
       <div class="deployment-readiness-header">
         <span class="pill pill-lg ${deployment.cls}" title="${escapeHtml(deployment.title)}">${escapeHtml(deployment.text)}</span>
+        <span class="conf-badge ${conf.cls}" title="${escapeHtml(conf.title)}">${escapeHtml(conf.text)}</span>
         <span class="dd-verdict-desc">${escapeHtml(verdictDesc[deployment.verdict] || "")}</span>
-      </div>`;
+      </div>
+      ${provHtml}`;
 
   // Show blockers FIRST for not_recommended / needs_validation
   if (blockerGroups.size > 0) {

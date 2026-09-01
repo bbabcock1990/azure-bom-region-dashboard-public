@@ -1280,13 +1280,59 @@ def _compute_deployment_verdict(
         quota_required=quota_required,
     )
 
+    # The compile-time verdict is backed by ARM capability/SKU/quota metadata
+    # (not a live per-subscription deployment probe), so its baseline confidence
+    # tier is "capability". A live verify-all / drilldown check can promote a
+    # region to "validated" (or flag "unverifiable") in the frontend.
+    provenance = _build_verdict_provenance(
+        region=region,
+        snapshot_meta=snapshot_meta,
+        quota_required=quota_required,
+        target_status=target_status,
+    )
+
     return {
         "verdict": verdict,
+        "confidence": "capability",
+        "provenance": provenance,
         "reasons": reasons,
         "blockers": blockers,
         "constraints": constraints,
         "recommendations": recommendations,
     }
+
+
+def _build_verdict_provenance(
+    *,
+    region: Dict,
+    snapshot_meta: Dict,
+    quota_required: bool,
+    target_status: Dict,
+) -> List[Dict]:
+    """Record which ARM signals produced this verdict so the UI can render an
+    honest 'how do we know?' explanation. Each entry is {signal, source}."""
+    checked_at = (
+        snapshot_meta.get("compiled_at")
+        or snapshot_meta.get("ended_at")
+        or snapshot_meta.get("started_at")
+    )
+    prov: List[Dict] = [
+        {"signal": "Service availability",
+         "source": "ARM providers/{namespace} resourceTypes.locations"},
+        {"signal": "SKU + zone coverage",
+         "source": "Microsoft.Compute/skus (locationInfo + restrictions)"},
+    ]
+    if quota_required:
+        prov.append({
+            "signal": "Quota headroom",
+            "source": "Microsoft.Compute/locations/usages + Microsoft.Quota",
+        })
+    status = (target_status or {}).get("status")
+    if status:
+        prov.append({"signal": "Subscription ARM access", "source": f"status={status}"})
+    if checked_at:
+        prov.append({"signal": "Snapshot compiled", "source": str(checked_at)})
+    return prov
 
 
 def _merge_subscription_sku_records(
