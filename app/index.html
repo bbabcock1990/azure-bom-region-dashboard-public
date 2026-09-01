@@ -56,15 +56,21 @@
 
 <div class="layout" id="layout">
 
-  <aside class="sidebar" id="sidebar">
-    <div class="bomnav" id="bomnav">
-      <div class="bomnav-head">
-        <h3>Bills of Materials <span class="bomnav-count" id="bomnav-count"></span></h3>
-        <button type="button" id="bomnav-new" class="btn btn--accent btn--sm" title="Create a new BOM">+ New</button>
+  <aside class="sidebar bomnav-rail" id="sidebar">
+    <div class="bomnav-body" id="bomnav-body">
+      <div class="bomnav" id="bomnav">
+        <div class="bomnav-head">
+          <h3>Bills of Materials <span class="bomnav-count" id="bomnav-count"></span></h3>
+          <button type="button" id="bomnav-new" class="btn btn--accent btn--sm" title="Create a new BOM">+ New</button>
+        </div>
+        <input type="text" id="bomnav-search" class="bomnav-search" placeholder="Filter BOMs…" autocomplete="off" spellcheck="false" />
+        <div class="bomnav-list" id="bomnav-list"></div>
       </div>
-      <input type="text" id="bomnav-search" class="bomnav-search" placeholder="Filter BOMs…" autocomplete="off" spellcheck="false" />
-      <div class="bomnav-list" id="bomnav-list"></div>
     </div>
+    <button type="button" class="bomnav-handle" id="bomnav-handle" title="Show/hide Bills of Materials" aria-label="Show or hide Bills of Materials">
+      <span class="bomnav-handle-label">Bills of Materials</span>
+      <span class="bomnav-handle-caret" aria-hidden="true">‹</span>
+    </button>
   </aside>
 
   <main>

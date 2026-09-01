@@ -4781,6 +4781,28 @@ function toggleSidebar() {
   }, 280);
 }
 
+function applyBomnavStateFromStorage() {
+  let collapsed = false;
+  try { collapsed = localStorage.getItem("bomnavCollapsed") === "true"; } catch (e) {}
+  // Move the marker class from <html> (set inline pre-paint) to .layout
+  document.documentElement.classList.remove("bomnav-collapsed-init");
+  document.getElementById("layout").classList.toggle("bomnav-collapsed", collapsed);
+}
+
+function toggleBomnav() {
+  const layout = document.getElementById("layout");
+  const collapsed = !layout.classList.contains("bomnav-collapsed");
+  layout.classList.toggle("bomnav-collapsed", collapsed);
+  try { localStorage.setItem("bomnavCollapsed", collapsed ? "true" : "false"); } catch (e) {}
+
+  // Leaflet needs a kick to recalc tiles after the grid resize animation
+  setTimeout(() => {
+    if (STATE.map && _isRegionsSub("map")) STATE.map.invalidateSize();
+    if (STATE.latencyChart && _isRegionsSub("latency")) STATE.latencyChart.resize();
+    Object.values(STATE.overviewCharts).forEach(c => c && c.resize());
+  }, 280);
+}
+
 function clearAllFilters() {
   document.getElementById("filter-search").value = "";
   STATE.activeSubscription = null;
@@ -7903,6 +7925,7 @@ function _wireSupportTab(view) {
 function init() {
   // Sync persisted sidebar state from <html> marker class to .layout
   applySidebarStateFromStorage();
+  applyBomnavStateFromStorage();
 
   // Theme toggle: pre-paint inline script set the initial mode; this wires
   // up the button + system-preference watcher.
@@ -7916,6 +7939,7 @@ function init() {
   document.getElementById("btn-signout").addEventListener("click", doSignOut);
   document.getElementById("btn-switch-dir").addEventListener("click", doSwitchDirectory);
   document.getElementById("filters-handle").addEventListener("click", toggleSidebar);
+  document.getElementById("bomnav-handle").addEventListener("click", toggleBomnav);
   document.getElementById("clear-filters").addEventListener("click", clearAllFilters);
 
   document.getElementById("filter-search").addEventListener("input", applyFilters);

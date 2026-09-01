@@ -315,6 +315,47 @@ aside.filters {
   padding: 20px 18px;
 }
 
+/* Left BOM rail is a drawer too: a collapsible body plus a slim always-visible
+   handle on its right edge (mirror image of the filters rail). */
+aside.bomnav-rail {
+  display: flex;
+  flex-direction: row;
+  padding: 0;
+  overflow: hidden;
+}
+.bomnav-body {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 20px 18px;
+}
+.bomnav-handle {
+  flex: none;
+  width: 20px;
+  border: 0;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 12px 0;
+}
+.bomnav-handle:hover { background: var(--surface-alt); color: var(--text-primary); }
+.bomnav-handle-label {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.bomnav-handle-caret { font-size: 14px; transition: transform 0.2s ease; }
+
 .sidebar h3 {
   font-size: 11px;
   font-weight: 600;
@@ -1399,10 +1440,19 @@ main { min-width: 0; }
    Applied instantly when persisted (no FOUC) and via the .layout toggle. */
 html.filters-collapsed-init .layout { grid-template-columns: 264px 1fr 20px; }
 html.filters-collapsed-init .filters-body { display: none; }
+html.bomnav-collapsed-init .layout { grid-template-columns: 20px 1fr 296px; }
+html.bomnav-collapsed-init .bomnav-body { display: none; }
+html.filters-collapsed-init.bomnav-collapsed-init .layout { grid-template-columns: 20px 1fr 20px; }
 
 .layout.filters-collapsed { grid-template-columns: 264px 1fr 20px; }
 .layout.filters-collapsed .filters-body { display: none; }
 .layout.filters-collapsed .filters-handle-caret { transform: rotate(180deg); }
+
+.layout.bomnav-collapsed { grid-template-columns: 20px 1fr 296px; }
+.layout.bomnav-collapsed .bomnav-body { display: none; }
+.layout.bomnav-collapsed .bomnav-handle-caret { transform: rotate(180deg); }
+
+.layout.filters-collapsed.bomnav-collapsed { grid-template-columns: 20px 1fr 20px; }
 
 #clear-filters { margin-bottom: 14px; letter-spacing: 0.2px; }
 #clear-filters:hover {

@@ -29,3 +29,12 @@
     }
   } catch (e) {}
 })();
+
+// 3) Apply the persisted BOM-rail collapsed state before first paint.
+(function () {
+  try {
+    if (localStorage.getItem("bomnavCollapsed") === "true") {
+      document.documentElement.classList.add("bomnav-collapsed-init");
+    }
+  } catch (e) {}
+})();
