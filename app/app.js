@@ -7639,19 +7639,20 @@ async function _loadValidationRgOptions() {
   }
   if (!list) return;
   const sub = focusedSubscriptionId() || "";
+  const subName = focusedSubscriptionName() || sub;
   if (!sub) {
     if (hint) hint.textContent = "Select a subscription on the dashboard to load its resource groups.";
     return;
   }
-  if (hint) hint.textContent = "Loading resource groups…";
+  if (hint) hint.textContent = `Loading resource groups from ${subName}…`;
   try {
     const resp = await apiJson(`/api/az/resource-groups?subscription_id=${encodeURIComponent(sub)}`);
     const rgs = (resp && resp.resource_groups) || [];
     list.innerHTML = rgs.map(g =>
       `<option value="${escapeHtml(g.name)}">${escapeHtml(g.location || "")}</option>`).join("");
     if (hint) hint.textContent = rgs.length
-      ? `${rgs.length} resource group(s) available in the focused subscription.`
-      : "No resource groups found in the focused subscription.";
+      ? `${rgs.length} resource group(s) in ${subName}. The deep check runs against this subscription — the one selected on the dashboard.`
+      : `No resource groups in ${subName}. Create one below, or leave blank for read-only checks.`;
   } catch (e) {
     if (hint) hint.textContent = "Could not load resource groups (you can still type a name).";
   }
@@ -7665,11 +7666,13 @@ async function _createValidationRg() {
   const name = ((document.getElementById("owner-valrg") || {}).value || "").trim();
   const location = ((document.getElementById("owner-valrg-loc") || {}).value || "").trim();
   const sub = focusedSubscriptionId() || "";
+  const subName = focusedSubscriptionName() || sub;
   if (!sub) { if (status) status.textContent = "Select a subscription first."; return; }
   if (!name) { if (status) status.textContent = "Enter a resource group name above first."; return; }
   if (!location) { if (status) status.textContent = "Enter a location (e.g. eastus)."; return; }
   const ok = window.confirm(
-    `Create resource group "${name}" in ${location}?\n\n` +
+    `Create resource group "${name}" in ${location}\n` +
+    `in subscription: ${subName}?\n\n` +
     `This is a free, empty resource group used only so the deep check has somewhere to run Azure ` +
     `pre-flight validation. No resources are deployed and nothing is billed. Requires Contributor on the subscription.`
   );
