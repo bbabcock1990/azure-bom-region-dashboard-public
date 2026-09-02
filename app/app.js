@@ -213,8 +213,35 @@ function initThemeController() {
 
 async function apiFetch(path, opts = {}) {
   const headers = Object.assign({}, opts.headers || {});
+  // Delegated (multi-customer) mode: forward the customer's browser-minted ARM
+  // token so the stateless server can read Azure as that customer. The token
+  // lives only in the browser; it is never persisted server-side.
+  try {
+    if (
+      window.__ARM_TOKEN &&
+      typeof path === "string" &&
+      path.indexOf("/api/") === 0 &&
+      !("X-Bom-Access-Token" in headers)
+    ) {
+      headers["X-Bom-Access-Token"] = window.__ARM_TOKEN;
+    }
+  } catch (e) {}
   const res = await fetch(path, Object.assign({ credentials: "same-origin" }, opts, { headers }));
   return res;
+}
+
+// Acquire (and cache in-memory) the customer's ARM token via MSAL for delegated
+// mode. Returns the token string or null. ``interactive`` allows a sign-in popup.
+async function ensureDelegatedToken({ force = false } = {}) {
+  if (!APP_CONFIG || !APP_CONFIG.delegated_mode || !window.DelegatedAuth) return null;
+  try {
+    const tok = await window.DelegatedAuth.getArmToken({ interactive: force });
+    window.__ARM_TOKEN = tok || null;
+    return tok;
+  } catch (e) {
+    window.__ARM_TOKEN = null;
+    throw e;
+  }
 }
 
 async function apiJson(path, opts = {}) {
@@ -6580,6 +6607,28 @@ const TOKEN = {
 
 async function refreshAuthToken({ force = false } = {}) {
   setTokenStatus("loading", force ? "Opening browser sign-in…" : "Checking sign-in…");
+  // Delegated (multi-customer) mode: mint the ARM token in the browser first so
+  // the follow-up /api/auth/signin call carries it. Silent unless force.
+  if (APP_CONFIG && APP_CONFIG.delegated_mode) {
+    try {
+      const tok = await ensureDelegatedToken({ force });
+      if (!tok) {
+        if (force) {
+          setTokenStatus("error", "Sign-in was cancelled or blocked. Please try again.");
+        } else {
+          setTokenStatus("warn", "Not signed in. Click <strong>Sign in</strong> to connect your Azure account.");
+        }
+        TOKEN.info = null;
+        updateSigninChip();
+        return null;
+      }
+    } catch (e) {
+      setTokenStatus("error", netErrLine(e));
+      TOKEN.info = null;
+      updateSigninChip();
+      return null;
+    }
+  }
   try {
     const r = await apiFetch("/api/auth/signin", { method: force ? "POST" : "GET" });
     const body = await r.json();
@@ -7858,7 +7907,25 @@ async function loadAppConfig() {
   try {
     APP_CONFIG = await apiJson("/api/app-config");
   } catch (e) { /* keep defaults */ }
+  await initDelegatedAuth();
   applyDemoBanner();
+}
+
+// Initialize browser-side (delegated) auth when the server runs in
+// multi-customer mode. Safe no-op otherwise. Never throws.
+async function initDelegatedAuth() {
+  try {
+    if (!APP_CONFIG || !APP_CONFIG.delegated_mode || !window.DelegatedAuth) return;
+    await window.DelegatedAuth.init({
+      entra_client_id: APP_CONFIG.entra_client_id,
+      entra_authority: APP_CONFIG.entra_authority,
+      arm_scope: APP_CONFIG.arm_scope,
+      login_hint: APP_CONFIG.user_name || "",
+    });
+    // Prefetch the ARM token silently (SSO via the Easy Auth session) so the
+    // first data calls (subscriptions, snapshots) carry it without a prompt.
+    try { await ensureDelegatedToken({ force: false }); } catch (e) {}
+  } catch (e) { /* delegated auth optional; ignore */ }
 }
 
 function applyDemoBanner() {

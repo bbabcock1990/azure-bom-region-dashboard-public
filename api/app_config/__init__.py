@@ -21,6 +21,11 @@ def _demo_mode() -> bool:
 
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
+    hdrs = getattr(req, "headers", {}) or {}
+
+    def _h(name: str) -> str:
+        return (hdrs.get(name) or hdrs.get(name.lower()) or hdrs.get(name.title()) or "").strip()
+
     payload = {
         "demo_mode": _demo_mode(),
         "local_mode": os.getenv("LOCAL_MODE", "").lower() in ("true", "1", "yes"),
@@ -37,6 +42,10 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         "arm_scope": os.getenv(
             "ARM_SCOPE", "https://management.azure.com/user_impersonation"
         ).strip(),
+        # Signed-in customer identity (from Easy Auth), used as the MSAL login
+        # hint so the token is minted silently against the same session.
+        "user_name": _h("x-ms-client-principal-name"),
+        "user_id": _h("x-ms-client-principal-id"),
         "support_configured": support_settings.is_configured(),
         "snapshot_retention": snapshot_store.SNAPSHOT_RETENTION,
         "storage_dir": storage.storage_root(),

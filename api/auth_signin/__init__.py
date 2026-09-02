@@ -25,7 +25,8 @@ def _err(code: str, message: str, status: int = 400) -> func.HttpResponse:
 def main(req: func.HttpRequest) -> func.HttpResponse:
     principal = auth.get_local_user(req)
     mi_mode = auth_token.managed_identity_mode()
-    if not auth_token.is_local_mode() and not mi_mode:
+    delegated = auth_token.delegated_mode()
+    if not auth_token.is_local_mode() and not mi_mode and not delegated:
         activity_log.record(
             "auth_signin_error",
             actor_email=principal.email,
@@ -51,7 +52,12 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         details={"interactive": interactive},
     )
     try:
-        if mi_mode:
+        if delegated:
+            # Multi-customer hosted mode: the browser forwarded the customer's
+            # ARM token on this request (bound to the request context). Resolve
+            # it — no managed identity, no server-side browser prompt.
+            info = auth_token.get_arm_default_token(force_refresh=interactive)
+        elif mi_mode:
             # Hosted mode: no browser. Both GET (status) and POST (sign in)
             # resolve to the managed identity's ARM token.
             info = auth_token.get_arm_default_token(force_refresh=interactive)
