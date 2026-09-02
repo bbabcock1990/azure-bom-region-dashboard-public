@@ -29,6 +29,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from api._shared import httpfunc  # noqa: E402
+from api._shared import auth_token  # noqa: E402
 
 from fastapi import FastAPI  # noqa: E402
 
@@ -135,10 +136,28 @@ async def _adapt_request(request: Request) -> httpfunc.HttpRequest:
 def _make_endpoint(handler):
     async def endpoint(request: Request) -> Response:
         req = await _adapt_request(request)
-        if inspect.iscoroutinefunction(handler):
-            resp = await handler(req)
-        else:
-            resp = await run_in_threadpool(handler, req)
+        # Stateless multi-customer plumbing: bind the signed-in customer's
+        # delegated ARM token (minted in their browser, forwarded per request)
+        # and stable user key (Easy Auth principal id) for the duration of this
+        # request only, then clear them. Nothing is retained across requests, so
+        # concurrent customers never share tokens or state.
+        arm_token = request.headers.get("x-bom-access-token")
+        user_key = (
+            request.headers.get("x-ms-client-principal-id")
+            or request.headers.get("x-bom-user-key")
+        )
+        ctx_bound = False
+        if arm_token or user_key:
+            auth_token.set_request_context(arm_token=arm_token, user_key=user_key)
+            ctx_bound = True
+        try:
+            if inspect.iscoroutinefunction(handler):
+                resp = await handler(req)
+            else:
+                resp = await run_in_threadpool(handler, req)
+        finally:
+            if ctx_bound:
+                auth_token.clear_request_context()
         return Response(
             content=resp.get_body(),
             status_code=resp.status_code,

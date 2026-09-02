@@ -22,8 +22,10 @@ Public surface mirrors ``azcli_token`` so call sites are drop-in:
 from __future__ import annotations
 
 import base64
+import contextvars
 import json
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple
@@ -42,6 +44,73 @@ _auth_record = None  # AuthenticationRecord captured at sign-in, for silent reus
 _signed_in = False  # set True after any successful token acquisition this process
 _cache: Dict[Tuple[str, str, str], "TokenInfo"] = {}
 _sub_tenant_map: Dict[str, str] = {}  # subscription_id -> tenant_id (populated by list_subscriptions)
+
+# ─── Per-request context (delegated / multi-customer hosted mode) ────────────
+# In the hosted multi-tenant deployment the server is stateless: it holds NO
+# customer tokens or data across requests. Each API call carries the signed-in
+# customer's ARM access token (minted in their browser via MSAL and forwarded in
+# the ``X-Bom-Access-Token`` header) plus a stable user key (the Easy Auth
+# principal id). Both live only for the duration of the request in these
+# context vars, so concurrent customers never see each other's tokens or data.
+_ctx_delegated_arm_token: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
+    "bom_delegated_arm_token", default=None
+)
+_ctx_user_key: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
+    "bom_user_key", default=None
+)
+
+
+def delegated_mode() -> bool:
+    """Hosted multi-customer mode: acquire ARM tokens from the per-request
+    delegated token forwarded by the signed-in customer's browser, never from a
+    managed identity or an interactive prompt. Enabled by ``DELEGATED_MODE=true``.
+
+    In this mode the server is stateless and reads Azure strictly *as the
+    signed-in customer*, so customer A can only ever see customer A's tenant.
+    """
+    import os
+    return os.getenv("DELEGATED_MODE", "").lower() in ("true", "1", "yes")
+
+
+def set_request_context(*, arm_token: Optional[str] = None, user_key: Optional[str] = None) -> None:
+    """Bind the current request's delegated ARM token and/or user key. Called by
+    the web host per request from the ``X-Bom-Access-Token`` /
+    ``X-MS-CLIENT-PRINCIPAL-ID`` headers. Values are cleared after the request."""
+    if arm_token is not None:
+        _ctx_delegated_arm_token.set(arm_token.strip() or None)
+    if user_key is not None:
+        _ctx_user_key.set(user_key.strip() or None)
+
+
+def clear_request_context() -> None:
+    """Reset the per-request delegated token + user key (call in a finally)."""
+    _ctx_delegated_arm_token.set(None)
+    _ctx_user_key.set(None)
+
+
+def current_user_key() -> Optional[str]:
+    """Stable id of the signed-in customer for the current request, or None.
+
+    Used to partition any transient per-user server state so concurrent
+    customers are isolated."""
+    return _ctx_user_key.get()
+
+
+def _delegated_token() -> Optional[str]:
+    return _ctx_delegated_arm_token.get()
+
+
+def _access_token_from_jwt(jwt_str: str):
+    """Wrap a raw JWT access token as an azure-core ``AccessToken`` (token +
+    expires_on), reading the ``exp`` claim so the token cache/refresh logic sees
+    a correct expiry. Falls back to a short window if ``exp`` can't be read."""
+    from azure.core.credentials import AccessToken
+    claims = _decode_claims(jwt_str)
+    exp = claims.get("exp")
+    if not isinstance(exp, (int, float)):
+        exp = int(time.time()) + 300
+    return AccessToken(jwt_str, int(exp))
+
 
 def is_local_mode() -> bool:
     import os
@@ -381,6 +450,22 @@ def _acquire(*, scope: str, tenant: Optional[str], allow_interactive: bool) -> "
     callers can prompt the user to sign in.
     """
     global _signed_in, _auth_record
+    # Hosted multi-customer mode: use the per-request delegated ARM token
+    # forwarded from the signed-in customer's browser. This is the ONLY token
+    # source in delegated mode — never a managed identity or a browser prompt —
+    # so every ARM call runs as that customer, in that customer's tenant.
+    delegated = _delegated_token()
+    if delegated and scope.startswith(ARM_RESOURCE_ID.rstrip("/")):
+        _signed_in = True
+        return _access_token_from_jwt(delegated)
+    if delegated_mode():
+        # Delegated mode but the caller didn't attach a token (or asked for a
+        # non-ARM scope): the customer must (re)authenticate in the browser.
+        raise AuthError(
+            "not_signed_in",
+            "No delegated Azure token was supplied for this request. Sign in "
+            "again in the dashboard so the browser can attach your access token.",
+        )
     # Hosted mode: acquire from the managed identity. MI is single-tenant, so the
     # ``tenant`` hint is ignored (foreign-tenant subs are unsupported here).
     if managed_identity_mode():
@@ -494,6 +579,10 @@ def has_cached_account() -> bool:
     """
     if _signed_in:
         return True
+    # Delegated (multi-customer) mode: the browser attaches the customer's token
+    # per request, so an account is "available" whenever a token is present.
+    if _delegated_token() is not None:
+        return True
     # Hosted mode: the managed identity is always available (no interactive
     # sign-in), so report an account so silent paths proceed to acquire.
     if managed_identity_mode():
@@ -579,6 +668,13 @@ def get_token(
     subscription.
     """
     cache_key = (resource, tenant or "default", subscription or "")
+    # Delegated (multi-customer) tokens are per-request and per-user: never read
+    # or write the process-wide cache with them, or one customer's token could
+    # be handed to another. Acquire fresh from the request context each time.
+    if _delegated_token() is not None:
+        access = _acquire(scope=_scope_for(resource), tenant=tenant,
+                          allow_interactive=allow_interactive)
+        return _to_info(access, scope_resource=resource, subscription=subscription or "")
     with _lock:
         cached = _cache.get(cache_key)
         if not force_refresh and cached is not None and cached.is_fresh:
@@ -912,6 +1008,7 @@ def reset_for_tests() -> None:
         _signed_in = False
         _cache.clear()
         _sub_tenant_map.clear()
+    clear_request_context()
 
 
 def sign_out() -> None:

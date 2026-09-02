@@ -46,8 +46,31 @@ def _storage_root() -> str:
     else:
         # api/_shared/storage.py -> api/_shared -> api -> <repo root>
         root = Path(__file__).resolve().parents[2] / "local-storage"
+    # Hosted multi-customer isolation: partition the store per signed-in customer
+    # so concurrent customers can never read each other's transient data. The
+    # durable customer BOM lives in their browser; anything written here is
+    # ephemeral and per-user. Gated by MULTIUSER_ISOLATION so local single-user
+    # mode (and the test suite) keep the flat layout.
+    if os.getenv("MULTIUSER_ISOLATION", "").lower() in ("true", "1", "yes"):
+        uk = _current_user_key()
+        if uk:
+            root = root / "u" / uk
     root.mkdir(parents=True, exist_ok=True)
     return str(root)
+
+
+def _current_user_key() -> Optional[str]:
+    """Sanitized per-request user key from auth_token, or None. Imported lazily
+    to avoid any import cycle and to stay a no-op when no request is active."""
+    try:
+        from . import auth_token
+        raw = auth_token.current_user_key()
+    except Exception:
+        return None
+    if not raw:
+        return None
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(raw))
+    return safe[:80] or None
 
 
 def _db_path() -> str:
