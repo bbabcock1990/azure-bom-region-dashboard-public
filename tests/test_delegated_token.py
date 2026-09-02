@@ -40,6 +40,31 @@ def test_delegated_mode_flag(monkeypatch):
     assert auth_token.delegated_mode() is True
 
 
+def test_current_user_key_from_header_wins(monkeypatch):
+    """Easy Auth principal id (when present) is the user key."""
+    jwt = _fake_jwt({"oid": "oid-abc", "tid": "tid-xyz"})
+    auth_token.set_request_context(arm_token=jwt, user_key="principal-42")
+    try:
+        assert auth_token.current_user_key() == "principal-42"
+    finally:
+        auth_token.clear_request_context()
+
+
+def test_current_user_key_derived_from_token(monkeypatch):
+    """MSAL-only mode (no Easy Auth header): the user key is derived from the
+    delegated ARM token's tid+oid claims so per-user isolation still holds."""
+    jwt = _fake_jwt({"oid": "oid-abc", "tid": "tid-xyz"})
+    auth_token.set_request_context(arm_token=jwt, user_key=None)
+    try:
+        assert auth_token.current_user_key() == "tid-xyz.oid-abc"
+    finally:
+        auth_token.clear_request_context()
+
+
+def test_current_user_key_none_without_token():
+    assert auth_token.current_user_key() is None
+
+
 def test_delegated_token_short_circuits_acquire(monkeypatch):
     """When a delegated ARM token is bound, get_token() returns it verbatim and
     never touches the interactive credential."""

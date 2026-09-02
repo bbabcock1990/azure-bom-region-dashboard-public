@@ -266,7 +266,12 @@ async function ensureDelegatedToken({ force = false } = {}) {
 // localStorage, namespaced by the signed-in user so concurrent customers on the
 // same machine never collide.
 function _stateKey() {
-  const uid = (APP_CONFIG && (APP_CONFIG.user_id || APP_CONFIG.user_name)) || "anon";
+  let uid = "";
+  try {
+    const a = window.DelegatedAuth && window.DelegatedAuth.account;
+    if (a) uid = a.homeAccountId || a.localAccountId || a.username || "";
+  } catch (e) {}
+  if (!uid) uid = (APP_CONFIG && (APP_CONFIG.user_id || APP_CONFIG.user_name)) || "anon";
   return "bomState:" + uid;
 }
 
@@ -9362,22 +9367,105 @@ function init() {
 
   (async () => {
     await loadAppConfig();
-    // Stateless hosted mode: replay this customer's browser-held state into the
-    // server's per-user RAM before any data loads, so the app comes up populated.
-    await hydrateStateFromLocal();
-    await loadSubscriptions();
-    await loadSnapshotsList();
-    const picker = document.getElementById("snapshot-picker");
-    await loadSnapshot(picker.value || null);
-    maybeShowSettingsCoach();
-    // Restore quota request history from SQLite
-    await _restoreQuotaRequestsFromDb();
-    // Populate the header sign-in chip (silent — never opens a browser).
-    refreshAuthToken({ force: false }).then(() => {
-      // Pre-load subscription names so quota displays show names not IDs.
-      preloadSubscriptionNames().catch(() => {});
-    }).catch(() => {});
+    // MSAL-only single sign-in: if the app runs in delegated (multi-customer)
+    // mode, require a browser sign-in before loading any data. A silent attempt
+    // reuses an existing MSAL session; otherwise a "Sign in to continue" gate is
+    // shown and the app boots only after the user completes the single sign-in.
+    if (APP_CONFIG && APP_CONFIG.delegated_mode) {
+      const ok = await ensureSignedInOrGate();
+      if (!ok) return; // gate is showing; startAppAfterAuth() runs on Sign in
+    }
+    await startAppAfterAuth();
   })().catch(e => console.error("init failed:", e));
+}
+
+// Everything that populates the dashboard once we have (or don't need) a signed
+// -in session. Factored out so the sign-in gate can invoke it after a
+// successful interactive sign-in.
+async function startAppAfterAuth() {
+  await hydrateStateFromLocal();
+  await loadSubscriptions();
+  await loadSnapshotsList();
+  const picker = document.getElementById("snapshot-picker");
+  await loadSnapshot(picker ? (picker.value || null) : null);
+  maybeShowSettingsCoach();
+  // Restore quota request history from the (browser-held) store
+  await _restoreQuotaRequestsFromDb();
+  // Populate the header sign-in chip (silent — never opens a browser).
+  refreshAuthToken({ force: false }).then(() => {
+    // Pre-load subscription names so quota displays show names not IDs.
+    preloadSubscriptionNames().catch(() => {});
+  }).catch(() => {});
+}
+
+// Try a silent sign-in (existing MSAL session in this tab). Returns true if
+// signed in; otherwise shows the full-screen gate and returns false.
+async function ensureSignedInOrGate() {
+  try {
+    const tok = await ensureDelegatedToken({ force: false });
+    if (tok) { hideAuthGate(); return true; }
+  } catch (e) { /* silent failure -> show the gate */ }
+  showAuthGate();
+  return false;
+}
+
+function _ensureAuthGate() {
+  let g = document.getElementById("auth-gate");
+  if (g) return g;
+  const style = document.createElement("style");
+  style.textContent = `
+    #auth-gate{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;
+      justify-content:center;background:linear-gradient(135deg,#0b1220,#111a2e);}
+    #auth-gate .auth-card{background:var(--surface,#fff);color:var(--text,#111);
+      max-width:420px;width:92%;padding:2rem;border-radius:14px;text-align:center;
+      box-shadow:0 20px 60px rgba(0,0,0,.4);font-family:system-ui,sans-serif;}
+    #auth-gate h2{margin:.25rem 0 .5rem;font-size:1.35rem;}
+    #auth-gate p{margin:.25rem 0 1.25rem;color:var(--muted,#556);font-size:.95rem;line-height:1.4;}
+    #auth-gate button{background:#2f6feb;color:#fff;border:0;border-radius:8px;
+      padding:.7rem 1.4rem;font-size:1rem;cursor:pointer;font-weight:600;}
+    #auth-gate button:disabled{opacity:.6;cursor:default;}
+    #auth-gate .auth-err{color:#d13438;min-height:1.2em;margin-top:.9rem;font-size:.88rem;}
+    #auth-gate .brand{font-size:2rem;margin-bottom:.5rem;}
+    #auth-gate.hidden{display:none;}`;
+  document.head.appendChild(style);
+  g = document.createElement("div");
+  g.id = "auth-gate";
+  g.innerHTML = `
+    <div class="auth-card" role="dialog" aria-modal="true" aria-labelledby="auth-gate-title">
+      <div class="brand">☁️</div>
+      <h2 id="auth-gate-title">Azure BOM Region Dashboard</h2>
+      <p>Sign in with your Microsoft Entra account to analyze your Bill of Materials
+         against Azure region availability, quota and support. Your data stays in your
+         browser — nothing is stored on the server.</p>
+      <button type="button" data-gate-signin>Sign in to continue</button>
+      <div class="auth-err" id="auth-gate-err" aria-live="polite"></div>
+    </div>`;
+  document.body.appendChild(g);
+  g.querySelector("[data-gate-signin]").addEventListener("click", onGateSignIn);
+  return g;
+}
+
+function showAuthGate() { _ensureAuthGate().classList.remove("hidden"); }
+function hideAuthGate() {
+  const g = document.getElementById("auth-gate");
+  if (g) g.classList.add("hidden");
+}
+
+async function onGateSignIn(ev) {
+  const btn = ev.currentTarget;
+  const err = document.getElementById("auth-gate-err");
+  btn.disabled = true;
+  if (err) err.textContent = "Opening Microsoft sign-in…";
+  try {
+    const tok = await ensureDelegatedToken({ force: true }); // interactive popup
+    if (!tok) throw new Error("Sign-in was cancelled. Please try again.");
+    if (err) err.textContent = "";
+    hideAuthGate();
+    await startAppAfterAuth();
+  } catch (e) {
+    if (err) err.textContent = (e && e.message) ? e.message : "Sign-in failed. Please try again.";
+    btn.disabled = false;
+  }
 }
 
 document.addEventListener("DOMContentLoaded", init);

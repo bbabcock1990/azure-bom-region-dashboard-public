@@ -92,8 +92,21 @@ def current_user_key() -> Optional[str]:
     """Stable id of the signed-in customer for the current request, or None.
 
     Used to partition any transient per-user server state so concurrent
-    customers are isolated."""
-    return _ctx_user_key.get()
+    customers are isolated. Prefers the Easy Auth principal id (when a platform
+    auth gate is in front); otherwise falls back to the signed-in customer's
+    identity decoded from the delegated ARM token (``tid``+``oid`` claims), so
+    MSAL-only mode (no Easy Auth header) still partitions correctly."""
+    key = _ctx_user_key.get()
+    if key:
+        return key
+    tok = _ctx_delegated_arm_token.get()
+    if tok:
+        claims = _decode_claims(tok)
+        oid = claims.get("oid") or claims.get("sub")
+        if oid:
+            tid = claims.get("tid") or ""
+            return f"{tid}.{oid}" if tid else str(oid)
+    return None
 
 
 def _delegated_token() -> Optional[str]:
