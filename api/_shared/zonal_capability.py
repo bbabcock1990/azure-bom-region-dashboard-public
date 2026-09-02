@@ -606,7 +606,11 @@ def _elasticsan_verdict(state: Dict[str, Dict[str, Any]], sku: str) -> Dict[str,
 
 def _sql_verdict(state: Dict[str, Dict[str, Any]], edition: str) -> Dict[str, Any]:
     if not state:
-        return {"verdict": "unverifiable", "message": "SQL capabilities unavailable for this subscription/region."}
+        return {"verdict": "unverifiable",
+                "message": ("Azure SQL capabilities couldn't be read for this subscription "
+                            "(commonly a 403 on restricted sponsored/MCAPS subscriptions, or the "
+                            "region isn't offered for SQL). Zone redundancy can't be confirmed "
+                            "from metadata — use the deep check to validate by deployment pre-flight.")}
     # Region-access gate first: the subscription may be unable to create a SQL
     # server in this region at all — no edition is deployable regardless of its
     # own zone-redundancy capability. Azure signals this on the top-level

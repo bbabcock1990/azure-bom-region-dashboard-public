@@ -788,6 +788,14 @@
       <input type="text" id="bom-customer" placeholder="Contoso, Contoso Health, …" autocomplete="off" maxlength="80" />
     </div>
     <div class="run-step">
+      <label for="bom-resilience">Availability target</label>
+      <select id="bom-resilience" style="width:100%;">
+        <option value="zone_redundant">Zone-redundant (multi-AZ / HA) — needs Availability Zones</option>
+        <option value="regional">Regional (single-zone tolerant) — zone redundancy not required</option>
+      </select>
+      <p class="muted">How this workload is deployed. <strong>Zone-redundant</strong> spreads services across Availability Zones for HA, so a tier that's restricted from zone redundancy in a region is a <strong>hard blocker</strong> (region goes red). <strong>Regional</strong> tolerates a single zone, so zone-redundancy restrictions are <strong>advisory only</strong> and won't block a region.</p>
+    </div>
+    <div class="run-step">
       <label>Support contact for this BOM <span class="muted">(optional)</span></label>
       <div class="bom-owner-grid">
         <input type="text" id="bom-owner-first" placeholder="First name" autocomplete="off" maxlength="60" />
@@ -981,6 +989,6 @@
 
 <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
 
-<script src="app.js?v=2026090304"></script>
+<script src="app.js?v=2026090305"></script>
 </body>
 </html>

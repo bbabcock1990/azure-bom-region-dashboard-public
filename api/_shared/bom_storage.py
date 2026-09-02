@@ -187,6 +187,18 @@ def _validate_customer_name(name: Optional[str]) -> Optional[str]:
     return s
 
 
+# Availability target of the workload. Determines whether a zone-redundancy
+# (ZRS/HA) restriction is a hard deployment blocker ("zone_redundant") or merely
+# advisory ("regional", single-zone tolerant). Defaults to zone_redundant so
+# existing BOMs keep treating AZ restrictions as blockers.
+VALID_RESILIENCE = ("regional", "zone_redundant")
+
+
+def _validate_resilience(value: Optional[str]) -> str:
+    v = str(value or "").strip().lower()
+    return v if v in VALID_RESILIENCE else "zone_redundant"
+
+
 # Per-BOM support-contact override. Mirrors the global support_settings fields
 # so each BOM can carry its own ticket owner + contact profile, initialized from
 # the global defaults but independently editable. Stored as a compact JSON blob.
@@ -481,6 +493,7 @@ def _entity_to_record(e: Dict) -> Dict:
         "tag": e.get("tag") or None,
         "customer_name": e.get("customer_name") or None,
         "customer_segments": e.get("customer_segments") or "EA,ANY",
+        "resilience": _validate_resilience(e.get("resilience")),
         "required_skus": required_skus,
         "services": services,
         "regions": regions,
@@ -526,6 +539,7 @@ def create(
     tag: Optional[str] = None,
     customer_name: Optional[str] = None,
     customer_segments: Optional[str] = None,
+    resilience: Optional[str] = None,
     required_skus: Optional[List[Dict]] = None,
     services: Optional[List[Dict]] = None,
     regions: Optional[List] = None,
@@ -541,6 +555,7 @@ def create(
         tag=tag,
         customer_name=customer_name,
         customer_segments=customer_segments,
+        resilience=resilience,
         required_skus=required_skus or [],
         services=services or [],
         regions=regions or [],
@@ -557,6 +572,7 @@ def upsert(
     tag: Optional[str],
     customer_name: Optional[str],
     customer_segments: Optional[str],
+    resilience: Optional[str] = None,
     required_skus: List[Dict],
     services: List[Dict],
     regions: Optional[List] = None,
@@ -572,6 +588,7 @@ def upsert(
     tag = _validate_tag(tag)
     customer_name = _validate_customer_name(customer_name)
     segments_csv = _validate_segments(customer_segments)
+    resilience_val = _validate_resilience(resilience)
     cleaned_skus = _validate_required_skus(required_skus or [])
     cleaned_services = _validate_services(services or [])
     cleaned_regions = _validate_regions(regions or [])
@@ -595,6 +612,7 @@ def upsert(
         "tag": tag or "",
         "customer_name": customer_name or "",
         "customer_segments": segments_csv,
+        "resilience": resilience_val,
         "required_skus_json": skus_json,
         "services_json": services_json,
         "regions_json": regions_json,

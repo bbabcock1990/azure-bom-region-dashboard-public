@@ -1448,7 +1448,7 @@ function _zrsLiveMark(v, az) {
     case "no_subscription":
       return `<span class="zrs-mark warn" title="${escapeHtml(v.message || "")}">⚠️ Select a subscription to verify</span>`;
     case "unverifiable":
-      return `<span class="zrs-mark warn" title="${escapeHtml(v.message || "")}">⚠️ Could not read capability</span>`;
+      return `<span class="zrs-mark warn" title="${escapeHtml(v.message || "")} This provider's capabilities API returned no readable answer for your subscription — commonly a 403 on restricted (sponsored/MCAPS) subscriptions or throttling — so zone redundancy can't be confirmed either way. Use the deep check to validate by deployment pre-flight.">⚠️ Capability not readable for this subscription</span>`;
     default: // not_verifiable → documented region-AZ fallback
       return _zrsBaselineMark(az);
   }
@@ -1499,10 +1499,13 @@ function _zrsReadinessPill(r, entry) {
     return { cls: "pill-warn", text: "ZRS: checking…", title: "Verifying zone-redundant deployability live against your subscription." };
   }
   const results = (entry && entry.status === "done") ? (entry.map || {}) : null;
+  const needsZr = _bomNeedsZoneRedundancy();
   if (results) {
     const vals = Object.values(results);
     if (vals.some(v => v.verdict === "blocked" || v.verdict === "unavailable")) {
-      return { cls: "pill-fail", text: "ZRS: blocked", title: "One or more zone-redundant tiers can't be deployed here for this subscription — see details." };
+      return needsZr
+        ? { cls: "pill-fail", text: "ZRS: blocked", title: "One or more zone-redundant tiers can't be deployed here for this subscription — see details." }
+        : { cls: "pill-warn", text: "ZRS: advisory", title: "A zone-redundant tier is restricted here, but this workload is regional (single-zone tolerant), so it doesn't block deployment." };
     }
     const anyVerified = vals.some(v => v.verdict === "available");
     // If nothing was blocked and at least one was live-verified (and region AZ isn't a hard no), we're good.
@@ -1510,7 +1513,11 @@ function _zrsReadinessPill(r, entry) {
       return { cls: "pill-ok", text: "ZRS: verified", title: "Zone-redundant tiers verified deployable against your subscription." };
     }
   }
-  if (az === false) return { cls: "pill-fail", text: "ZRS: no AZs", title: "This region has no Availability Zones — zone-redundant tiers can't be deployed here." };
+  if (az === false) {
+    return needsZr
+      ? { cls: "pill-fail", text: "ZRS: no AZs", title: "This region has no Availability Zones — zone-redundant tiers can't be deployed here." }
+      : { cls: "pill-warn", text: "ZRS: n/a", title: "This region has no Availability Zones, but this workload is regional (single-zone tolerant), so that's not a blocker." };
+  }
   if (az === null) return { cls: "pill-warn", text: "ZRS: unverified", title: "Availability-Zone support for this region could not be confirmed." };
   return { cls: "pill-ok", text: "ZRS: ready", title: "This region supports Availability Zones — zone-redundant tiers can be deployed." };
 }
@@ -1520,9 +1527,13 @@ function renderZrsReadinessSection(r) {
   if (!sels.length) return "";
   const az = _regionSupportsAz(r);
   const sub = focusedSubscriptionId() || "";
+  const needsZr = _bomNeedsZoneRedundancy();
   let intro;
-  if (az === false) {
-    intro = `<div class="note danger">${escapeHtml(r.name)} has <strong>no Availability Zones</strong>. Zone-redundant (ZRS/HA) deployments aren't supported here — choose an AZ-enabled region for these tiers, or accept locally-redundant (single-zone) resilience.</div>`;
+  if (!needsZr) {
+    // Regional (single-zone tolerant) workload: the whole section is advisory.
+    intro = `<div class="note">This BOM's availability target is <strong>Regional (single-zone)</strong>, so zone-redundancy findings below are <strong>advisory only</strong> — they won't block a region. Switch the BOM to <em>Zone-redundant</em> if this workload needs multi-AZ HA.</div>`;
+  } else if (az === false) {
+    intro = `<div class="note danger">${escapeHtml(r.name)} has <strong>no Availability Zones</strong>. Zone-redundant (ZRS/HA) deployments aren't supported here — choose an AZ-enabled region for these tiers, or set this BOM's availability target to <em>Regional</em> if single-zone resilience is acceptable.</div>`;
   } else if (az === null) {
     intro = `<div class="note">Availability-Zone support for this region couldn't be confirmed from the catalog. Verify AZ availability before committing to zone-redundant tiers.</div>`;
   } else {
@@ -2464,22 +2475,30 @@ function _augmentVerdictWithZrs(region, info) {
   info.liveNote = conf.liveNote;
   const blocks = _zrsBlockedForRegion(region);
   if (!blocks.length) return info;
+  const needsZr = _bomNeedsZoneRedundancy();
   const blockers = Array.isArray(info.blockers) ? info.blockers.slice() : [];
   for (const v of blocks) {
     const tierTxt = v.tier ? ` (${v.tier})` : "";
     const detail = v.message || "zone-redundant / HA tier is restricted for this subscription in this region.";
     blockers.push({
       type: "zone_gap",
-      severity: "warning",
-      message: `${v.name}${tierTxt}: ${detail}`,
+      severity: needsZr ? "critical" : "info",
+      message: `${v.name}${tierTxt}: ${detail}` +
+        (needsZr ? "" : " — advisory only (this workload is regional / single-zone tolerant)."),
     });
   }
   const next = { ...info, blockers };
-  if (info.verdict === "ready") {
-    next.verdict = "ready_with_constraints";
-    next.text = "Ready with constraints";
-    next.cls = "pill-warn";
-    next.title = "Core requirements pass, but one or more zone-redundant (ZRS/HA) tiers are restricted for this subscription in this region.";
+  // Regional workloads don't need Availability Zones, so a zone-redundancy
+  // restriction is informational and must not downgrade the region verdict.
+  if (!needsZr) return next;
+  // Zone-redundant workloads DO need AZs: a tier that is restricted/unavailable
+  // for this subscription is a hard blocker. Escalate the headline to red so it
+  // matches the "ZRS: blocked" panel instead of a soft "Ready with constraints".
+  if (next.verdict !== "not_recommended") {
+    next.verdict = "not_recommended";
+    next.text = "Not recommended";
+    next.cls = "pill-fail";
+    next.title = "One or more zone-redundant (ZRS/HA) tiers your BOM requires are restricted or unavailable for this subscription in this region.";
   }
   return next;
 }
@@ -5681,6 +5700,22 @@ function getBomMeta(bomId) {
   return BOM_META.index[bomId] || null;
 }
 
+// Availability target of a BOM. "zone_redundant" (default) means the workload
+// needs Availability Zones, so a ZRS/HA restriction is a hard blocker.
+// "regional" means single-zone tolerant, so ZRS restrictions are advisory only.
+function _normalizeResilience(value) {
+  return String(value || "").trim().toLowerCase() === "regional" ? "regional" : "zone_redundant";
+}
+
+function _bomResilience() {
+  const meta = STATE.activeBomId ? getBomMeta(STATE.activeBomId) : null;
+  return _normalizeResilience(meta && meta.resilience);
+}
+
+function _bomNeedsZoneRedundancy() {
+  return _bomResilience() === "zone_redundant";
+}
+
 // Canonical BOM display name. Precedence: BOM Name (tag) → Customer name →
 // Subscription ID. Used everywhere a BOM is identified so naming is consistent.
 function bomDisplayName(meta) {
@@ -5816,6 +5851,7 @@ async function openBomModal(bomId, opts = {}) {
   subEl.innerHTML = '<option disabled>Loading subscriptions…</option>';
   document.getElementById("bom-tag").value = "";
   document.getElementById("bom-customer").value = "";
+  { const rEl = document.getElementById("bom-resilience"); if (rEl) rEl.value = "zone_redundant"; }
   document.getElementById("bom-services-filter").value = "";
   document.getElementById("bom-regions-search").value = "";
   document.getElementById("bom-regions-filter").value = "all";
@@ -6539,6 +6575,7 @@ function applyBomToForm(meta) {
   });
   document.getElementById("bom-tag").value = meta.tag || "";
   document.getElementById("bom-customer").value = meta.customer_name || "";
+  { const rEl = document.getElementById("bom-resilience"); if (rEl) rEl.value = _normalizeResilience(meta.resilience); }
   setBomSelectedServices((meta.services || []).map(s => s.name));
   // Seed per-service tier selections from the saved BOM so the step-3
   // tier pickers reflect what was chosen previously.
@@ -6604,6 +6641,7 @@ async function saveBom() {
   const sub = subIds[0];
   const tag = document.getElementById("bom-tag").value.trim();
   const customer_name = document.getElementById("bom-customer").value.trim();
+  const resilience = _normalizeResilience((document.getElementById("bom-resilience") || {}).value);
   const services = getBomSelectedServices();
   const required_skus = getBomSkuRows();
   // Persist the explicit region selection so the BOM analyzes exactly what
@@ -6617,7 +6655,7 @@ async function saveBom() {
   const payload = {
     subscription_id: sub,
     subscription_ids: subIds,
-    tag, customer_name,
+    tag, customer_name, resilience,
     services, regions, required_skus,
     support_override: _collectBomSupportOverride(),
   };

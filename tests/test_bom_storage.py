@@ -77,6 +77,24 @@ def test_validate_segments_rejects_unknown():
     assert "VIP" in ex.value.message
 
 
+def test_validate_resilience_defaults_and_normalizes():
+    # Missing/blank/unknown → zone_redundant (preserves legacy blocking behavior).
+    assert bom_storage._validate_resilience(None) == "zone_redundant"
+    assert bom_storage._validate_resilience("") == "zone_redundant"
+    assert bom_storage._validate_resilience("bogus") == "zone_redundant"
+    # Recognized values pass through, case-insensitively.
+    assert bom_storage._validate_resilience("regional") == "regional"
+    assert bom_storage._validate_resilience("REGIONAL") == "regional"
+    assert bom_storage._validate_resilience("zone_redundant") == "zone_redundant"
+
+
+def test_entity_to_record_defaults_resilience():
+    rec = bom_storage._entity_to_record({"RowKey": "bom-x", "subscription_id": "s"})
+    assert rec["resilience"] == "zone_redundant"
+    rec2 = bom_storage._entity_to_record({"RowKey": "bom-y", "subscription_id": "s", "resilience": "regional"})
+    assert rec2["resilience"] == "regional"
+
+
 def test_validate_services_resolves_against_catalog():
     out = bom_storage._validate_services([
         {"name": "Azure Automation"},
