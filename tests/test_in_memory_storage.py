@@ -27,6 +27,8 @@ def _mem(monkeypatch):
             pass
     storage._mem_conns.clear()
     storage._mem_blobs.clear()
+    storage._mem_last_seen.clear()
+    storage._last_evict_ts = 0.0
     auth_token.reset_for_tests()
     yield
     for c in list(storage._mem_conns.values()):
@@ -36,6 +38,8 @@ def _mem(monkeypatch):
             pass
     storage._mem_conns.clear()
     storage._mem_blobs.clear()
+    storage._mem_last_seen.clear()
+    storage._last_evict_ts = 0.0
     auth_token.reset_for_tests()
 
 
@@ -135,3 +139,40 @@ def test_import_rejects_bad_table_names():
     summary = storage.import_state(doc)
     assert summary["tables"] == 1  # only tbl_ok accepted
     auth_token.clear_request_context()
+
+
+def test_lru_cap_bounds_memory(monkeypatch):
+    # Cap RAM to 2 customer stores; a third sign-in evicts the least-recent.
+    monkeypatch.setenv("IN_MEMORY_MAX_USERS", "2")
+    for name in ("u1", "u2", "u3", "u4"):
+        _bind(name)
+        storage.get_table_client("boms").upsert_entity(
+            {"PartitionKey": "bom", "RowKey": "1", "name": name}
+        )
+        auth_token.clear_request_context()
+    # Never more than the cap of live connections.
+    assert len(storage._mem_conns) <= 2
+    # The most-recent user survives; the oldest was evicted (non-destructive —
+    # it would re-hydrate from that user's browser on their next visit).
+    _bind("u4")
+    assert storage.get_table_client("boms").list_entities()[0]["name"] == "u4"
+    auth_token.clear_request_context()
+    _bind("u1")
+    assert storage.get_table_client("boms").list_entities() == []
+    auth_token.clear_request_context()
+
+
+def test_idle_ttl_evicts_stale_store(monkeypatch):
+    monkeypatch.setenv("IN_MEMORY_TTL_SECONDS", "1")
+    _bind("stale@example.com")
+    storage.get_table_client("boms").upsert_entity(
+        {"PartitionKey": "bom", "RowKey": "1", "name": "Stale"}
+    )
+    auth_token.clear_request_context()
+    # Age the last-seen stamp beyond the TTL and force the throttled sweep.
+    storage._mem_last_seen["stale@example.com"] = 0.0
+    storage._last_evict_ts = 0.0
+    _bind("active@example.com")
+    storage.get_table_client("boms").list_entities()  # triggers the sweep
+    auth_token.clear_request_context()
+    assert "stale@example.com" not in storage._mem_conns

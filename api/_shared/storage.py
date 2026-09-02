@@ -32,6 +32,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional
 
@@ -87,10 +88,30 @@ def _current_user_key() -> Optional[str]:
 _MEM_DEFAULT_KEY = "__default__"
 _mem_conns: Dict[str, sqlite3.Connection] = {}
 _mem_blobs: Dict[str, Dict[str, Dict[str, bytes]]] = {}
+_mem_last_seen: Dict[str, float] = {}
+_last_evict_ts = 0.0
 
 
 def _in_memory() -> bool:
     return os.getenv("IN_MEMORY_STORAGE", "").lower() in ("true", "1", "yes")
+
+
+def _mem_ttl_seconds() -> int:
+    """Idle time after which a customer's RAM store is dropped (0 disables).
+    Non-destructive: their browser re-hydrates it on the next visit."""
+    try:
+        return int(os.getenv("IN_MEMORY_TTL_SECONDS", "3600"))
+    except Exception:
+        return 3600
+
+
+def _mem_max_users() -> int:
+    """Hard cap on distinct customer stores held at once (0 disables). When
+    exceeded, the least-recently-seen customers are evicted first."""
+    try:
+        return int(os.getenv("IN_MEMORY_MAX_USERS", "200"))
+    except Exception:
+        return 200
 
 
 class _NoCloseConn:
@@ -112,22 +133,6 @@ def _mem_user_key() -> str:
     return _current_user_key() or _MEM_DEFAULT_KEY
 
 
-def _mem_conn_for(user_key: Optional[str]) -> sqlite3.Connection:
-    key = user_key or _MEM_DEFAULT_KEY
-    conn = _mem_conns.get(key)
-    if conn is None:
-        conn = sqlite3.connect(
-            ":memory:", timeout=30, isolation_level=None, check_same_thread=False
-        )
-        conn.execute("PRAGMA busy_timeout=30000;")
-        _mem_conns[key] = conn
-    return conn
-
-
-def _mem_blob_store(user_key: Optional[str]) -> Dict[str, Dict[str, bytes]]:
-    return _mem_blobs.setdefault(user_key or _MEM_DEFAULT_KEY, {})
-
-
 def _reset_mem_user(key: str) -> None:
     """Drop everything held for one user (tables + blobs). Caller holds _lock."""
     conn = _mem_conns.pop(key, None)
@@ -137,6 +142,66 @@ def _reset_mem_user(key: str) -> None:
         except Exception:
             pass
     _mem_blobs.pop(key, None)
+
+
+def _touch_and_evict(active_key: str) -> None:
+    """Record access to ``active_key`` and reclaim memory by evicting other
+    customers' idle / least-recently-used stores. Caller holds ``_lock``.
+
+    Eviction is non-destructive: each customer's durable copy lives in their own
+    browser (localStorage) and is replayed on their next visit, so dropping an
+    idle RAM store only frees memory — it never loses data. This bounds total
+    RAM regardless of how many distinct customers have ever signed in."""
+    global _last_evict_ts
+    now = time.time()
+    _mem_last_seen[active_key] = now
+
+    # Hard cap: always enforced (cheap unless exceeded). Evict least-recently
+    # -seen customers first, never the one being served this request.
+    cap = _mem_max_users()
+    if cap > 0 and len(_mem_conns) > cap:
+        victims = sorted(
+            (k for k in _mem_conns if k != active_key),
+            key=lambda k: _mem_last_seen.get(k, 0.0),
+        )
+        while len(_mem_conns) > cap and victims:
+            _reset_mem_user(victims.pop(0))
+
+    # Idle TTL sweep: throttled to once per 30s to keep hot paths cheap.
+    ttl = _mem_ttl_seconds()
+    if ttl > 0 and (now - _last_evict_ts) >= 30:
+        _last_evict_ts = now
+        stale = [
+            k
+            for k, ts in list(_mem_last_seen.items())
+            if k != active_key and (now - ts) > ttl
+        ]
+        for k in stale:
+            _reset_mem_user(k)
+
+    # Keep the last-seen map from leaking keys for already-evicted users.
+    for k in [k for k in list(_mem_last_seen) if k not in _mem_conns and k != active_key]:
+        _mem_last_seen.pop(k, None)
+
+
+def _mem_conn_for(user_key: Optional[str]) -> sqlite3.Connection:
+    key = user_key or _MEM_DEFAULT_KEY
+    conn = _mem_conns.get(key)
+    if conn is None:
+        conn = sqlite3.connect(
+            ":memory:", timeout=30, isolation_level=None, check_same_thread=False
+        )
+        conn.execute("PRAGMA busy_timeout=30000;")
+        _mem_conns[key] = conn
+    _touch_and_evict(key)
+    return conn
+
+
+def _mem_blob_store(user_key: Optional[str]) -> Dict[str, Dict[str, bytes]]:
+    key = user_key or _MEM_DEFAULT_KEY
+    store = _mem_blobs.setdefault(key, {})
+    _touch_and_evict(key)
+    return store
 
 
 def _db_path() -> str:
