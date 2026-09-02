@@ -87,6 +87,7 @@ ROUTES = [
     ("datasets/{dataset_id}", ["GET", "POST", "DELETE"], "datasets"),
     ("datasets", ["GET"], "datasets"),
     ("local-state/wipe", ["POST"], "local_state_wipe"),
+    ("state/{action}", ["GET", "POST"], "state_sync"),
     ("demo/seed", ["POST"], "demo_seed"),
 ]
 

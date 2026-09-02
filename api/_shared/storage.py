@@ -26,6 +26,7 @@ availability ThreadPoolExecutor can write activity-log rows safely.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -73,6 +74,71 @@ def _current_user_key() -> Optional[str]:
     return safe[:80] or None
 
 
+# ─── In-memory backend (zero-disk hosted multi-customer mode) ────────────────
+# Selected by IN_MEMORY_STORAGE=true. In this mode the server writes NOTHING to
+# disk: every signed-in customer gets an isolated RAM store keyed by their
+# sanitized user key. Tables live in a long-lived per-user in-memory SQLite
+# connection; blobs live in a per-user dict. The durable copy of a customer's
+# data lives in *their own browser* (exported/imported as JSON via
+# export_state()/import_state()), so nothing survives on the server and
+# concurrent customers can never read each other's data. Everything here is
+# cleared on process restart.
+
+_MEM_DEFAULT_KEY = "__default__"
+_mem_conns: Dict[str, sqlite3.Connection] = {}
+_mem_blobs: Dict[str, Dict[str, Dict[str, bytes]]] = {}
+
+
+def _in_memory() -> bool:
+    return os.getenv("IN_MEMORY_STORAGE", "").lower() in ("true", "1", "yes")
+
+
+class _NoCloseConn:
+    """Wrap a shared sqlite connection so the per-operation ``close()`` the
+    table code performs becomes a no-op (the connection is long-lived and
+    reused across requests). All other attribute access proxies through."""
+
+    def __init__(self, conn: sqlite3.Connection):
+        object.__setattr__(self, "_c", conn)
+
+    def close(self) -> None:  # no-op: keep the shared connection alive
+        return None
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_c"), name)
+
+
+def _mem_user_key() -> str:
+    return _current_user_key() or _MEM_DEFAULT_KEY
+
+
+def _mem_conn_for(user_key: Optional[str]) -> sqlite3.Connection:
+    key = user_key or _MEM_DEFAULT_KEY
+    conn = _mem_conns.get(key)
+    if conn is None:
+        conn = sqlite3.connect(
+            ":memory:", timeout=30, isolation_level=None, check_same_thread=False
+        )
+        conn.execute("PRAGMA busy_timeout=30000;")
+        _mem_conns[key] = conn
+    return conn
+
+
+def _mem_blob_store(user_key: Optional[str]) -> Dict[str, Dict[str, bytes]]:
+    return _mem_blobs.setdefault(user_key or _MEM_DEFAULT_KEY, {})
+
+
+def _reset_mem_user(key: str) -> None:
+    """Drop everything held for one user (tables + blobs). Caller holds _lock."""
+    conn = _mem_conns.pop(key, None)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    _mem_blobs.pop(key, None)
+
+
 def _db_path() -> str:
     return os.path.join(_storage_root(), "app.db")
 
@@ -104,6 +170,8 @@ def _phys_table(name: str) -> str:
 
 
 def _connect() -> sqlite3.Connection:
+    if _in_memory():
+        return _NoCloseConn(_mem_conn_for(_current_user_key()))
     conn = sqlite3.connect(_db_path(), timeout=30, isolation_level=None)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA busy_timeout=30000;")
@@ -415,11 +483,71 @@ class _BlobItem:
         self.name = name
 
 
+class _MemDownloader:
+    def __init__(self, data: bytes):
+        self._data = data
+
+    def readall(self) -> bytes:
+        return self._data
+
+
+class _MemBlobContainer:
+    """In-memory blob container mirroring the ``_LocalBlobContainer`` surface.
+    Blobs live in a per-user RAM dict keyed by the signed-in customer; nothing
+    ever touches disk."""
+
+    def __init__(self, name: str):
+        self._name = name
+
+    def _store(self) -> Dict[str, bytes]:
+        with _lock:
+            return _mem_blob_store(_mem_user_key()).setdefault(self._name, {})
+
+    def upload_blob(
+        self,
+        name: str,
+        data,
+        overwrite: bool = False,
+        content_type: Optional[str] = None,
+        **kwargs,
+    ) -> None:
+        store = self._store()
+        if name in store and not overwrite:
+            raise FileExistsError(f"blob {name!r} already exists")
+        if isinstance(data, str):
+            data = data.encode("utf-8")
+        store[name] = bytes(data)
+
+    def download_blob(self, blob, **kwargs) -> _MemDownloader:
+        name = getattr(blob, "name", blob)
+        store = self._store()
+        if name not in store:
+            raise FileNotFoundError(f"blob {name!r} not found")
+        return _MemDownloader(store[name])
+
+    def list_blobs(self, name_starts_with: Optional[str] = None, **kwargs) -> List["_BlobItem"]:
+        store = self._store()
+        out: List[_BlobItem] = []
+        for nm in list(store.keys()):
+            if name_starts_with and not nm.startswith(name_starts_with):
+                continue
+            out.append(_BlobItem(nm))
+        return out
+
+    def delete_blob(self, blob, **kwargs) -> None:
+        name = getattr(blob, "name", blob)
+        self._store().pop(name, None)
+
+
 class _LocalBlobService:
-    def get_container_client(self, name: str) -> _LocalBlobContainer:
+    def get_container_client(self, name: str):
+        if _in_memory():
+            return _MemBlobContainer(name)
         return _LocalBlobContainer(name)
 
-    def create_container(self, name: str) -> _LocalBlobContainer:
+    def create_container(self, name: str):
+        if _in_memory():
+            return _MemBlobContainer(name)
         return _LocalBlobContainer(name)
 
 
@@ -437,8 +565,10 @@ def get_table_client(name: str) -> _LocalTable:
     return _LocalTable(name)
 
 
-def get_blob_container(name: str = None) -> _LocalBlobContainer:
+def get_blob_container(name: str = None):
     name = name or os.getenv("STORAGE_CONTAINER", "snapshots")
+    if _in_memory():
+        return _MemBlobContainer(name)
     return _LocalBlobContainer(name)
 
 
@@ -450,3 +580,120 @@ def wipe_snapshot_blobs() -> int:
         container.delete_blob(item)
         count += 1
     return count
+
+
+# ─── State export / import (browser-held durable copy) ───────────────────────
+# In in-memory mode the server keeps nothing on disk, so the customer's browser
+# is the durable store. These serialize / restore the *entire* per-user store
+# (all tables + all blobs) as a compact JSON-able document the browser persists
+# in its own localStorage and replays on the next visit.
+
+_STATE_VERSION = 1
+
+
+def export_state() -> Dict:
+    """Serialize the current signed-in customer's whole store to a JSON-able
+    dict. Works in in-memory mode (per-user RAM) and, as a fallback, over the
+    on-disk backend so the same export/import path is testable everywhere."""
+    tables: Dict[str, List] = {}
+    blobs: Dict[str, Dict[str, str]] = {}
+    with _lock:
+        if _in_memory():
+            key = _mem_user_key()
+            conn = _mem_conn_for(key)
+            names = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='table' AND name LIKE 'tbl_%'"
+                ).fetchall()
+            ]
+            for phys in names:
+                rows = conn.execute(
+                    f'SELECT pk, rk, data FROM "{phys}"'
+                ).fetchall()
+                tables[phys] = [[r[0], r[1], r[2]] for r in rows]
+            for cname, items in _mem_blob_store(key).items():
+                blobs[cname] = {
+                    n: base64.b64encode(b).decode("ascii")
+                    for n, b in items.items()
+                }
+        else:
+            conn = _connect()
+            try:
+                names = [
+                    r[0]
+                    for r in conn.execute(
+                        "SELECT name FROM sqlite_master "
+                        "WHERE type='table' AND name LIKE 'tbl_%'"
+                    ).fetchall()
+                ]
+                for phys in names:
+                    rows = conn.execute(
+                        f'SELECT pk, rk, data FROM "{phys}"'
+                    ).fetchall()
+                    tables[phys] = [[r[0], r[1], r[2]] for r in rows]
+            finally:
+                conn.close()
+    return {"v": _STATE_VERSION, "tables": tables, "blobs": blobs}
+
+
+def import_state(doc: Optional[Dict]) -> Dict:
+    """Replace the current customer's store with a previously exported document.
+    Returns a small summary. In-memory mode only writes to RAM."""
+    doc = doc or {}
+    tables = doc.get("tables") or {}
+    blobs = doc.get("blobs") or {}
+    n_tables = n_rows = n_blobs = 0
+    with _lock:
+        if _in_memory():
+            key = _mem_user_key()
+            _reset_mem_user(key)
+            conn = _mem_conn_for(key)
+        else:
+            conn = _connect()
+        try:
+            for phys, rows in tables.items():
+                if not isinstance(phys, str) or not re.match(
+                    r"^tbl_[A-Za-z0-9_]+$", phys
+                ):
+                    continue
+                _ensure_table(conn, phys)
+                n_tables += 1
+                for row in rows or []:
+                    try:
+                        pk, rk, data = row[0], row[1], row[2]
+                    except Exception:
+                        continue
+                    if not isinstance(data, str):
+                        data = json.dumps(data, ensure_ascii=False)
+                    conn.execute(
+                        f'INSERT OR REPLACE INTO "{phys}" (pk, rk, data) '
+                        "VALUES (?, ?, ?)",
+                        (str(pk), str(rk), data),
+                    )
+                    n_rows += 1
+        finally:
+            if not _in_memory():
+                conn.close()
+        if _in_memory():
+            store = _mem_blob_store(_mem_user_key())
+            for cname, items in blobs.items():
+                if not isinstance(cname, str):
+                    continue
+                dest = store.setdefault(cname, {})
+                for n, b64 in (items or {}).items():
+                    try:
+                        dest[n] = base64.b64decode(b64)
+                        n_blobs += 1
+                    except Exception:
+                        continue
+    return {"tables": n_tables, "rows": n_rows, "blobs": n_blobs}
+
+
+def clear_state() -> None:
+    """Wipe the current customer's entire in-memory store (tables + blobs)."""
+    if not _in_memory():
+        return
+    with _lock:
+        _reset_mem_user(_mem_user_key())

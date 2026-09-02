@@ -227,6 +227,21 @@ async function apiFetch(path, opts = {}) {
     }
   } catch (e) {}
   const res = await fetch(path, Object.assign({ credentials: "same-origin" }, opts, { headers }));
+  // Stateless hosted mode: after any successful mutation, mirror the server's
+  // per-user RAM store back to the customer's browser (debounced). Skips the
+  // state-sync endpoints themselves to avoid a feedback loop.
+  try {
+    const m = (opts.method || "GET").toUpperCase();
+    if (
+      res.ok &&
+      typeof path === "string" &&
+      path.indexOf("/api/") === 0 &&
+      path.indexOf("/api/state/") !== 0 &&
+      (m === "POST" || m === "PUT" || m === "DELETE" || m === "PATCH")
+    ) {
+      scheduleStateSave();
+    }
+  } catch (e) {}
   return res;
 }
 
@@ -241,6 +256,65 @@ async function ensureDelegatedToken({ force = false } = {}) {
   } catch (e) {
     window.__ARM_TOKEN = null;
     throw e;
+  }
+}
+
+// ---------------------------------------------------------------- State sync
+// Stateless hosted mode: the server keeps NOTHING on disk. The customer's
+// browser is the durable store. On load we replay the saved document into the
+// server's per-user RAM; after any change we mirror the server's state back to
+// localStorage, namespaced by the signed-in user so concurrent customers on the
+// same machine never collide.
+function _stateKey() {
+  const uid = (APP_CONFIG && (APP_CONFIG.user_id || APP_CONFIG.user_name)) || "anon";
+  return "bomState:" + uid;
+}
+
+function _stateSyncEnabled() {
+  return !!(APP_CONFIG && APP_CONFIG.delegated_mode);
+}
+
+async function hydrateStateFromLocal() {
+  if (!_stateSyncEnabled()) return;
+  let raw = null;
+  try { raw = localStorage.getItem(_stateKey()); } catch (e) {}
+  if (!raw) return;
+  try {
+    await apiFetch("/api/state/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: raw,
+    });
+  } catch (e) { console.warn("state hydrate failed", e); }
+}
+
+let _stateSaveTimer = null;
+let _stateSaveInFlight = false;
+function scheduleStateSave() {
+  if (!_stateSyncEnabled()) return;
+  if (_stateSaveTimer) clearTimeout(_stateSaveTimer);
+  _stateSaveTimer = setTimeout(saveStateToLocal, 1000);
+}
+
+async function saveStateToLocal() {
+  if (!_stateSyncEnabled() || _stateSaveInFlight) return;
+  _stateSaveInFlight = true;
+  try {
+    const res = await apiFetch("/api/state/export");
+    if (!res.ok) return;
+    const txt = await res.text();
+    try {
+      localStorage.setItem(_stateKey(), txt);
+    } catch (e) {
+      // QuotaExceededError — state too large for localStorage. Keep working in
+      // this session (server RAM); it just won't survive a reload.
+      console.warn("state save skipped (localStorage full)", e);
+      try { showToast("Local backup skipped — data too large to save in this browser.", "warn"); } catch (_) {}
+    }
+  } catch (e) {
+    console.warn("state export failed", e);
+  } finally {
+    _stateSaveInFlight = false;
   }
 }
 
@@ -9288,6 +9362,9 @@ function init() {
 
   (async () => {
     await loadAppConfig();
+    // Stateless hosted mode: replay this customer's browser-held state into the
+    // server's per-user RAM before any data loads, so the app comes up populated.
+    await hydrateStateFromLocal();
     await loadSubscriptions();
     await loadSnapshotsList();
     const picker = document.getElementById("snapshot-picker");
