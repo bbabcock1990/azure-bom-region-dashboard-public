@@ -38,6 +38,39 @@ def test_settings_defaults_and_roundtrip(isolated_storage):
     assert support_settings.is_configured() is True
 
 
+def test_validation_rg_per_subscription_merge_and_resolve(isolated_storage):
+    from _shared import support_settings
+    # Defaults: empty map, resolve to "" for any subscription.
+    assert support_settings.get_settings()["validation_resource_groups"] == {}
+    assert support_settings.resolve_validation_rg("sub-a") == ""
+
+    # Save an RG for sub-a; sub-b unaffected.
+    support_settings.save_settings({"validation_resource_groups": {"sub-a": "rg-a"}})
+    assert support_settings.resolve_validation_rg("sub-a") == "rg-a"
+    assert support_settings.resolve_validation_rg("sub-b") == ""
+
+    # Merge (not clobber): adding sub-b keeps sub-a.
+    support_settings.save_settings({"validation_resource_groups": {"sub-b": "rg-b"}})
+    assert support_settings.resolve_validation_rg("sub-a") == "rg-a"
+    assert support_settings.resolve_validation_rg("sub-b") == "rg-b"
+
+    # Empty value clears just that subscription's entry.
+    support_settings.save_settings({"validation_resource_groups": {"sub-a": ""}})
+    assert support_settings.resolve_validation_rg("sub-a") == ""
+    assert support_settings.resolve_validation_rg("sub-b") == "rg-b"
+
+
+def test_validation_rg_legacy_global_fallback(isolated_storage):
+    from _shared import support_settings
+    # Legacy global value is used when no per-subscription entry exists.
+    support_settings.save_settings({"validation_resource_group": "legacy-rg"})
+    assert support_settings.resolve_validation_rg("sub-x") == "legacy-rg"
+    # A per-subscription entry overrides the legacy global for that sub.
+    support_settings.save_settings({"validation_resource_groups": {"sub-x": "rg-x"}})
+    assert support_settings.resolve_validation_rg("sub-x") == "rg-x"
+    assert support_settings.resolve_validation_rg("sub-y") == "legacy-rg"
+
+
 # ─── payload building (pure) ─────────────────────────────────────────────────
 
 def test_build_quota_ticket_payload_shape(isolated_storage):

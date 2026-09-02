@@ -82,11 +82,12 @@ async def main(req: func.HttpRequest) -> func.HttpResponse:
     if not isinstance(raw_services, list):
         return _err("no_services", "Body.services must be an array.", 400)
 
-    # Resolve the validation RG: explicit body override, else saved setting.
+    # Resolve the validation RG: explicit body override, else the per-subscription
+    # saved setting (an RG only exists inside one subscription).
     resource_group = str(body.get("resource_group") or "").strip()
     if not resource_group:
         try:
-            resource_group = str(support_settings.get_settings().get("validation_resource_group") or "").strip()
+            resource_group = support_settings.resolve_validation_rg(subscription_id)
         except Exception:
             resource_group = ""
 

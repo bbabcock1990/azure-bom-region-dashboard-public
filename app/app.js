@@ -102,6 +102,28 @@ function focusedSubscriptionName() {
   return subId ? _subNameById(subId) : "";
 }
 
+// The validation RG is stored per-subscription (an RG only lives inside one
+// subscription). Resolve the one saved for a given subscription, falling back
+// to the legacy global value for back-compat.
+function _valRgForSub(subId) {
+  const s = SUPPORT.settings || {};
+  const map = s.validation_resource_groups || {};
+  const sub = String(subId || "").trim();
+  if (sub && map[sub]) return String(map[sub]).trim();
+  return String(s.validation_resource_group || "").trim();
+}
+
+// Jump to Settings → Ticket owner and focus the validation-RG field. Used by the
+// contextual "enable deployment validation" affordance on the deep check.
+function openValidationRgSettings() {
+  try { switchView("settings"); } catch (_e) {}
+  try { switchSettingsTab("owner"); } catch (_e) {}
+  setTimeout(() => {
+    const el = document.getElementById("owner-valrg");
+    if (el) { try { el.scrollIntoView({ behavior: "smooth", block: "center" }); el.focus(); } catch (_e) {} }
+  }, 60);
+}
+
 // ---------------------------------------------------------------- Theme
 
 const THEME_KEY = "themePreference"; // "light" | "dark" | (absent → follow system)
@@ -1453,9 +1475,10 @@ function _zrsDeepMark(v, az) {
     case "no_resource_group": {
       const notFound = /not found/i.test(v.message || "");
       const label = notFound
-        ? "⚙️ Validation RG not found — pick an existing one in Settings"
-        : "⚙️ Set a validation resource group in Settings";
-      return `<span class="zrs-mark warn" title="${msg}">${label}</span>`;
+        ? "✓ Read-only check · validation RG not found in this subscription"
+        : "✓ Read-only check · deployment validation off";
+      const enable = `<button type="button" class="btn btn--xs" onclick="openValidationRgSettings()" title="Optionally enable ARM deployment-level pre-flight for this subscription">⚙️ Enable</button>`;
+      return `<span class="zrs-mark ok" title="${msg}">${label}</span> ${enable}`;
     }
     case "no_subscription":
       return `<span class="zrs-mark warn" title="${msg}">⚠️ Select a subscription to verify</span>`;
@@ -1792,10 +1815,10 @@ async function _runZrsDeepCheck(regionShort) {
   if (!deepSels.length) return;
 
   try { await ensureSupportSettings(); } catch (_e) {}
-  const valRg = ((SUPPORT.settings || {}).validation_resource_group || "").trim();
+  const valRg = _valRgForSub(sub);
   const rgNote = valRg
-    ? `Validation resource group: "${valRg}".`
-    : `No validation resource group is configured — services needing pre-flight will report that instead. Set one under Settings → Ticket owner to enable full checks.`;
+    ? `Deployment-level validation ON — using resource group "${valRg}" in ${focusedSubscriptionName() || "the selected subscription"}.`
+    : `Read-only checks only (quota, SKU & zonal availability). Deployment-level validation is optional — enable it later per subscription in Settings → Ticket owner.`;
   const ok = window.confirm(
     `Run a NON-DESTRUCTIVE deep deployability check in ${r.name}?\n\n` +
     `This calls Azure Resource Manager pre-flight validation for your ${deepSels.length} zone-redundant selection(s). ` +
@@ -7611,7 +7634,14 @@ async function loadOwnerSettings() {
   set("owner-country", s.country || "US");
   set("owner-tz", s.preferred_timezone || "Pacific Standard Time");
   set("owner-sev", s.default_severity || "moderate");
-  set("owner-valrg", s.validation_resource_group || "");
+  set("owner-valrg", _valRgForSub(focusedSubscriptionId()));
+  const subLabelEl = document.getElementById("owner-valrg-sub");
+  if (subLabelEl) {
+    const subName = focusedSubscriptionName();
+    subLabelEl.textContent = subName
+      ? `Applies to the selected subscription: ${subName}`
+      : "Optional — pick a subscription on the dashboard first, then set a resource group for it here.";
+  }
   const pathEl = document.getElementById("owner-storage-path");
   if (pathEl) {
     const dir = (APP_CONFIG && (APP_CONFIG.snapshots_dir || APP_CONFIG.storage_dir)) || "";
@@ -7687,11 +7717,12 @@ async function _createValidationRg() {
       body: JSON.stringify({ subscription_id: sub, name, location }),
     });
     if (status) status.textContent = res.created ? `✓ Created in ${res.location}` : `✓ Already exists in ${res.location}`;
-    // Persist it as the validation RG so the deep check uses it immediately.
+    // Persist it as the validation RG for THIS subscription so the deep check
+    // uses it immediately (an RG only exists inside one subscription).
     try {
       const saved = await apiJson("/api/support/settings", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ validation_resource_group: res.name }),
+        body: JSON.stringify({ validation_resource_groups: { [sub]: res.name } }),
       });
       SUPPORT.settings = saved.settings;
     } catch (_e) {}
@@ -7717,8 +7748,11 @@ async function saveOwnerSettings() {
     country: val("owner-country") || "US",
     preferred_timezone: val("owner-tz"),
     default_severity: (document.getElementById("owner-sev") || {}).value || "moderate",
-    validation_resource_group: val("owner-valrg"),
   };
+  // The validation RG is per-subscription. Only persist it when a subscription
+  // is focused; an empty value clears that subscription's entry server-side.
+  const valSub = focusedSubscriptionId();
+  if (valSub) body.validation_resource_groups = { [valSub]: val("owner-valrg") };
   if (status) status.textContent = "Saving…";
   try {
     const res = await apiJson("/api/support/settings", {

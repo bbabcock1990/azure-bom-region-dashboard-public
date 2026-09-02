@@ -333,10 +333,11 @@
                     <option value="critical">Critical</option>
                   </select>
                 </label>
-                <label class="settings-owner-wide">Validation resource group
-                  <input type="text" id="owner-valrg" list="owner-valrg-list" maxlength="90" autocomplete="off" placeholder="Pick or type an existing resource group" />
+                <label class="settings-owner-wide">Validation resource group <span class="muted" style="font-weight:400;">· optional (advanced)</span>
+                  <div class="muted" id="owner-valrg-sub" style="margin:2px 0 4px;font-size:0.85em;"></div>
+                  <input type="text" id="owner-valrg" list="owner-valrg-list" maxlength="90" autocomplete="off" placeholder="Leave blank for read-only checks" />
                   <datalist id="owner-valrg-list"></datalist>
-                  <small class="muted">An <strong>existing</strong> resource group (in your focused subscription) used for the opt-in <strong>deep deployability check</strong>. That check runs Azure pre-flight validation only — it never creates resources or incurs cost. Pick one from the list, or leave blank to keep read-only checks only. <span id="owner-valrg-hint"></span></small>
+                  <small class="muted">Optional. Leave blank to run <strong>read-only checks</strong> (quota, SKU &amp; zonal availability) — no resource group needed. To also run ARM <strong>deployment-level pre-flight</strong>, point this at an <strong>existing</strong> resource group. It's saved <strong>per subscription</strong> (an RG only exists inside one subscription) and applies to whichever subscription is selected on the dashboard. Pre-flight creates no resources and incurs no cost. <span id="owner-valrg-hint"></span></small>
                   <div class="owner-valrg-create">
                     <input type="text" id="owner-valrg-loc" list="owner-valrg-loc-list" maxlength="40" autocomplete="off" placeholder="Location (e.g. eastus)" />
                     <datalist id="owner-valrg-loc-list"></datalist>
@@ -980,6 +981,6 @@
 
 <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
 
-<script src="app.js?v=2026090303"></script>
+<script src="app.js?v=2026090304"></script>
 </body>
 </html>

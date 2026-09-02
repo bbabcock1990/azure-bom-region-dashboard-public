@@ -16,6 +16,7 @@ show.
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Dict
 
@@ -44,7 +45,8 @@ _FIELDS = (
     "preferred_contact_method",  # "email" | "phone"
     "preferred_language",  # e.g. "en-us"
     "default_severity",    # one of VALID_SEVERITIES
-    "validation_resource_group",  # existing RG used for non-destructive ARM validate deep-checks
+    "validation_resource_group",   # legacy single/global RG (fallback only)
+    "validation_resource_groups",  # JSON map {subscription_id: rg_name} — per-subscription
 )
 
 DEFAULTS: Dict[str, Any] = {
@@ -59,6 +61,7 @@ DEFAULTS: Dict[str, Any] = {
     "preferred_language": "en-us",
     "default_severity": "moderate",
     "validation_resource_group": "",
+    "validation_resource_groups": {},
 }
 
 
@@ -81,6 +84,16 @@ def get_settings() -> Dict[str, Any]:
     for key in _FIELDS:
         if key in entity and entity[key] is not None:
             merged[key] = entity[key]
+    # The per-subscription RG map is persisted as a JSON string; hydrate it back
+    # into a dict so callers always get an object.
+    vrgs = merged.get("validation_resource_groups")
+    if isinstance(vrgs, str):
+        try:
+            merged["validation_resource_groups"] = json.loads(vrgs) if vrgs.strip() else {}
+        except Exception:
+            merged["validation_resource_groups"] = {}
+    if not isinstance(merged.get("validation_resource_groups"), dict):
+        merged["validation_resource_groups"] = {}
     merged["default_severity"] = _clean_severity(merged.get("default_severity"))
     return merged
 
@@ -96,12 +109,42 @@ def save_settings(patch: Dict[str, Any]) -> Dict[str, Any]:
             value = patch[key]
             if key == "default_severity":
                 value = _clean_severity(value)
+            elif key == "validation_resource_groups":
+                # Merge into the existing map (don't clobber other subscriptions).
+                # An empty/blank value for a subscription removes its entry.
+                current = get_settings().get("validation_resource_groups") or {}
+                incoming = value if isinstance(value, dict) else {}
+                for sub, rg in incoming.items():
+                    sub = str(sub).strip()
+                    if not sub:
+                        continue
+                    rg = str(rg or "").strip()
+                    if rg:
+                        current[sub] = rg
+                    else:
+                        current.pop(sub, None)
+                value = json.dumps(current)
             elif isinstance(value, str):
                 value = value.strip()
             entity[key] = value
     table = storage.get_table_client(TABLE_NAME)
     table.upsert_entity(entity, mode="merge")
     return get_settings()
+
+
+def resolve_validation_rg(subscription_id: str) -> str:
+    """Return the validation RG to use for ``subscription_id``.
+
+    Resolution order: the per-subscription map entry, then the legacy global
+    ``validation_resource_group`` as a fallback, else "" (read-only checks).
+    An RG only exists inside one subscription, so this is intentionally scoped.
+    """
+    s = get_settings()
+    sub = str(subscription_id or "").strip()
+    per_sub = s.get("validation_resource_groups") or {}
+    if sub and isinstance(per_sub, dict) and per_sub.get(sub):
+        return str(per_sub[sub]).strip()
+    return str(s.get("validation_resource_group") or "").strip()
 
 
 def is_configured() -> bool:
