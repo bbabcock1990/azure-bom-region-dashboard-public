@@ -24,7 +24,8 @@ def _err(code: str, message: str, status: int = 400) -> func.HttpResponse:
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
     principal = auth.get_local_user(req)
-    if not auth_token.is_local_mode():
+    mi_mode = auth_token.managed_identity_mode()
+    if not auth_token.is_local_mode() and not mi_mode:
         activity_log.record(
             "auth_signin_error",
             actor_email=principal.email,
@@ -50,7 +51,11 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         details={"interactive": interactive},
     )
     try:
-        if interactive:
+        if mi_mode:
+            # Hosted mode: no browser. Both GET (status) and POST (sign in)
+            # resolve to the managed identity's ARM token.
+            info = auth_token.get_arm_default_token(force_refresh=interactive)
+        elif interactive:
             # Opens the browser for sign-in (or refreshes) - single-flighted.
             info = auth_token.ensure_signed_in(force=True)
         else:

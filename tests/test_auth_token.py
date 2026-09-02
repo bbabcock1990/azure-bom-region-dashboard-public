@@ -125,6 +125,50 @@ def test_arm_default_token_scope(cred):
     assert info.resource == auth_token.ARM_RESOURCE_ID
 
 
+class _FakeMiToken:
+    def __init__(self, token):
+        self.token = token
+        self.expires_on = int(time.time()) + 3600
+
+
+class _FakeMiCredential:
+    def __init__(self):
+        self.calls = []
+
+    def get_token(self, scope, **kwargs):
+        self.calls.append((scope, kwargs))
+        claims = {"appid": "mi-app-id", "tid": "home-tenant"}  # no upn (like a real MI)
+        return _FakeMiToken(_fake_jwt(claims))
+
+
+def test_managed_identity_mode_flag(monkeypatch):
+    monkeypatch.delenv("MANAGED_IDENTITY_MODE", raising=False)
+    assert auth_token.managed_identity_mode() is False
+    monkeypatch.setenv("MANAGED_IDENTITY_MODE", "true")
+    assert auth_token.managed_identity_mode() is True
+
+
+def test_managed_identity_acquire_bypasses_interactive(monkeypatch):
+    """In MI mode, get_token() pulls from the managed identity credential and
+    never touches the interactive InteractiveBrowserCredential."""
+    monkeypatch.setenv("MANAGED_IDENTITY_MODE", "true")
+    mi = _FakeMiCredential()
+    monkeypatch.setattr(auth_token, "_managed_identity_credential", lambda: mi)
+    # If the interactive path were used this would blow up.
+    monkeypatch.setattr(auth_token, "_credentials", lambda: (_ for _ in ()).throw(AssertionError("interactive path used")))
+    info = auth_token.get_token()
+    assert len(mi.calls) == 1
+    scope, kwargs = mi.calls[0]
+    assert scope == "https://management.azure.com/.default"
+    assert info.token
+    assert info.az_user in ("mi-app-id", "managed-identity")
+
+
+def test_managed_identity_has_cached_account(monkeypatch):
+    monkeypatch.setenv("MANAGED_IDENTITY_MODE", "true")
+    assert _REAL_HAS_CACHED_ACCOUNT() is True
+
+
 def test_arm_token_resolves_subscription_tenant(cred, monkeypatch):
     monkeypatch.setattr(
         auth_token,

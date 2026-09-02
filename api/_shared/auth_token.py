@@ -34,6 +34,7 @@ EARLY_REFRESH_SECONDS = 5 * 60  # treat as stale if < 5 min left
 _lock = threading.Lock()
 _signin_lock = threading.Lock()
 _credential = None  # lazily-built InteractiveBrowserCredential
+_mi_credential = None  # lazily-built ManagedIdentityCredential (hosted mode)
 _silent_credential = None  # lazily-built non-interactive credential (never prompts)
 _probe_credential = None  # lazily-built non-interactive credential for silent cache probes
 _probe_credential_key = None  # home_account_id the probe credential was built for (rebuild on change)
@@ -45,6 +46,25 @@ _sub_tenant_map: Dict[str, str] = {}  # subscription_id -> tenant_id (populated 
 def is_local_mode() -> bool:
     import os
     return os.getenv("LOCAL_MODE", "").lower() in ("true", "1", "yes")
+
+
+def managed_identity_mode() -> bool:
+    """Hosted mode: acquire ARM tokens from the App Service / VM **managed
+    identity** instead of an interactive browser sign-in.
+
+    Enabled by ``MANAGED_IDENTITY_MODE=true``. In this mode the server has no
+    per-user browser to sign in with, so every ARM call is made as the hosting
+    resource's identity. The identity must be granted RBAC (e.g. Reader) on the
+    target subscription(s). Because the identity is single-tenant, only
+    subscriptions in the app's own tenant are reachable — cross-tenant customer
+    subscriptions are not supported in this mode.
+
+    SECURITY: anyone who can reach the app inherits this identity's access, so a
+    hosted instance MUST be placed behind Entra ID auth (App Service Easy Auth)
+    restricted to authorized users.
+    """
+    import os
+    return os.getenv("MANAGED_IDENTITY_MODE", "").lower() in ("true", "1", "yes")
 
 
 # Azure CLI first-party public client. Used as the default so the app works with
@@ -255,6 +275,56 @@ except Exception:
     pass  # fallback: _AutoCloseRedirectServer stays None
 
 
+def _managed_identity_credential():
+    """Lazily build the ManagedIdentityCredential used in hosted mode.
+
+    Uses the system-assigned identity by default; set
+    ``MANAGED_IDENTITY_CLIENT_ID`` to target a specific user-assigned identity.
+    """
+    global _mi_credential
+    if _mi_credential is not None:
+        return _mi_credential
+    with _lock:
+        if _mi_credential is not None:
+            return _mi_credential
+        try:
+            from azure.identity import ManagedIdentityCredential
+        except Exception as ex:  # pragma: no cover - import guard
+            raise AuthError(
+                "msal_unavailable",
+                f"azure-identity is required for managed identity but failed to import: {ex}",
+            )
+        import os
+        client_id = os.getenv("MANAGED_IDENTITY_CLIENT_ID", "").strip()
+        if client_id:
+            _mi_credential = ManagedIdentityCredential(client_id=client_id)
+        else:
+            _mi_credential = ManagedIdentityCredential()
+        return _mi_credential
+
+
+def _acquire_managed_identity(scope: str):
+    """Fetch an ARM AccessToken from the hosting managed identity.
+
+    Never interactive. Raises a stable AuthError on failure so callers surface a
+    clear message instead of a raw MSI exception."""
+    global _signed_in
+    cred = _managed_identity_credential()
+    try:
+        info = cred.get_token(scope)
+        _signed_in = True
+        return info
+    except AuthError:
+        raise
+    except Exception as ex:  # pragma: no cover - environment dependent
+        raise AuthError(
+            "managed_identity_failed",
+            "Failed to acquire a token from the managed identity. Ensure the app "
+            "has a system- or user-assigned identity with RBAC (e.g. Reader) on "
+            f"the target subscription(s). Detail: {ex}",
+        )
+
+
 def _credentials():
     global _credential
     if _credential is not None:
@@ -311,6 +381,10 @@ def _acquire(*, scope: str, tenant: Optional[str], allow_interactive: bool) -> "
     callers can prompt the user to sign in.
     """
     global _signed_in, _auth_record
+    # Hosted mode: acquire from the managed identity. MI is single-tenant, so the
+    # ``tenant`` hint is ignored (foreign-tenant subs are unsupported here).
+    if managed_identity_mode():
+        return _acquire_managed_identity(scope)
     cred = _credentials()
     kwargs = {}
     if tenant:
@@ -420,6 +494,10 @@ def has_cached_account() -> bool:
     """
     if _signed_in:
         return True
+    # Hosted mode: the managed identity is always available (no interactive
+    # sign-in), so report an account so silent paths proceed to acquire.
+    if managed_identity_mode():
+        return True
     # A persisted AuthenticationRecord means we have an account to silently
     # target from the OS-encrypted cache — treat that as "signed in" so a fresh
     # process attempts silent SSO instead of forcing a new interactive prompt.
@@ -469,6 +547,12 @@ def _to_info(access_token, *, scope_resource: str, subscription: str = "") -> "T
         expires_at = datetime.now(timezone.utc)
     claims = _decode_claims(token)
     user = claims.get("upn") or claims.get("preferred_username") or claims.get("unique_name") or ""
+    # Managed-identity tokens carry no user principal; label them by the app/MI
+    # identity so the UI shows a meaningful "signed in as" value.
+    if not user:
+        user = claims.get("app_displayname") or claims.get("appid") or ""
+        if not user and managed_identity_mode():
+            user = "managed-identity"
     tenant = claims.get("tid") or ""
     return TokenInfo(
         token=token,
@@ -819,10 +903,11 @@ def list_subscriptions() -> list:
 
 def reset_for_tests() -> None:
     """Test helper — clear the cached credential + token cache."""
-    global _credential, _silent_credential, _auth_record, _signed_in
+    global _credential, _silent_credential, _auth_record, _signed_in, _mi_credential
     with _lock:
         _credential = None
         _silent_credential = None
+        _mi_credential = None
         _auth_record = None
         _signed_in = False
         _cache.clear()

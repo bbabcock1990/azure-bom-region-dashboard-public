@@ -17,6 +17,14 @@ log = logging.getLogger(__name__)
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
     principal = auth.get_local_user(req)
+    if auth_token.managed_identity_mode():
+        # Hosted mode: identity is the managed identity — there's nothing to sign
+        # out of. Return a graceful no-op so the UI doesn't surface an error.
+        return func.HttpResponse(
+            json.dumps({"status": "noop",
+                        "message": "Managed-identity mode: no interactive session to sign out."}),
+            status_code=200, mimetype="application/json",
+        )
     if not auth_token.is_local_mode():
         activity_log.record(
             "auth_signout",
