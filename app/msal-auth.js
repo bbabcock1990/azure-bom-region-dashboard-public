@@ -101,6 +101,25 @@
   window.DelegatedAuth = {
     init: init,
     getArmToken: getArmToken,
+    logout: logout,
     get account() { return account; },
   };
+
+  // Clear the browser-held MSAL account + cached tokens so the next sign-in is
+  // a fresh interactive prompt (and the user can pick a different account).
+  // Cache is sessionStorage-scoped; we clear MSAL's cache and, belt-and-braces,
+  // remove any lingering msal.* keys.
+  async function logout() {
+    account = null;
+    try { if (pca && pca.clearCache) { await pca.clearCache(); } } catch (e) { /* ignore */ }
+    try {
+      var kill = [];
+      for (var i = 0; i < sessionStorage.length; i++) {
+        var k = sessionStorage.key(i);
+        if (k && k.toLowerCase().indexOf("msal") !== -1) kill.push(k);
+      }
+      kill.forEach(function (k) { try { sessionStorage.removeItem(k); } catch (e) {} });
+    } catch (e) { /* ignore */ }
+    return true;
+  }
 })();

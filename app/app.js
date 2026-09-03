@@ -6879,15 +6879,15 @@ function closeSigninModal() {
 async function doSignOut() {
   setTokenStatus("loading", "Signing out…");
   try {
-    const r = await apiFetch("/api/auth/signout", { method: "POST" });
-    if (r.ok) {
-      TOKEN.info = null;
-      updateSigninChip();
-      setTokenStatus("warn", "Signed out. Click <strong>Sign in</strong> to sign in again.");
-    } else {
-      const body = await r.json().catch(() => ({}));
-      setTokenStatus("error", escapeHtml(body.message || "Sign-out failed"));
-    }
+    // Best-effort legacy server signout (harmless no-op in delegated mode).
+    try { await apiFetch("/api/auth/signout", { method: "POST" }); } catch (_e) {}
+    // Clear the browser-held MSAL account + token so the next sign-in is fresh.
+    try { if (window.DelegatedAuth && DelegatedAuth.logout) await DelegatedAuth.logout(); } catch (_e) {}
+    TOKEN.info = null;
+    try { updateSigninChip(); } catch (_e) {}
+    closeSigninModal();
+    // Return the user to the login start page (auth gate).
+    showAuthGate();
   } catch (e) {
     setTokenStatus("error", netErrLine(e));
   }
@@ -6896,11 +6896,14 @@ async function doSignOut() {
 async function doSwitchDirectory() {
   setTokenStatus("loading", "Signing out and re-opening sign-in…");
   try {
-    await apiFetch("/api/auth/signout", { method: "POST" });
+    try { await apiFetch("/api/auth/signout", { method: "POST" }); } catch (_e) {}
+    // Clear MSAL so the interactive prompt lets the user pick a different account.
+    try { if (window.DelegatedAuth && DelegatedAuth.logout) await DelegatedAuth.logout(); } catch (_e) {}
     TOKEN.info = null;
-    updateSigninChip();
-    // Now trigger a fresh interactive sign-in
-    await refreshAuthToken({ force: true });
+    try { updateSigninChip(); } catch (_e) {}
+    closeSigninModal();
+    // Send the user back to the login start page to sign in again.
+    showAuthGate();
   } catch (e) {
     setTokenStatus("error", netErrLine(e));
   }
@@ -9490,17 +9493,19 @@ function _ensureAuthGate() {
   const style = document.createElement("style");
   style.textContent = `
     #auth-gate{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;
-      justify-content:center;background:linear-gradient(135deg,#0b1220,#111a2e);}
-    #auth-gate .auth-card{background:var(--surface,#fff);color:var(--text,#111);
-      max-width:420px;width:92%;padding:2rem;border-radius:14px;text-align:center;
-      box-shadow:0 20px 60px rgba(0,0,0,.4);font-family:system-ui,sans-serif;}
-    #auth-gate h2{margin:.25rem 0 .5rem;font-size:1.35rem;}
-    #auth-gate p{margin:.25rem 0 1.25rem;color:var(--muted,#556);font-size:.95rem;line-height:1.4;}
-    #auth-gate button{background:#2f6feb;color:#fff;border:0;border-radius:8px;
-      padding:.7rem 1.4rem;font-size:1rem;cursor:pointer;font-weight:600;}
+      justify-content:center;background:linear-gradient(135deg,#0b1220,#1b2a4a);}
+    #auth-gate .auth-card{background:#ffffff;color:#1a2233;
+      max-width:440px;width:92%;padding:2.25rem;border-radius:16px;text-align:center;
+      box-shadow:0 24px 70px rgba(0,0,0,.55);font-family:system-ui,sans-serif;}
+    #auth-gate h2{margin:.25rem 0 .5rem;font-size:1.4rem;color:#0f1b33;font-weight:700;}
+    #auth-gate p{margin:.25rem 0 1.4rem;color:#41506b;font-size:.96rem;line-height:1.5;}
+    #auth-gate button{background:#2f6feb;color:#fff;border:0;border-radius:10px;
+      padding:.8rem 1.6rem;font-size:1.02rem;cursor:pointer;font-weight:600;
+      box-shadow:0 6px 18px rgba(47,111,235,.4);transition:background .15s;}
+    #auth-gate button:hover:not(:disabled){background:#1f5fdb;}
     #auth-gate button:disabled{opacity:.6;cursor:default;}
-    #auth-gate .auth-err{color:#d13438;min-height:1.2em;margin-top:.9rem;font-size:.88rem;}
-    #auth-gate .brand{font-size:2rem;margin-bottom:.5rem;}
+    #auth-gate .auth-err{color:#d13438;min-height:1.2em;margin-top:.9rem;font-size:.9rem;}
+    #auth-gate .brand{font-size:2.2rem;margin-bottom:.4rem;}
     #auth-gate.hidden{display:none;}`;
   document.head.appendChild(style);
   g = document.createElement("div");
