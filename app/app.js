@@ -7658,7 +7658,7 @@ function _collectBomSupportOverride() {
 // Switch the active panel within the Settings view. Lazy-loads each tab's
 // data the first time (and on every re-open, so the content stays fresh).
 function switchSettingsTab(tab) {
-  const tabs = ["owner", "permissions", "datasets", "pricing", "activity"];
+  const tabs = ["owner", "permissions", "datasets", "pricing", "activity", "data"];
   if (!tabs.includes(tab)) tab = "owner";
   STATE.settingsTab = tab;
   document.querySelectorAll("[data-settings-tab]").forEach(btn => {
@@ -7674,6 +7674,26 @@ function switchSettingsTab(tab) {
   else if (tab === "datasets") loadDatasetsSettings();
   else if (tab === "pricing") loadPricingSettings();
   else if (tab === "activity") loadActivityLog();
+  else if (tab === "data") loadDataSettings();
+}
+
+// Render the "Data & storage" panel: the (mode-aware) storage-path line and
+// the open-folder button, which only works when self-hosting locally.
+function loadDataSettings() {
+  const pathEl = document.getElementById("owner-storage-path");
+  const isLocal = !!(APP_CONFIG && APP_CONFIG.local_mode);
+  const pathLine = document.getElementById("owner-storage-path-line");
+  const dir = (APP_CONFIG && (APP_CONFIG.snapshots_dir || APP_CONFIG.storage_dir)) || "";
+  const dirText = dir || "(path unavailable — run a live, non-demo analysis to persist snapshots locally)";
+  if (pathEl) pathEl.textContent = dirText;
+  if (pathLine) {
+    const lead = isLocal
+      ? "Snapshots and local data are saved on this machine under:"
+      : "Snapshots are stored in your private session for this hosted app (not a folder you can open). The server-side path is:";
+    pathLine.innerHTML = `${escapeHtml(lead)}<br><code id="owner-storage-path">${escapeHtml(dirText)}</code>`;
+  }
+  const openBtn = document.getElementById("owner-open-folder");
+  if (openBtn) openBtn.classList.toggle("hidden", !isLocal);
 }
 
 async function loadOwnerSettings() {
@@ -7696,22 +7716,6 @@ async function loadOwnerSettings() {
       ? `Applies to the selected subscription: ${subName}`
       : "Optional — pick a subscription on the dashboard first, then set a resource group for it here.";
   }
-  const pathEl = document.getElementById("owner-storage-path");
-  const isLocal = !!(APP_CONFIG && APP_CONFIG.local_mode);
-  const pathLine = document.getElementById("owner-storage-path-line");
-  const dir = (APP_CONFIG && (APP_CONFIG.snapshots_dir || APP_CONFIG.storage_dir)) || "";
-  const dirText = dir || "(path unavailable — run a live, non-demo analysis to persist snapshots locally)";
-  if (pathEl) pathEl.textContent = dirText;
-  if (pathLine) {
-    const lead = isLocal
-      ? "Snapshots and local data are saved on this machine under:"
-      : "Snapshots are stored in your private session for this hosted app (not a folder you can open). The server-side path is:";
-    pathLine.innerHTML = `${escapeHtml(lead)}<br><code id="owner-storage-path">${escapeHtml(dirText)}</code>`;
-  }
-  // Open-folder only works when self-hosting locally; hide it in the hosted app
-  // where the "folder" lives in your browser session and can't be opened.
-  const openBtn = document.getElementById("owner-open-folder");
-  if (openBtn) openBtn.classList.toggle("hidden", !isLocal);
   _loadValidationRgOptions();
 }
 

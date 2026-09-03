@@ -314,6 +314,10 @@
               <span class="settings-nav-icon" aria-hidden="true">📜</span>
               <span class="settings-nav-text"><strong>Activity log</strong><small>Audit trail of all actions</small></span>
             </button>
+            <button type="button" class="settings-nav-item" data-settings-tab="data" role="tab" aria-selected="false">
+              <span class="settings-nav-icon" aria-hidden="true">🗄️</span>
+              <span class="settings-nav-text"><strong>Data &amp; storage</strong><small>Snapshots, import/export &amp; wipe</small></span>
+            </button>
           </nav>
           <div class="settings-panels">
             <section id="settings-owner" class="settings-panel is-active" data-settings-panel="owner">
@@ -354,20 +358,6 @@
               <div class="support-form-actions">
                 <button type="button" class="btn btn--accent" id="owner-save">Save owner</button>
                 <span class="muted" id="owner-status"></span>
-              </div>
-              <div class="settings-danger">
-                <h3>Danger zone</h3>
-                <p class="muted">Delete all local snapshots and analysis history (support contact settings are kept). Does not touch Azure.</p>
-                <p class="muted settings-storage-path" id="owner-storage-path-line">Snapshots and local data are saved on this machine under:<br>
-                  <code id="owner-storage-path">…</code></p>
-                <div class="settings-danger-actions">
-                  <button type="button" class="btn btn--sm" id="owner-open-folder">📂 Open snapshots folder</button>
-                  <button type="button" class="btn btn--sm" id="owner-download-snapshots">⬇ Download snapshots (.zip)</button>
-                  <button type="button" class="btn btn--sm" id="owner-import-snapshots">⬆ Import snapshots (.zip)</button>
-                  <input type="file" id="owner-import-file" accept=".zip,application/zip" hidden />
-                  <span class="muted" id="owner-snapshots-status"></span>
-                </div>
-                <button type="button" class="btn btn--danger" id="owner-wipe">Wipe local state</button>
               </div>
             </section>
             <section id="settings-permissions" class="settings-panel" data-settings-panel="permissions">
@@ -528,6 +518,24 @@
                   </thead>
                   <tbody></tbody>
                 </table>
+              </div>
+            </section>
+            <section id="settings-data" class="settings-panel" data-settings-panel="data">
+              <h2>Data &amp; storage</h2>
+              <p class="muted">Back up, restore, or clear the snapshots and analysis history stored in your private session for this dashboard. None of these actions touch Azure.</p>
+              <p class="muted settings-storage-path" id="owner-storage-path-line">Snapshots and local data are saved on this machine under:<br>
+                <code id="owner-storage-path">…</code></p>
+              <div class="settings-danger-actions">
+                <button type="button" class="btn btn--sm" id="owner-open-folder">📂 Open snapshots folder</button>
+                <button type="button" class="btn btn--sm" id="owner-download-snapshots">⬇ Download snapshots (.zip)</button>
+                <button type="button" class="btn btn--sm" id="owner-import-snapshots">⬆ Import snapshots (.zip)</button>
+                <input type="file" id="owner-import-file" accept=".zip,application/zip" hidden />
+                <span class="muted" id="owner-snapshots-status"></span>
+              </div>
+              <div class="settings-danger">
+                <h3>Danger zone</h3>
+                <p class="muted">Delete all local snapshots and analysis history (support contact settings are kept). Does not touch Azure.</p>
+                <button type="button" class="btn btn--danger" id="owner-wipe">Wipe local state</button>
               </div>
             </section>
           </div>
@@ -1017,6 +1025,6 @@
 
 <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
 
-<script src="app.js?v=2026090315"></script>
+<script src="app.js?v=2026090316"></script>
 </body>
 </html>
