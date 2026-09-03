@@ -1709,7 +1709,7 @@ function _updateVerifyProgress(done, total) {
   if (label) label.textContent = `${done}/${total} regions`;
 }
 
-async function verifyAllRegions() {
+async function verifyAllRegions({ force = false } = {}) {
   if (_verifyAll.running) return;
   const noteEl = document.getElementById("verify-all-note");
   const sub = focusedSubscriptionId() || "";
@@ -1720,11 +1720,20 @@ async function verifyAllRegions() {
   if (!checkable.length) { if (noteEl) noteEl.textContent = "This BOM has no live-verifiable zone-redundant services."; return; }
   if (!regions.length) return;
 
+  const _rkey = r => `${String(r.short).toLowerCase()}|${sub}`;
   // Resumable: skip regions already verified for this subscription.
-  const todo = regions.filter(r => {
-    const c = PRICING.zonalCap[`${String(r.short).toLowerCase()}|${sub}`];
+  let todo = regions.filter(r => {
+    const c = PRICING.zonalCap[_rkey(r)];
     return !(c && c.status === "done");
   });
+  // If a force re-run was requested, OR everything is already verified (so a
+  // plain click would be a silent no-op), clear the cache for this sub and
+  // re-probe every region. This guarantees the button always does something
+  // visible and refreshes the live results.
+  if (force || todo.length === 0) {
+    regions.forEach(r => { delete PRICING.zonalCap[_rkey(r)]; });
+    todo = regions.slice();
+  }
 
   _verifyAll.running = true;
   _verifyAll.cancel = false;
@@ -1782,6 +1791,8 @@ async function verifyAllRegions() {
     if (!cancelled && conclusive === 0 && (inconclusive + errored) > 0) {
       msg += " — no region could be conclusively verified for this subscription "
         + "(restricted access, throttling, or no authoritative API). Confidence stays at ARM metadata.";
+    } else if (!cancelled && conclusive === total && total > 0) {
+      msg += " — every region is at the highest confidence (Verified live). Re-running won't raise it further.";
     }
     noteEl.textContent = msg;
   }
