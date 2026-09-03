@@ -5233,6 +5233,20 @@ function initSourceRegionDropdown() {
     opt.textContent = r.name + (r.deployment_health === "No" ? " (unhealthy)" : "");
     sel.appendChild(opt);
   }
+  // Default the source region to the active BOM's saved preferred region
+  // (stored as a short name) so the Latency tab and "Best regions" badges
+  // measure from the origin the customer selected in the wizard. Only apply
+  // when the user hasn't already picked a source this session.
+  if (!sel.dataset.userPicked) {
+    const meta = activeBomMeta();
+    const pref = meta && meta.preferred_region ? String(meta.preferred_region).toLowerCase() : "";
+    if (pref) {
+      const match = regions.find(r => String(r.short || "").toLowerCase() === pref
+        || String(r.name || "").toLowerCase() === pref);
+      if (match) sel.value = match.name;
+    }
+  }
+  sel.addEventListener("change", () => { sel.dataset.userPicked = "1"; }, { once: true });
 }
 
 function refreshLatencyChart() {
@@ -5944,6 +5958,7 @@ async function openBomModal(bomId, opts = {}) {
   document.getElementById("bom-tag").value = "";
   document.getElementById("bom-customer").value = "";
   { const rEl = document.getElementById("bom-resilience"); if (rEl) rEl.value = "zone_redundant"; }
+  { const pr = document.getElementById("bom-preferred-region"); if (pr) pr.value = ""; }
   document.getElementById("bom-services-filter").value = "";
   document.getElementById("bom-regions-search").value = "";
   document.getElementById("bom-regions-filter").value = "all";
@@ -6434,6 +6449,25 @@ function renderBomRegionsList() {
   }
   updateRegionGroupBadges();
   filterBomRegions();
+  populateBomPreferredRegionOptions();
+}
+
+// Fill the wizard's "Preferred source region" dropdown from the same region
+// catalog as the region picker. Value = region short name (stable); label =
+// display name. Preserves the current selection across re-renders.
+function populateBomPreferredRegionOptions() {
+  const sel = document.getElementById("bom-preferred-region");
+  if (!sel) return;
+  const prev = sel.value;
+  const cat = (BOM_EDIT.regionsCatalog || []).slice()
+    .sort((a, b) => (a.display_name || a.name).localeCompare(b.display_name || b.name));
+  let html = '<option value="">— None (use default) —</option>';
+  for (const rg of cat) {
+    const label = (rg.display_name || rg.name) + " (" + rg.name + ")";
+    html += `<option value="${escapeHtml(rg.name)}">${escapeHtml(label)}</option>`;
+  }
+  sel.innerHTML = html;
+  if (prev) sel.value = prev;
 }
 
 function updateRegionGroupBadges() {
@@ -6667,6 +6701,7 @@ function applyBomToForm(meta) {
   document.getElementById("bom-tag").value = meta.tag || "";
   document.getElementById("bom-customer").value = meta.customer_name || "";
   { const rEl = document.getElementById("bom-resilience"); if (rEl) rEl.value = _normalizeResilience(meta.resilience); }
+  { const pr = document.getElementById("bom-preferred-region"); if (pr) pr.value = meta.preferred_region || ""; }
   setBomSelectedServices((meta.services || []).map(s => s.name));
   // Seed per-service tier selections from the saved BOM so the step-3
   // tier pickers reflect what was chosen previously.
@@ -6733,6 +6768,7 @@ async function saveBom() {
   const tag = document.getElementById("bom-tag").value.trim();
   const customer_name = document.getElementById("bom-customer").value.trim();
   const resilience = _normalizeResilience((document.getElementById("bom-resilience") || {}).value);
+  const preferred_region = ((document.getElementById("bom-preferred-region") || {}).value || "").trim();
   const services = getBomSelectedServices();
   const required_skus = getBomSkuRows();
   // Persist the explicit region selection so the BOM analyzes exactly what
@@ -6746,7 +6782,7 @@ async function saveBom() {
   const payload = {
     subscription_id: sub,
     subscription_ids: subIds,
-    tag, customer_name, resilience,
+    tag, customer_name, resilience, preferred_region,
     services, regions, required_skus,
     support_override: _collectBomSupportOverride(),
   };

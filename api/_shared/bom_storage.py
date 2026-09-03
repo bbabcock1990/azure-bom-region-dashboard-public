@@ -199,6 +199,18 @@ def _validate_resilience(value: Optional[str]) -> str:
     return v if v in VALID_RESILIENCE else "zone_redundant"
 
 
+# Preferred *source* region for latency measurement (the origin the customer
+# measures inter-region round-trip latency from — e.g. their primary region or
+# their users' location). Stored as a free-form region display name; empty means
+# "no preference" and the UI falls back to its default source pick.
+MAX_PREFERRED_REGION_LEN = 100
+
+
+def _validate_preferred_region(value: Optional[str]) -> str:
+    v = str(value or "").strip()
+    return v[:MAX_PREFERRED_REGION_LEN]
+
+
 # Per-BOM support-contact override. Mirrors the global support_settings fields
 # so each BOM can carry its own ticket owner + contact profile, initialized from
 # the global defaults but independently editable. Stored as a compact JSON blob.
@@ -494,6 +506,7 @@ def _entity_to_record(e: Dict) -> Dict:
         "customer_name": e.get("customer_name") or None,
         "customer_segments": e.get("customer_segments") or "EA,ANY",
         "resilience": _validate_resilience(e.get("resilience")),
+        "preferred_region": e.get("preferred_region") or None,
         "required_skus": required_skus,
         "services": services,
         "regions": regions,
@@ -540,6 +553,7 @@ def create(
     customer_name: Optional[str] = None,
     customer_segments: Optional[str] = None,
     resilience: Optional[str] = None,
+    preferred_region: Optional[str] = None,
     required_skus: Optional[List[Dict]] = None,
     services: Optional[List[Dict]] = None,
     regions: Optional[List] = None,
@@ -556,6 +570,7 @@ def create(
         customer_name=customer_name,
         customer_segments=customer_segments,
         resilience=resilience,
+        preferred_region=preferred_region,
         required_skus=required_skus or [],
         services=services or [],
         regions=regions or [],
@@ -573,6 +588,7 @@ def upsert(
     customer_name: Optional[str],
     customer_segments: Optional[str],
     resilience: Optional[str] = None,
+    preferred_region: Optional[str] = None,
     required_skus: List[Dict],
     services: List[Dict],
     regions: Optional[List] = None,
@@ -589,6 +605,7 @@ def upsert(
     customer_name = _validate_customer_name(customer_name)
     segments_csv = _validate_segments(customer_segments)
     resilience_val = _validate_resilience(resilience)
+    preferred_region_val = _validate_preferred_region(preferred_region)
     cleaned_skus = _validate_required_skus(required_skus or [])
     cleaned_services = _validate_services(services or [])
     cleaned_regions = _validate_regions(regions or [])
@@ -613,6 +630,7 @@ def upsert(
         "customer_name": customer_name or "",
         "customer_segments": segments_csv,
         "resilience": resilience_val,
+        "preferred_region": preferred_region_val,
         "required_skus_json": skus_json,
         "services_json": services_json,
         "regions_json": regions_json,

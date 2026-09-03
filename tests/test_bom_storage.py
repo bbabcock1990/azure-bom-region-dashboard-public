@@ -95,6 +95,23 @@ def test_entity_to_record_defaults_resilience():
     assert rec2["resilience"] == "regional"
 
 
+def test_validate_preferred_region_trims_and_caps():
+    assert bom_storage._validate_preferred_region(None) == ""
+    assert bom_storage._validate_preferred_region("") == ""
+    assert bom_storage._validate_preferred_region("  eastus  ") == "eastus"
+    capped = bom_storage._validate_preferred_region("x" * 500)
+    assert len(capped) == bom_storage.MAX_PREFERRED_REGION_LEN
+
+
+def test_entity_to_record_reads_preferred_region():
+    rec = bom_storage._entity_to_record({"RowKey": "bom-z", "subscription_id": "s"})
+    assert rec["preferred_region"] is None
+    rec2 = bom_storage._entity_to_record(
+        {"RowKey": "bom-z2", "subscription_id": "s", "preferred_region": "eastus"}
+    )
+    assert rec2["preferred_region"] == "eastus"
+
+
 def test_validate_services_resolves_against_catalog():
     out = bom_storage._validate_services([
         {"name": "Azure Automation"},
