@@ -393,3 +393,75 @@ def test_snapshots_import_missing_file(client):
     res = client.post("/api/snapshots/import")
     assert res.status_code == 400
     assert res.json()["error"] in ("missing_file", "bad_request")
+
+
+def test_export_import_restores_bom_definitions(client):
+    # A real BOM in the left-panel list plus its analysis snapshot.
+    bom = bom_storage.create(
+        "11111111-2222-3333-4444-555555555555",
+        tag="Restore Me",
+        customer_name="Contoso",
+        customer_segments="EA,ANY",
+        required_skus=[],
+        services=[{"name": "Azure Firewall"}],
+        updated_by="tester@example.com",
+    )
+    _persist_run_and_snapshot(
+        bom_id=bom["bom_id"], run_id="20260629-190500-a",
+        snapshot={"meta": {"subscription_id": "11111111-2222-3333-4444-555555555555"},
+                  "regions": []})
+
+    exported = client.get("/api/snapshots/export").content
+
+    # Wipe everything — both the BOM list and the run history are gone.
+    client.post("/api/local-state/wipe")
+    assert client.get("/api/subscription_metadata").json()["items"] == []
+
+    res = client.post(
+        "/api/snapshots/import",
+        files={"file": ("bom-snapshots.zip", exported, "application/zip")},
+    )
+    assert res.status_code == 200
+    assert res.json()["boms"] == 1
+
+    boms = client.get("/api/subscription_metadata").json()["items"]
+    assert len(boms) == 1
+    assert boms[0]["bom_id"] == bom["bom_id"]
+    assert boms[0]["tag"] == "Restore Me"
+    assert boms[0]["customer_name"] == "Contoso"
+    assert [s["name"] for s in boms[0]["services"]] == ["Azure Firewall"]
+
+
+def test_import_reconstructs_bom_from_snapshot_when_manifest_lacks_boms(client):
+    import io
+    import zipfile
+
+    # A pre-BOM-export archive: manifest has no "boms" array, so import must
+    # rebuild a minimal BOM from the snapshot payload's meta.
+    buf = io.BytesIO()
+    snap = json.dumps({"meta": {
+        "subscription_id": "11111111-2222-3333-4444-555555555555",
+        "customer_name": "Acme",
+        "customer_segments": "EA,ANY",
+        "services": [{"name": "Azure Firewall"}],
+        "skus_resolved": [],
+    }, "regions": []})
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("snapshots/acme/20260701-000000-c.json", snap)
+        zf.writestr("index.json", json.dumps({"snapshots": [
+            {"run_id": "20260701-000000-c",
+             "bom_id": "abcdef0123456789abcdef0123456789",
+             "file": "snapshots/acme/20260701-000000-c.json"},
+        ]}))
+
+    res = client.post(
+        "/api/snapshots/import",
+        files={"file": ("old.zip", buf.getvalue(), "application/zip")},
+    )
+    assert res.status_code == 200
+    assert res.json()["boms"] == 1
+    boms = client.get("/api/subscription_metadata").json()["items"]
+    assert len(boms) == 1
+    assert boms[0]["bom_id"] == "abcdef0123456789abcdef0123456789"
+    assert boms[0]["customer_name"] == "Acme"
+    assert [s["name"] for s in boms[0]["services"]] == ["Azure Firewall"]

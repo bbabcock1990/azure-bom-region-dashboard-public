@@ -3,7 +3,8 @@
 Accepts the archive produced by ``GET /api/snapshots/export`` (multipart field
 ``file``) and replays each snapshot back into the current user's store: it
 uploads the snapshot JSON blob and upserts the matching ``runs`` table entity so
-the run reappears in history. It reads the ``index.json`` manifest for run
+the run reappears in history, and restores the BOM definitions (the left-panel
+"Bills of Materials" list) from the archive's ``boms`` manifest. It reads the ``index.json`` manifest for run
 metadata and falls back to the snapshot payload's ``meta`` (and the file name)
 for anything the manifest doesn't carry — so archives from older exports still
 import. Idempotent: importing the same run twice overwrites in place.
@@ -19,7 +20,7 @@ import re
 import zipfile
 
 from .._shared import httpfunc as func
-from .._shared import auth, csrf, storage, activity_log
+from .._shared import auth, csrf, storage, activity_log, bom_storage
 
 log = logging.getLogger(__name__)
 
@@ -105,6 +106,92 @@ def _import_one(zf, entry, container, table):
     return True
 
 
+def _restore_bom_entities(bom_entities, bom_table) -> int:
+    """Restore BOM definitions (the left-panel list) from raw exported table
+    entities. Each entity already carries PartitionKey/RowKey plus the flat
+    ``*_json`` columns, so a direct upsert round-trips it losslessly."""
+    restored = 0
+    for ent in bom_entities or []:
+        if not isinstance(ent, dict):
+            continue
+        pk = ent.get("PartitionKey") or bom_storage.PARTITION
+        rk = ent.get("RowKey")
+        if not rk:
+            continue
+        row = dict(ent)
+        row["PartitionKey"] = pk
+        row["RowKey"] = rk
+        try:
+            bom_table.upsert_entity(row, mode="replace")
+            restored += 1
+        except Exception:
+            log.warning("import: bom upsert failed for %s", rk, exc_info=True)
+    return restored
+
+
+def _reconstruct_boms_from_snapshots(zf, entries, actor_email) -> int:
+    """Best-effort fallback for archives exported before BOM definitions were
+    included: rebuild a minimal BOM per unique bom_id from each snapshot's
+    ``meta`` block so at least the BOM reappears in the list."""
+    seen = set()
+    restored = 0
+    for entry in entries:
+        arcname = entry.get("file")
+        if not arcname:
+            continue
+        try:
+            payload = zf.read(arcname)
+        except KeyError:
+            continue
+        try:
+            meta = (json.loads(payload) or {}).get("meta") or {}
+        except Exception:
+            continue
+
+        bom_id = _safe(entry.get("bom_id") or "")
+        if not bom_id:
+            parts = arcname.split("/")
+            bom_id = _safe(parts[1]) if len(parts) >= 3 else ""
+        if not bom_id or bom_id in seen:
+            continue
+
+        sub_id = meta.get("subscription_id") or entry.get("subscription_id") or bom_id
+        sub_ids = meta.get("subscription_ids") or ([sub_id] if sub_id else None)
+        segments = meta.get("customer_segments")
+        if isinstance(segments, (list, tuple)):
+            segments = ",".join(str(s) for s in segments)
+        services = meta.get("services") or []
+        required_skus = meta.get("skus_resolved") or []
+        common = dict(
+            subscription_id=str(sub_id),
+            subscription_ids=[str(s) for s in sub_ids] if sub_ids else None,
+            tag=None,
+            customer_name=meta.get("customer_name"),
+            customer_segments=segments,
+            updated_by=actor_email or "import",
+        )
+        try:
+            bom_storage.upsert(
+                bom_id, required_skus=required_skus, services=services, **common
+            )
+        except bom_storage.BomStorageError:
+            # Catalog drift (e.g. a renamed service) must not lose the BOM —
+            # fall back to a bare BOM so it still reappears in the list.
+            try:
+                bom_storage.upsert(
+                    bom_id, required_skus=[], services=[], **common
+                )
+            except Exception:
+                log.warning("import: bom reconstruct failed for %s", bom_id, exc_info=True)
+                continue
+        except Exception:
+            log.warning("import: bom reconstruct failed for %s", bom_id, exc_info=True)
+            continue
+        seen.add(bom_id)
+        restored += 1
+    return restored
+
+
 def main(req: func.HttpRequest) -> func.HttpResponse:
     principal = auth.get_local_user(req)
     try:
@@ -132,12 +219,15 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
     names = set(zf.namelist())
     entries = []
+    bom_entities = []
     if "index.json" in names:
         try:
             manifest = json.loads(zf.read("index.json"))
             entries = list(manifest.get("snapshots") or [])
+            bom_entities = list(manifest.get("boms") or [])
         except Exception:
             entries = []
+            bom_entities = []
     if not entries:
         # No usable manifest — synthesize one entry per snapshot JSON file.
         entries = [{"file": n} for n in sorted(names)
@@ -154,13 +244,24 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             imported += 1
     skipped = len(entries) - imported
 
+    # Restore the BOM definitions so the left-panel list repopulates. Prefer the
+    # exported entities; for older archives that predate BOM export, rebuild a
+    # minimal BOM from each snapshot's meta as a best-effort fallback.
+    actor_email = getattr(principal, "email", None)
+    bom_table = storage.get_table_client(bom_storage.TABLE_NAME)
+    boms_restored = _restore_bom_entities(bom_entities, bom_table)
+    if not boms_restored:
+        boms_restored = _reconstruct_boms_from_snapshots(zf, entries, actor_email)
+
     activity_log.record(
         event_type="snapshots_import",
-        actor_email=getattr(principal, "email", None),
+        actor_email=actor_email,
         api_scope="local",
-        message=f"Imported {imported} snapshot(s) from archive ({skipped} skipped)",
+        message=(f"Imported {imported} snapshot(s) and {boms_restored} BOM(s) "
+                 f"from archive ({skipped} skipped)"),
     )
     return func.HttpResponse(
-        json.dumps({"ok": True, "imported": imported, "skipped": skipped}),
+        json.dumps({"ok": True, "imported": imported, "skipped": skipped,
+                    "boms": boms_restored}),
         status_code=200, mimetype="application/json",
     )

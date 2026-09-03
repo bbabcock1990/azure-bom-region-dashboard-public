@@ -9295,8 +9295,9 @@ async function _importSnapshots(file) {
       throw new Error(msg);
     }
     const r = await res.json();
-    if (status) status.textContent = `Imported ${r.imported} snapshot(s).`;
-    showToast(`Imported ${r.imported} snapshot(s)${r.skipped ? `, ${r.skipped} skipped` : ""}.`, "success");
+    const bomsMsg = r.boms ? `, ${r.boms} BOM(s)` : "";
+    if (status) status.textContent = `Imported ${r.imported} snapshot(s)${bomsMsg}.`;
+    showToast(`Imported ${r.imported} snapshot(s)${bomsMsg}${r.skipped ? `, ${r.skipped} skipped` : ""}.`, "success");
     // Persist the restored state to the browser (hosted mode) before reloading
     // so the imported history survives the refresh, then reload to show it.
     if (typeof _stateSyncEnabled === "function" && _stateSyncEnabled()) {

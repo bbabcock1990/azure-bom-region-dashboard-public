@@ -16,7 +16,7 @@ import zipfile
 from datetime import datetime, timezone
 
 from .._shared import httpfunc as func
-from .._shared import auth, storage, snapshot_store
+from .._shared import auth, storage, snapshot_store, bom_storage
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +39,18 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     entities.sort(key=lambda e: e.get("RowKey", ""), reverse=True)
 
     container = storage.get_blob_container("snapshots")
+
+    # BOM definitions (the left-panel "Bills of Materials" list) live in a
+    # separate table from the run history. Include them so an import restores
+    # the BOMs themselves, not just their analysis snapshots.
+    try:
+        bom_entities = list(
+            storage.get_table_client(bom_storage.TABLE_NAME).list_entities()
+        )
+    except Exception:
+        log.exception("bom list failed for export")
+        bom_entities = []
+
     manifest = []
     buf = io.BytesIO()
     written = 0
@@ -75,6 +87,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             "exported_at": datetime.now(timezone.utc).isoformat(),
             "count": written,
             "snapshots": manifest,
+            "boms": bom_entities,
         }, indent=2))
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
