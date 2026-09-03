@@ -8256,7 +8256,7 @@ function renderBestRegionPanel() {
     <div class="br-header">
       <div class="br-header-top">
         <div class="br-title">Best regions for your BOM
-          <button type="button" class="br-legend-btn" id="br-legend-btn" title="What do the confidence levels mean?">ⓘ Confidence</button>
+          <button type="button" class="br-legend-btn" id="br-legend-btn" title="What do the confidence levels mean?">ⓘ What do the levels mean?</button>
         </div>
         <div class="br-actions">
           <button type="button" class="btn btn--sm" id="br-verify-cta" title="Run a read-only live probe across all regions to raise confidence">⚡ Raise confidence</button>
