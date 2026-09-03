@@ -9315,6 +9315,35 @@ async function _downloadSnapshots() {
   }
 }
 
+// Import a previously downloaded snapshots .zip back into your session/history.
+async function _importSnapshots(file) {
+  const status = document.getElementById("owner-snapshots-status");
+  if (!file) return;
+  if (status) status.textContent = "Importing…";
+  try {
+    const fd = new FormData();
+    fd.append("file", file, file.name || "snapshots.zip");
+    const res = await apiFetch("/api/snapshots/import", { method: "POST", body: fd });
+    if (!res.ok) {
+      let msg = res.statusText;
+      try { const b = await res.json(); msg = (b && (b.message || b.error)) || msg; } catch (e) {}
+      throw new Error(msg);
+    }
+    const r = await res.json();
+    if (status) status.textContent = `Imported ${r.imported} snapshot(s).`;
+    showToast(`Imported ${r.imported} snapshot(s)${r.skipped ? `, ${r.skipped} skipped` : ""}.`, "success");
+    // Persist the restored state to the browser (hosted mode) before reloading
+    // so the imported history survives the refresh, then reload to show it.
+    if (typeof _stateSyncEnabled === "function" && _stateSyncEnabled()) {
+      try { await saveStateToLocal(); } catch (e) {}
+    }
+    setTimeout(() => location.reload(), 600);
+  } catch (e) {
+    if (status) status.textContent = "";
+    showToast(e.message || "Could not import snapshots.", "error");
+  }
+}
+
 function _supportPrefill(kind, regionShort, opts) {
   opts = opts || {};
   switchView("support");
@@ -9500,6 +9529,11 @@ function init() {
   if (ownerWipeBtn) ownerWipeBtn.addEventListener("click", _supportWipe);
   { const ofb = document.getElementById("owner-open-folder"); if (ofb) ofb.addEventListener("click", _openSnapshotsFolder); }
   { const dsb = document.getElementById("owner-download-snapshots"); if (dsb) dsb.addEventListener("click", _downloadSnapshots); }
+  { const isb = document.getElementById("owner-import-snapshots"); const ifi = document.getElementById("owner-import-file");
+    if (isb && ifi) {
+      isb.addEventListener("click", () => ifi.click());
+      ifi.addEventListener("change", () => { const file = ifi.files && ifi.files[0]; ifi.value = ""; if (file) _importSnapshots(file); });
+    } }
   document.querySelectorAll("[data-settings-tab]").forEach(btn => {
     btn.addEventListener("click", () => switchSettingsTab(btn.getAttribute("data-settings-tab")));
   });

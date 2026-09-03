@@ -61,7 +61,12 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             manifest.append({
                 "run_id": run_id,
                 "bom_id": e.get("PartitionKey"),
+                "subscription_id": e.get("subscription_id"),
                 "customer_name": e.get("customer_name"),
+                "customer_segments": e.get("customer_segments"),
+                "source": e.get("source"),
+                "triggered_by_email": e.get("triggered_by_email"),
+                "arm_overlay_applied": e.get("arm_overlay_applied"),
                 "started_at": e.get("started_at"),
                 "ended_at": e.get("ended_at"),
                 "file": arcname,

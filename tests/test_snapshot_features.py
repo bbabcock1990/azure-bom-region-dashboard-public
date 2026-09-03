@@ -321,3 +321,75 @@ def test_open_folder_opens_when_local(client, monkeypatch):
     assert res.status_code == 200
     assert res.json()["ok"] is True
     assert called.get("path", "").endswith("snapshots")
+
+
+def test_snapshots_export_import_round_trip(client):
+    _persist_run_and_snapshot(
+        bom_id="demo-bom", run_id="20260629-190500-a",
+        snapshot={"meta": {"subscription_id": "sub-xyz"}, "regions": []})
+    _persist_run_and_snapshot(
+        bom_id="demo-bom", run_id="20260630-190500-b",
+        snapshot={"meta": {"subscription_id": "sub-xyz"}, "regions": []})
+
+    exported = client.get("/api/snapshots/export").content
+
+    # Wipe everything, then import the archive back.
+    client.post("/api/local-state/wipe")
+    assert client.get("/api/snapshots").json()["snapshots"] == []
+
+    res = client.post(
+        "/api/snapshots/import",
+        files={"file": ("bom-snapshots.zip", exported, "application/zip")},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["imported"] == 2
+    assert body["skipped"] == 0
+
+    listed = client.get("/api/snapshots").json()["snapshots"]
+    assert {s["run_id"] for s in listed} == {"20260629-190500-a", "20260630-190500-b"}
+    # subscription_id round-trips via the manifest (entity value takes precedence)
+    assert all(s["subscription_id"] == "11111111-2222-3333-4444-555555555555" for s in listed)
+    # the snapshot blob is fetchable again
+    got = client.get("/api/snapshots/20260629-190500-a")
+    assert got.status_code == 200
+
+
+def test_snapshots_import_recovers_subscription_from_payload(client):
+    import io
+    import zipfile
+
+    # A v16-style archive: manifest lacks subscription_id, so import must recover
+    # it from the snapshot payload's meta.
+    buf = io.BytesIO()
+    snap = json.dumps({"meta": {"subscription_id": "sub-from-meta"}, "regions": []})
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("snapshots/acme/20260701-000000-c.json", snap)
+        zf.writestr("index.json", json.dumps({"snapshots": [
+            {"run_id": "20260701-000000-c", "bom_id": "acme-bom",
+             "file": "snapshots/acme/20260701-000000-c.json"},
+        ]}))
+
+    res = client.post(
+        "/api/snapshots/import",
+        files={"file": ("old.zip", buf.getvalue(), "application/zip")},
+    )
+    assert res.status_code == 200
+    assert res.json()["imported"] == 1
+    listed = client.get("/api/snapshots").json()["snapshots"]
+    assert listed[0]["subscription_id"] == "sub-from-meta"
+
+
+def test_snapshots_import_rejects_non_zip(client):
+    res = client.post(
+        "/api/snapshots/import",
+        files={"file": ("not.zip", b"this is not a zip", "application/zip")},
+    )
+    assert res.status_code == 400
+    assert res.json()["error"] == "bad_zip"
+
+
+def test_snapshots_import_missing_file(client):
+    res = client.post("/api/snapshots/import")
+    assert res.status_code == 400
+    assert res.json()["error"] in ("missing_file", "bad_request")

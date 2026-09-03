@@ -42,6 +42,7 @@ APP_DIR = _REPO_ROOT / "app"
 ROUTES = [
     ("snapshots/diff", ["GET"], "snapshot_diff"),
     ("snapshots/export", ["GET"], "snapshots_export"),
+    ("snapshots/import", ["POST"], "snapshots_import"),
     ("snapshots/latest", ["GET"], "snapshots_latest"),
     ("snapshots/{run_id}", ["GET"], "snapshots_get"),
     ("snapshots", ["GET"], "snapshots_list"),

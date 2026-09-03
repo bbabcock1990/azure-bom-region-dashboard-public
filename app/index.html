@@ -363,6 +363,8 @@
                 <div class="settings-danger-actions">
                   <button type="button" class="btn btn--sm" id="owner-open-folder">📂 Open snapshots folder</button>
                   <button type="button" class="btn btn--sm" id="owner-download-snapshots">⬇ Download snapshots (.zip)</button>
+                  <button type="button" class="btn btn--sm" id="owner-import-snapshots">⬆ Import snapshots (.zip)</button>
+                  <input type="file" id="owner-import-file" accept=".zip,application/zip" hidden />
                   <span class="muted" id="owner-snapshots-status"></span>
                 </div>
                 <button type="button" class="btn btn--danger" id="owner-wipe">Wipe local state</button>
@@ -1021,6 +1023,6 @@
 
 <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
 
-<script src="app.js?v=2026090312"></script>
+<script src="app.js?v=2026090313"></script>
 </body>
 </html>
