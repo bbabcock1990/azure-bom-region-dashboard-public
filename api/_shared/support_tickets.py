@@ -784,6 +784,21 @@ def create_ticket(
             message=f"Support ticket FAILED ({kind}): {message}",
             details={"status_code": resp.status_code},
         )
+        # Conditional Access can require an MFA-authenticated ARM token to
+        # *write* a support ticket. The browser-minted (delegated) token may be
+        # password-only, so Azure rejects the PUT with a 401 step-up challenge.
+        # Surface a distinct code + any claims challenge so the SPA can re-auth
+        # with MFA and retry, instead of showing an opaque failure.
+        mfa = _mfa_challenge(resp, body)
+        if mfa is not None:
+            raise SupportError(
+                "mfa_required",
+                "Azure requires multi-factor authentication (MFA) to file a "
+                "support ticket. Please re-authenticate when prompted and submit "
+                "again.",
+                401,
+                details={"azure": body, "claims": mfa.get("claims")},
+            )
         raise SupportError("submit_failed", message, resp.status_code, details=body)
 
     props = (body or {}).get("properties") or {}
@@ -1009,3 +1024,56 @@ def _extract_message(payload: Any, fallback: str) -> str:
     if isinstance(payload, str) and payload.strip():
         return payload.strip()
     return fallback
+
+
+# Signatures Azure uses when a write is blocked pending an MFA step-up.
+_MFA_MARKERS = (
+    "requestdisallowedbyazure",   # ARM CA block: "...without authenticating through MFA"
+    "multi-factor",
+    "multifactor",
+    "insufficient_claims",
+    "aka.ms/mfaforazure",
+    "mfaforazure",
+    "50076",                      # AADSTS50076 — MFA required
+    "50079",                      # AADSTS50079 — MFA enrollment required
+)
+
+
+def _mfa_challenge(resp: Any, body: Any) -> Optional[Dict[str, Any]]:
+    """Detect an MFA / conditional-access step-up rejection on a support PUT.
+
+    Returns a dict (optionally carrying the base64 ``claims`` challenge from the
+    ``WWW-Authenticate`` header) when Azure demands an MFA-authenticated token,
+    else ``None``. Callers turn this into an ``mfa_required`` error so the SPA
+    can re-acquire an MFA token and retry.
+    """
+    try:
+        status = int(getattr(resp, "status_code", 0) or 0)
+    except Exception:
+        status = 0
+    if status not in (401, 403):
+        return None
+
+    hay = ""
+    if isinstance(body, dict):
+        hay = json.dumps(body, ensure_ascii=False)
+    elif body:
+        hay = str(body)
+    hay = hay.lower()
+
+    www = ""
+    claims: Optional[str] = None
+    try:
+        www = str((getattr(resp, "headers", {}) or {}).get("WWW-Authenticate", "") or "")
+    except Exception:
+        www = ""
+    if www:
+        hay += " " + www.lower()
+        m = re.search(r'claims="([^"]+)"', www)
+        if m:
+            claims = m.group(1)
+
+    if any(marker in hay for marker in _MFA_MARKERS):
+        return {"claims": claims}
+    return None
+

@@ -281,6 +281,17 @@ async function ensureDelegatedToken({ force = false } = {}) {
   }
 }
 
+// Force an MFA step-up: re-acquire the customer's ARM token interactively
+// (passing any claims challenge Azure returned) so the new token carries the
+// MFA claim required to *write* Azure resources like support tickets. Returns
+// the fresh token or null. Throws if the popup is blocked/cancelled.
+async function stepUpDelegatedToken(claims) {
+  if (!APP_CONFIG || !APP_CONFIG.delegated_mode || !window.DelegatedAuth) return null;
+  const tok = await window.DelegatedAuth.getArmToken({ stepUp: true, claims: claims || null });
+  window.__ARM_TOKEN = tok || null;
+  return tok;
+}
+
 // ---------------------------------------------------------------- State sync
 // Stateless hosted mode: the server keeps NOTHING on disk. The customer's
 // browser is the durable store. On load we replay the saved document into the
@@ -9273,10 +9284,36 @@ async function _supportCreate() {
   const original = btn ? btn.textContent : "";
   if (btn) { btn.disabled = true; btn.textContent = "Submitting…"; }
   if (box) { box.classList.add("hidden"); box.textContent = ""; }
+
+  const submitOnce = () => apiJson("/api/support/tickets", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+
   try {
-    const res = await apiJson("/api/support/tickets", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-    });
+    let res;
+    try {
+      res = await submitOnce();
+    } catch (e) {
+      // Azure rejected the write pending an MFA step-up. The browser-minted ARM
+      // token is password-only; re-acquire an MFA token interactively and retry
+      // once so the customer doesn't hit a dead end.
+      const code = e && e.body && e.body.error;
+      if (code === "mfa_required") {
+        const claims = e.body && e.body.details && e.body.details.claims;
+        if (btn) btn.textContent = "Verifying MFA…";
+        showToast("Azure needs multi-factor authentication to file this ticket — please complete the sign-in prompt.", "warning");
+        try {
+          await stepUpDelegatedToken(claims);
+        } catch (authErr) {
+          showToast(`MFA sign-in was cancelled or blocked: ${authErr.message || authErr}`, "error");
+          throw e;
+        }
+        if (btn) btn.textContent = "Submitting…";
+        res = await submitOnce();
+      } else {
+        throw e;
+      }
+    }
     const ticket = res.ticket;
     showToast(`Ticket submitted: ${ticket.azure_ticket_id || ticket.ticket_name}`, "success");
     _autoRecheckAfterTicket(body.kind, body.region, body.subscription_id);

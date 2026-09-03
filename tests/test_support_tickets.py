@@ -238,6 +238,62 @@ def test_create_ticket_real_submit_mocked(isolated_storage):
 
 
 @respx.mock
+def test_real_submit_mfa_required_maps_to_mfa_required(isolated_storage):
+    from _shared import support_tickets, support_settings
+    support_settings.save_settings({
+        "contact_first_name": "Ada", "primary_email": "ada@example.com", "country": "US",
+    })
+    sub = "11111111-1111-1111-1111-111111111111"
+    respx.get(url__regex=r".*/problemClassifications").mock(
+        return_value=httpx.Response(200, json={
+            "value": [{
+                "id": f"/providers/Microsoft.Support/services/{support_tickets.QUOTA_SERVICE_GUID}/problemClassifications/pc-guid",
+                "properties": {"displayName": "Compute VM (cores-vCPUs) quota increase"},
+            }]
+        })
+    )
+    respx.put(url__regex=r".*/supportTickets/.*").mock(
+        return_value=httpx.Response(401, json={"error": {
+            "code": "RequestDisallowedByAzure",
+            "message": ("Resource was disallowed by Azure: You are receiving this "
+                        "error because you tried to create ... without authenticating "
+                        "through MFA. ... https://aka.ms/MFAforAzure."),
+        }})
+    )
+    with pytest.raises(support_tickets.SupportError) as ex:
+        support_tickets.create_ticket(
+            kind="quota", subscription_id=sub, region="eastus",
+            family="standardDav6Family", new_limit=300,
+            dry_run=False, token="fake-token",
+        )
+    assert ex.value.code == "mfa_required"
+    assert ex.value.status == 401
+
+
+def test_mfa_challenge_detection():
+    from _shared import support_tickets as st
+
+    class _Resp:
+        def __init__(self, status, headers=None):
+            self.status_code = status
+            self.headers = headers or {}
+
+    # MFA block in the body → detected
+    body = {"error": {"code": "RequestDisallowedByAzure", "message": "authenticate through MFA"}}
+    assert st._mfa_challenge(_Resp(401), body) is not None
+
+    # Claims challenge in WWW-Authenticate header → detected + claims captured
+    hdr = {"WWW-Authenticate": 'Bearer error="insufficient_claims", claims="eyJhY2Nlc3MifQ=="'}
+    got = st._mfa_challenge(_Resp(401, hdr), {"error": {"code": "x"}})
+    assert got is not None and got["claims"] == "eyJhY2Nlc3MifQ=="
+
+    # Unrelated 400 → not an MFA challenge
+    assert st._mfa_challenge(_Resp(400), {"error": {"code": "InvalidRequestContent"}}) is None
+    # Non-auth status → ignored
+    assert st._mfa_challenge(_Resp(500), {"error": {"code": "RequestDisallowedByAzure"}}) is None
+
+
+@respx.mock
 def test_real_submit_fails_when_classification_unresolved(isolated_storage):
     from _shared import support_tickets, support_settings
     support_settings.save_settings({
