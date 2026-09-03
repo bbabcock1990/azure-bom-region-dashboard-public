@@ -7544,20 +7544,178 @@ function formatSkusLine(source, resolved) {
 }
 
 // ---------------------------------------------------------------- Getting Started
+//
+// A clear, one-step-at-a-time walkthrough (replaces the old wall-of-text guide).
+// Each step has plain-language copy plus a real action button that DOES the thing
+// — sign in, open Settings, create a BOM, or load sample data — so the guide
+// removes barriers instead of just describing them. Auto-opens once on first
+// visit; re-openable any time from the header "?" button.
+
+const GS_SEEN_KEY = "gs_tour_seen";
+function _gsTourSeen() {
+  try { return localStorage.getItem(GS_SEEN_KEY) === "1"; } catch (_e) { return false; }
+}
+function _gsTourMarkSeen() {
+  try { localStorage.setItem(GS_SEEN_KEY, "1"); } catch (_e) {}
+}
+
+// Build the step list fresh each render so sign-in state is reflected live.
+function gettingStartedSteps() {
+  const signedIn = _isSignedIn();
+  const who = signedIn ? (TOKEN.info.az_user || "your account") : "";
+  const demo = !!(APP_CONFIG && APP_CONFIG.demo_mode);
+
+  const signInAction = {
+    label: signedIn ? "Switch account" : "Sign in to Azure",
+    className: signedIn ? "btn btn--sm" : "btn btn--accent btn--sm",
+    run: () => { openSigninModal(); refreshAuthToken({ force: true }); },
+  };
+
+  const steps = [
+    {
+      title: "Sign in to Azure",
+      body:
+        `<p>A one-time browser sign-in mints a <strong>read-only ARM token</strong> so the ` +
+        `dashboard can read SKU, region, and quota data. Nothing about the customer is ` +
+        `stored on the server.</p>` +
+        `<p class="muted">You need <em>Reader</em> on the customer's subscription — or have ` +
+        `the customer run the dashboard in their own tenant (same steps, their sign-in).</p>` +
+        (signedIn ? `<p class="gs-ok">✓ Signed in as <strong>${escapeHtml(who)}</strong>.</p>` : ""),
+      actions: [signInAction],
+    },
+    {
+      title: "Refresh your Azure data",
+      body:
+        `<p>Open <strong>Settings</strong> to set your <strong>support-ticket owner</strong> and ` +
+        `refresh the <strong>region, latency, and SKU</strong> datasets, so every analysis uses ` +
+        `the latest Azure data.</p>`,
+      actions: [{
+        label: "⚙ Open Settings",
+        className: "btn btn--accent btn--sm",
+        run: () => { _setOnboardSettingsDone(); dismissSettingsCoach(true); switchView("settings"); },
+        close: true,
+      }],
+    },
+    {
+      title: "Create a BOM (Bill of Materials)",
+      body:
+        `<p>A <strong>BOM</strong> describes what the customer deploys: the Azure ` +
+        `<strong>services</strong>, the VM <strong>SKU families</strong>, and <strong>required ` +
+        `cores</strong>. Name it, pick the subscription(s), then choose services, regions, and SKUs.</p>` +
+        `<p class="muted">Tip: set a <strong>Preferred source region</strong> so latency is measured ` +
+        `from the customer's primary region.</p>`,
+      actions: [{
+        label: "+ New BOM",
+        className: "btn btn--accent btn--sm",
+        run: () => openBomModal(null, { create: true }),
+        close: true,
+      }],
+    },
+    {
+      title: "Run the analysis",
+      body:
+        `<p>Select your BOM in the <strong>Bills of Materials</strong> list on the left, then click ` +
+        `<strong>▶ Refresh analysis</strong>. A live progress bar streams SKU availability across ` +
+        `<strong>~38 Azure regions</strong> — usually a few minutes for a full run.</p>`,
+      actions: [],
+    },
+    {
+      title: "Explore results & clear blockers",
+      body:
+        `<p>Use the tabs to explore your results: <strong>Overview</strong> KPIs, per-region ` +
+        `<strong>Table</strong>, <strong>Map</strong>, <strong>Latency</strong>, <strong>Compare</strong>, ` +
+        `and <strong>Best regions</strong>.</p>` +
+        `<p>Where <strong>quota</strong> or <strong>zonal access</strong> blocks a region, you can ` +
+        `<strong>open, submit, and track an Azure support ticket</strong> right from the dashboard.</p>`,
+      // Offer the sample-data escape hatch here only when there's nothing to look at yet.
+      actions: (demo || signedIn) ? [] : [{
+        label: "▶ Explore with sample data",
+        className: "btn btn--sm",
+        run: () => loadSampleData(),
+        close: true,
+      }],
+    },
+  ];
+  return steps;
+}
 
 function setupGettingStarted() {
   const openBtn = document.getElementById("open-guide");
   const modal = document.getElementById("guide-modal");
   const overlay = document.getElementById("guide-overlay");
   const closeBtn = document.getElementById("guide-modal-close");
-  if (!openBtn || !modal || !overlay) return;
+  const stepHost = document.getElementById("gs-tour-step");
+  const dotsHost = document.getElementById("gs-tour-dots");
+  const backBtn = document.getElementById("gs-tour-back");
+  const nextBtn = document.getElementById("gs-tour-next");
+  const skipBtn = document.getElementById("gs-tour-skip");
+  if (!openBtn || !modal || !overlay || !stepHost || !dotsHost || !nextBtn) return;
 
-  const open = () => { overlay.classList.remove("hidden"); modal.classList.remove("hidden"); };
-  const close = () => { overlay.classList.add("hidden"); modal.classList.add("hidden"); };
+  let idx = 0;
 
-  openBtn.addEventListener("click", open);
+  const close = () => {
+    overlay.classList.add("hidden");
+    modal.classList.add("hidden");
+    _gsTourMarkSeen();
+  };
+  const open = (start) => {
+    idx = start || 0;
+    render();
+    overlay.classList.remove("hidden");
+    modal.classList.remove("hidden");
+  };
+
+  function render() {
+    const steps = gettingStartedSteps();
+    idx = Math.max(0, Math.min(idx, steps.length - 1));
+    const step = steps[idx];
+
+    dotsHost.innerHTML = steps.map((s, i) =>
+      `<button type="button" class="gs-dot${i === idx ? " is-active" : ""}${i < idx ? " is-done" : ""}" ` +
+      `data-goto="${i}" role="tab" aria-selected="${i === idx}" ` +
+      `title="Step ${i + 1}: ${escapeHtml(s.title)}"><span>${i + 1}</span></button>`
+    ).join("");
+    dotsHost.querySelectorAll("[data-goto]").forEach(d =>
+      d.addEventListener("click", () => { idx = Number(d.dataset.goto); render(); }));
+
+    stepHost.innerHTML =
+      `<div class="gs-tour-count">Step ${idx + 1} of ${steps.length}</div>` +
+      `<h3 class="gs-tour-title">${escapeHtml(step.title)}</h3>` +
+      `<div class="gs-tour-copy">${step.body}</div>` +
+      `<div class="gs-tour-actions" id="gs-tour-actions"></div>`;
+
+    const acts = stepHost.querySelector("#gs-tour-actions");
+    (step.actions || []).forEach(a => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = a.className || "btn btn--sm";
+      b.textContent = a.label;
+      b.addEventListener("click", () => {
+        try { if (a.run) a.run(); } finally { if (a.close) close(); }
+      });
+      acts.appendChild(b);
+    });
+
+    if (backBtn) backBtn.disabled = idx === 0;
+    nextBtn.textContent = idx === steps.length - 1 ? "Done" : "Next →";
+  }
+
+  if (backBtn) backBtn.addEventListener("click", () => { idx = Math.max(0, idx - 1); render(); });
+  nextBtn.addEventListener("click", () => {
+    const steps = gettingStartedSteps();
+    if (idx >= steps.length - 1) { close(); }
+    else { idx += 1; render(); }
+  });
+  if (skipBtn) skipBtn.addEventListener("click", close);
+  openBtn.addEventListener("click", () => open(0));
   if (closeBtn) closeBtn.addEventListener("click", close);
   overlay.addEventListener("click", close);
+
+  // First-visit auto-open removes the discovery barrier — new users land
+  // straight in the guided flow. Only once; the "?" button reopens it later.
+  if (!_gsTourSeen()) {
+    setTimeout(() => { if (!_gsTourSeen()) open(0); }, 700);
+  }
 }
 
 // ---------------------------------------------------------------- Settings: activity log

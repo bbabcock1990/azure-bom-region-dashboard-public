@@ -21,14 +21,14 @@
        the server reports delegated_mode; mints the customer's ARM token
        client-side so tokens never touch the server. -->
   <script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.28.1/lib/msal-browser.min.js"></script>
-  <script src="msal-auth.js?v=2026090323"></script>
+  <script src="msal-auth.js?v=2026090324"></script>
 
   <!-- Apply persisted theme + filters state BEFORE styles.css loads to prevent
        FOUC. Kept external (not inline) so the CSP can forbid inline scripts.
        Order matters: this must run before the <link> below. -->
   <script src="preinit.js?v=2026061503"></script>
 
-  <link rel="stylesheet" href="styles.css?v=2026090323" />
+  <link rel="stylesheet" href="styles.css?v=2026090324" />
 </head>
 <body>
 
@@ -615,133 +615,20 @@
     <button class="close" id="guide-modal-close" aria-label="Close">&times;</button>
   </header>
   <div class="modal-body">
-    <section class="getting-started" id="getting-started">
-        <p class="gs-intro">
-          Run this dashboard against a customer's Azure subscription to see
-          available SKUs, BOM coverage, quota headroom, and recommended
-          regions — all in one place.
-        </p>
-        <ol class="gs-steps">
-          <li>
-            <div class="gs-step-num">1</div>
-            <div class="gs-step-body">
-              <h3>Pick or create a BOM</h3>
-              <p>
-                Bills of Materials live in the <strong>Bills of Materials</strong>
-                list on the left. Click one to load it (and its latest analysis),
-                or click <strong>+ New</strong> to create one. The selected BOM —
-                its name, customer, subscription, and controls — appears in the
-                panel at the top of this area.
-              </p>
-              <p>
-                Behind the scenes, your one-time <strong>browser sign-in</strong>
-                mints an <strong>ARM bearer token</strong>. The dashboard then
-                uses Azure's public management APIs directly for both service
-                and VM SKU availability.
-              </p>
-              <ul class="gs-tabs">
-                <li>
-                  <strong>ARM <code>Microsoft.Compute/skus</code></strong> —
-                  region- and zone-level VM SKU availability for the selected
-                  subscription. This is where region-wide and zonal
-                  <code>NotAvailableForSubscription</code> restrictions come
-                  from.
-                </li>
-              </ul>
-              <p>
-                ARM only accepts a token issued for the subscription's
-                home tenant, so the dashboard automatically resolves the
-                subscription tenant and requests the right token before a run.
-              </p>
-              <ul class="gs-tabs">
-                <li>Have <em>Reader</em> on the customer subscription, <strong>or</strong></li>
-                <li>Ask the customer to run this dashboard themselves
-                  in their tenant — same workflow, their
-                  browser sign-in.</li>
-              </ul>
-            </div>
-          </li>
-          <li>
-            <div class="gs-step-num">2</div>
-            <div class="gs-step-body">
-              <h3>Create the customer's BOM (in the dashboard)</h3>
-              <p>
-                Each customer needs a Bill of Materials describing the
-                Azure services they consume plus the SKU families and
-                required cores per workload. Click <strong>+ New</strong> in
-                the Bills of Materials list (left), or <strong>Edit</strong>
-                an existing BOM from its panel.
-              </p>
-              <ul class="gs-tabs">
-                <li>
-                  <strong>BOM Name</strong> — a short, memorable label
-                  (e.g. <code>Contoso-Prod</code>) that shows up in the
-                  BOM list so it's easy to tell BOMs apart.
-                </li>
-                <li>
-                  <strong>Services</strong> — pick from the built-in
-                  Azure service catalog. The dashboard calls ARM
-                  <code>providers/{ns}?api-version=2024-07-01</code>
-                  live to compute the per-region ✅/❌ matrix — no need
-                  for a CLI run.
-                </li>
-                <li>
-                  <strong>Required SKUs</strong> — one row per SKU
-                  family. Family ID is the bit Azure quotas use
-                  (e.g. <code>standardDav6Family</code>), and the
-                  required-cores field drives the
-                  <em>Quota Status</em> column on the dashboard.
-                </li>
-              </ul>
-              <p class="muted">
-                Already have a <code>bom_template.xlsx</code> or
-                <code>region_results_*.xlsx</code> from the legacy CLI
-                flow? Click <strong>Import xlsx</strong> in the BOM
-                editor to prefill the form.
-              </p>
-            </div>
-          </li>
-          <li>
-            <div class="gs-step-num">3</div>
-            <div class="gs-step-body">
-              <h3>Run the analysis</h3>
-              <p>
-                Select your BOM in the left list, then click
-                <strong>▶ Refresh analysis</strong> in its panel.
-                Once a BOM is saved the run dialog defaults to
-                <em>Use saved BOM</em> — pick a
-                segment, confirm the BOM name,
-                and hit <strong>Refresh analysis</strong>. A live progress
-                bar streams ARM SKU availability status across all ~38 Azure
-                regions — it usually takes a few minutes for the
-                full set. (You can still drop a
-                <code>region_results_*.xlsx</code> in to use the
-                legacy xlsx path.)
-              </p>
-            </div>
-          </li>
-          <li>
-            <div class="gs-step-num">4</div>
-            <div class="gs-step-body">
-              <h3>Explore the results</h3>
-              <p>Switch tabs to dig into different facets of the analysis result:</p>
-              <ul class="gs-tabs">
-                <li><strong>Overview</strong> — donut KPIs for Health, BOM coverage, SKU coverage, tier mix</li>
-                <li><strong>Table</strong> — per-region detail with sortable columns</li>
-                <li><strong>Map</strong> — geographic view of healthy vs. unhealthy regions</li>
-                <li><strong>Latency Chart</strong> — round-trip latency from a chosen source region</li>
-                <li><strong>Compare</strong> — side-by-side 3-region drill-down</li>
-                <li><strong>Quota per Region</strong> — legacy quota view for older snapshots</li>
-                <li><strong>Settings → Activity Log</strong> — audit trail of API calls, quota requests, BOM changes, and sign-in activity</li>
-              </ul>
-            </div>
-          </li>
-        </ol>
-        <p class="gs-footer muted">
-          Past analysis results are stored locally and reachable from the
-          <strong>Analysis Result</strong> picker in the selected BOM's panel — switch
-          between results without re-running the pipeline.
-        </p>
+    <section class="gs-tour" id="gs-tour">
+      <p class="gs-tour-intro">
+        This dashboard shows a customer where their Bill of Materials can deploy —
+        available SKUs, quota headroom, best regions, and blockers you can turn into
+        an Azure support ticket. Here's the whole flow in five short steps.
+      </p>
+      <div class="gs-tour-progress" id="gs-tour-dots" role="tablist" aria-label="Getting started steps"></div>
+      <div class="gs-tour-step" id="gs-tour-step"></div>
+      <footer class="gs-tour-nav">
+        <button type="button" class="link-btn" id="gs-tour-skip">Skip for now</button>
+        <span class="gs-tour-spacer"></span>
+        <button type="button" class="btn btn--sm" id="gs-tour-back">Back</button>
+        <button type="button" class="btn btn--accent btn--sm" id="gs-tour-next">Next</button>
+      </footer>
     </section>
   </div>
 </div>
@@ -1043,6 +930,6 @@
 
 <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
 
-<script src="app.js?v=2026090323"></script>
+<script src="app.js?v=2026090324"></script>
 </body>
 </html>

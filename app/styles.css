@@ -1812,66 +1812,70 @@ html.filters-collapsed-init.bomnav-collapsed-init .layout { grid-template-column
 
 .overview-blade.empty .overview-chart { opacity: 0.35; }
 
-/* ===================== Getting Started ===================== */
-.getting-started {
-  background: linear-gradient(135deg, var(--hero-bg-start) 0%, var(--hero-bg-end) 100%);
-  border-radius: var(--radius-lg);
-  border-top: 3px solid var(--ms-blue);
-  padding: 18px 22px 22px;
-  margin-bottom: 20px;
-  box-shadow: var(--shadow-sm);
-  color: var(--hero-text);
+/* ===================== Getting Started (guided tour) ===================== */
+.gs-tour { color: var(--hero-text, #e9eefb); }
+.gs-tour-intro {
+  margin: 2px 0 16px;
+  color: var(--hero-text-muted, #aab3c8);
+  font-size: 0.9rem;
+  line-height: 1.5;
 }
-.getting-started.hidden { display: none; }
-.getting-started .gs-intro {
-  margin: 4px 0 16px;
-  color: var(--hero-text-muted);
-  font-size: 0.92rem;
-  line-height: 1.45;
-  max-width: 90ch;
-}
-.getting-started .gs-steps {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 14px;
-}
-.getting-started .gs-steps > li {
-  background: rgba(255,255,255,0.04);
-  border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 10px;
-  padding: 14px 16px 16px;
+
+/* Progress dots / numbered step chips */
+.gs-tour-progress {
   display: flex;
-  gap: 12px;
-  align-items: flex-start;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 18px;
+  flex-wrap: wrap;
 }
-.getting-started .gs-step-num {
-  flex: 0 0 32px;
-  width: 32px; height: 32px;
+.gs-dot {
+  width: 30px; height: 30px;
   border-radius: 50%;
-  background: var(--ms-blue);
-  color: #fff;
+  border: 1px solid rgba(255,255,255,0.16);
+  background: rgba(255,255,255,0.05);
+  color: var(--hero-text-muted, #aab3c8);
+  font-size: 0.82rem;
   font-weight: 700;
-  font-size: 0.95rem;
   display: flex; align-items: center; justify-content: center;
-  box-shadow: 0 0 0 3px rgba(0, 120, 212, 0.25);
+  cursor: pointer;
+  padding: 0;
+  transition: background .15s, border-color .15s, color .15s, box-shadow .15s;
 }
-.getting-started .gs-step-body { flex: 1 1 auto; min-width: 0; }
-.getting-started .gs-step-body h3 {
-  margin: 2px 0 6px;
-  font-size: 0.95rem;
+.gs-dot:hover { border-color: rgba(255,255,255,0.4); color: #fff; }
+.gs-dot.is-done { background: #1f6f54; border-color: #1f6f54; color: #eafff4; }
+.gs-dot.is-active {
+  background: var(--ms-blue, #0078d4);
+  border-color: var(--ms-blue, #0078d4);
+  color: #fff;
+  box-shadow: 0 0 0 3px rgba(0,120,212,0.25);
+}
+
+/* Single step card */
+.gs-tour-step {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.09);
+  border-radius: 12px;
+  padding: 20px 22px 22px;
+  min-height: 190px;
+}
+.gs-tour-count {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--hero-text-dim, #8892a6);
+  margin-bottom: 6px;
+}
+.gs-tour-title {
+  margin: 0 0 10px;
+  font-size: 1.18rem;
   font-weight: 600;
   color: #fff;
 }
-.getting-started .gs-step-body p {
-  margin: 6px 0;
-  font-size: 0.86rem;
-  line-height: 1.5;
-  color: var(--hero-text-muted);
-}
-.getting-started .gs-step-body code {
+.gs-tour-copy p { margin: 8px 0; font-size: 0.92rem; line-height: 1.55; color: var(--hero-text-muted, #c3ccdf); }
+.gs-tour-copy p.muted { color: var(--hero-text-dim, #97a1b6); font-size: 0.86rem; }
+.gs-tour-copy strong { color: #fff; }
+.gs-tour-copy code {
   background: rgba(0,0,0,0.35);
   padding: 1px 6px;
   border-radius: 4px;
@@ -1879,45 +1883,20 @@ html.filters-collapsed-init.bomnav-collapsed-init .layout { grid-template-column
   font-size: 0.82rem;
   color: #ffd479;
 }
-.getting-started .gs-path {
-  display: inline-block;
-  margin: 4px 0;
-  padding: 4px 10px;
-  background: rgba(0,0,0,0.4);
-  border-radius: 6px;
-  color: #9ad4ff;
-  word-break: break-all;
-}
-.getting-started .gs-cmd {
-  background: #0b1220;
-  color: #d8e0f0;
-  padding: 10px 12px;
-  border-radius: 6px;
-  font-size: 0.8rem;
-  line-height: 1.4;
-  overflow-x: auto;
-  border: 1px solid rgba(255,255,255,0.08);
-  margin: 6px 0;
-}
-.getting-started .gs-tabs {
-  margin: 6px 0 0;
-  padding-left: 18px;
-  font-size: 0.84rem;
-  line-height: 1.5;
-  color: var(--hero-text-muted);
-}
-.getting-started .gs-tabs li { margin: 2px 0; }
-.getting-started .gs-tabs strong { color: #fff; }
-.getting-started .gs-footer {
-  margin: 16px 2px 0;
-  font-size: 0.82rem;
-  color: var(--hero-text-dim);
-}
+.gs-ok { color: #6ee7b7 !important; font-size: 0.9rem !important; }
+.gs-tour-actions { margin-top: 14px; display: flex; gap: 10px; flex-wrap: wrap; }
 
-/* Getting Started guide lives in a modal; widen it and drop the card's
-   outer margin since the modal body provides the spacing. */
-#guide-modal { width: min(900px, 96vw); }
-#guide-modal .getting-started { margin: 0; }
+/* Footer nav */
+.gs-tour-nav {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 18px;
+}
+.gs-tour-spacer { flex: 1 1 auto; }
+
+/* The guide is a focused single-step tour now — keep the modal compact. */
+#guide-modal { width: min(600px, 96vw); }
 
 
 /* ===================== SWA additions: top bar, modal, settings ===================== */
