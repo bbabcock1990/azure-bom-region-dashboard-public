@@ -5990,16 +5990,22 @@ async function openBomModal(bomId, opts = {}) {
   // Make sure the datalist reflects any rows just rendered (saved/legacy values).
   renderBomSkuFamilyOptions();
 
-  // Guided walkthrough: explicitly requested (opts.guide) or the first time a
-  // user builds a BOM from any entry point. Runs after the wizard is fully
-  // populated so every target exists. Remembered so it doesn't nag on reuse.
-  if (opts.create && (opts.guide || !_bomWizardGuideSeen())) {
+  // Guided walkthrough: a section-by-section tutorial that explains what each
+  // part of the wizard is for. Auto-runs only on the user's FIRST BOM (no BOMs
+  // saved yet) and only until they've seen/skipped it once; opts.guide (the
+  // "Guide me" button / Getting Started) always forces it. Runs after the
+  // wizard is fully populated so every target exists.
+  const firstBomAuto = opts.create && !_hasExistingBoms() && !_bomWizardGuideSeen();
+  if (opts.guide || firstBomAuto) {
     _setBomWizardGuideSeen();
     setTimeout(() => startBomWizardCoachTour(), 300);
   }
 }
 
 const BOM_GUIDE_KEY = "bom_wizard_guide_seen";
+function _hasExistingBoms() {
+  try { return Object.keys((BOM_META && BOM_META.index) || {}).length > 0; } catch (_e) { return false; }
+}
 function _bomWizardGuideSeen() {
   try { return localStorage.getItem(BOM_GUIDE_KEY) === "1"; } catch (_e) { return false; }
 }
@@ -10434,16 +10440,22 @@ function startSettingsCoachTour() {
 // drives. Launched from Getting Started step 3 after the wizard opens.
 function startBomWizardCoachTour() {
   startCoachmarkTour([
+    // ---- Step 1 · Basics -----------------------------------------------
     {
       target: '#bom-tag',
-      title: "Name the BOM",
-      text: "A short, memorable label (e.g. <code>Contoso-Prod</code>) so you can tell BOMs apart in the left-hand list.",
+      title: "Step 1 · Basics — Name the BOM",
+      text: "This is a <strong>Bill of Materials</strong> for one deployment. Give it a short, memorable label (e.g. <code>Contoso-Prod</code>) so you can tell BOMs apart in the left-hand list.",
       before: () => bomWizardGoTo(1),
     },
     {
-      target: '#bom-sub',
-      title: "Pick the subscription(s)",
-      text: "Select the customer subscription(s) to analyze. SKU, quota and region availability are read from these.",
+      target: '#bom-customer',
+      title: "Customer name",
+      text: "Optional. The customer or team this BOM belongs to — shown next to the name for context.",
+    },
+    {
+      target: '#bom-resilience',
+      title: "Availability target",
+      text: "How the workload is deployed. <strong>Zone-redundant</strong> spreads across Availability Zones, so a tier that's restricted from zone redundancy in a region becomes a <strong>hard blocker</strong>. <strong>Regional</strong> makes those restrictions advisory only.",
     },
     {
       target: '#bom-preferred-region',
@@ -10451,22 +10463,46 @@ function startBomWizardCoachTour() {
       text: "Optional: the customer's primary region. Latency to every other region is measured <em>from</em> here, and it becomes the default source on the Latency tab.",
     },
     {
-      target: '#bom-wizard-nav [data-wstep="2"]',
-      title: "Services & Regions",
-      text: "Step 2: choose the Azure <strong>services</strong> and the <strong>regions</strong> to include in the analysis.",
-      before: () => bomWizardGoTo(1),
+      target: '#bom-owner-first',
+      title: "Support contact",
+      text: "Who Azure support tickets for <em>this</em> BOM are filed under. Defaults to your global Settings and can be overridden here. Expand <strong>Additional support details</strong> for phone, severity and CCs.",
     },
     {
-      target: '#bom-wizard-nav [data-wstep="3"]',
-      title: "SKUs & Capacity",
-      text: "Step 3: add VM <strong>SKU families</strong> and the <strong>required cores</strong> — this is what drives the Quota Status check.",
-      before: () => bomWizardGoTo(1),
+      target: '#bom-sub',
+      title: "Subscriptions",
+      text: "Select the customer subscription(s) to analyze — hold Ctrl/Cmd for multiple. SKU, quota and region availability are all read from these.",
+    },
+    // ---- Step 2 · Services & Regions -----------------------------------
+    {
+      target: '#bom-services-list',
+      title: "Step 2 · Services",
+      text: "Pick the Azure <strong>services</strong> in the architecture. The dashboard checks each one's per-region availability when you run the BOM.",
+      before: () => bomWizardGoTo(2),
     },
     {
-      target: '#bom-wizard-next',
+      target: '#bom-regions-list',
+      title: "Regions",
+      text: "Choose the <strong>regions</strong> to score. Leave the full list checked to compare all of Azure, or narrow it to the regions a customer actually cares about.",
+      before: () => bomWizardGoTo(2),
+    },
+    // ---- Step 3 · SKUs & Capacity --------------------------------------
+    {
+      target: '#bom-skus-tbody',
+      title: "Step 3 · SKUs & cores",
+      text: "Add the VM <strong>SKU families</strong> and the <strong>required cores</strong>. This drives the <strong>Quota Status</strong> check — it's what tells you where the customer needs a quota increase.",
+      before: () => bomWizardGoTo(3),
+    },
+    {
+      target: '#bom-service-tiers-step',
+      title: "Service tiers",
+      text: "Some services offer tiers (e.g. SQL Basic / Premium). Tiers marked <em>zone-redundant capable</em> are validated by the region readiness check.",
+      before: () => bomWizardGoTo(3),
+    },
+    {
+      target: '#bom-save',
       title: "Save, then run",
-      text: "Click <strong>Next</strong> through each step and <strong>Save</strong>. Then hit <strong>▶ Refresh analysis</strong> in the BOM's panel to analyze all ~38 regions.",
-      before: () => bomWizardGoTo(1),
+      text: "Click <strong>Save</strong> to store the BOM, then hit <strong>▶ Refresh analysis</strong> in the BOM's panel to score every region for blockers, quota and readiness.",
+      before: () => bomWizardGoTo(3),
     },
   ]);
 }
