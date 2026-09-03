@@ -21,14 +21,14 @@
        the server reports delegated_mode; mints the customer's ARM token
        client-side so tokens never touch the server. -->
   <script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.28.1/lib/msal-browser.min.js"></script>
-  <script src="msal-auth.js?v=2026090306"></script>
+  <script src="msal-auth.js?v=2026090323"></script>
 
   <!-- Apply persisted theme + filters state BEFORE styles.css loads to prevent
        FOUC. Kept external (not inline) so the CSP can forbid inline scripts.
        Order matters: this must run before the <link> below. -->
   <script src="preinit.js?v=2026061503"></script>
 
-  <link rel="stylesheet" href="styles.css?v=2026090317" />
+  <link rel="stylesheet" href="styles.css?v=2026090323" />
 </head>
 <body>
 
@@ -534,7 +534,7 @@
                   <span id="storage-usage-fill"></span>
                 </div>
                 <p class="muted" id="storage-usage-text">Calculating…</p>
-                <p class="muted storage-usage-note">Your BOM definitions and analysis history are auto-backed-up in this browser so they reload automatically (limited to ~5&nbsp;MB). Snapshots are excluded from this backup — download them as a .zip below to keep them long-term.</p>
+                <p class="muted storage-usage-note">Your BOMs, analysis history, and the latest result per BOM are auto-backed-up in this browser so they reload automatically (limited to ~5&nbsp;MB). Older snapshots are excluded — download them as a .zip below to keep them long-term.</p>
               </div>
               <div class="settings-danger-actions">
                 <button type="button" class="btn btn--sm" id="owner-open-folder">📂 Open snapshots folder</button>
@@ -849,6 +849,13 @@
       <p class="muted">How this workload is deployed. <strong>Zone-redundant</strong> spreads services across Availability Zones for HA, so a tier that's restricted from zone redundancy in a region is a <strong>hard blocker</strong> (region goes red). <strong>Regional</strong> tolerates a single zone, so zone-redundancy restrictions are <strong>advisory only</strong> and won't block a region.</p>
     </div>
     <div class="run-step">
+      <label for="bom-preferred-region">Preferred source region <span class="muted">(for latency)</span></label>
+      <select id="bom-preferred-region" style="width:100%;">
+        <option value="">— None (use default) —</option>
+      </select>
+      <p class="muted">The origin this customer measures inter-region latency <em>from</em> — e.g. their primary Azure region or where their users are. Saved with the BOM and used as the default <strong>Source region</strong> on the Latency tab and in the "Best regions" latency badges. Latency values come from Microsoft's published Azure region round-trip matrix.</p>
+    </div>
+    <div class="run-step">
       <label>Support contact for this BOM <span class="muted">(optional)</span></label>
       <div class="bom-owner-grid">
         <input type="text" id="bom-owner-first" placeholder="First name" autocomplete="off" maxlength="60" />
@@ -1036,6 +1043,6 @@
 
 <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
 
-<script src="app.js?v=2026090317"></script>
+<script src="app.js?v=2026090323"></script>
 </body>
 </html>

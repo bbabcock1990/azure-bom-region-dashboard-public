@@ -656,16 +656,42 @@ def wipe_snapshot_blobs() -> int:
 _STATE_VERSION = 1
 
 
-def export_state(include_blobs: bool = True) -> Dict:
+def _latest_snapshot_blob_names(tables: Dict[str, List]) -> set:
+    """From serialized ``tbl_runs`` rows, return the ``snapshot_blob`` name of
+    the latest succeeded run per BOM (PartitionKey). Used to bound the browser
+    backup to one analysis payload per BOM so the last result restores on reload
+    without bloating localStorage with every historical snapshot."""
+    runs = tables.get("tbl_runs") or []
+    latest: Dict[str, tuple] = {}  # bom_id -> (rowkey, blob_name)
+    for row in runs:
+        try:
+            pk, rk, data = row[0], row[1], row[2]
+            d = json.loads(data) if isinstance(data, str) else (data or {})
+        except Exception:
+            continue
+        if not isinstance(d, dict) or d.get("status") != "succeeded":
+            continue
+        blob = d.get("snapshot_blob")
+        if not blob:
+            continue
+        cur = latest.get(pk)
+        if cur is None or (rk or "") > cur[0]:
+            latest[pk] = (rk or "", blob)
+    return {v[1] for v in latest.values()}
+
+
+def export_state(include_blobs: bool = True, latest_snapshots_only: bool = False) -> Dict:
     """Serialize the current signed-in customer's whole store to a JSON-able
     dict. Works in in-memory mode (per-user RAM) and, as a fallback, over the
     on-disk backend so the same export/import path is testable everywhere.
 
-    When ``include_blobs`` is False the snapshot blob payloads (the bulk of the
-    document) are omitted. This powers the lightweight browser localStorage
-    backup: BOM definitions and run metadata (the tables) are tiny and always
-    fit under the browser's ~5MB quota, while the heavy snapshot blobs keep
-    their own unbounded .zip download/import path."""
+    Blob-inclusion modes (for the browser localStorage backup, which is capped
+    at ~5MB):
+      * ``include_blobs=False`` — omit all snapshot blobs (tables only).
+      * ``latest_snapshots_only=True`` — include only the latest succeeded
+        snapshot blob per BOM, so the last analysis result restores on reload
+        while the backup stays bounded (one payload per BOM).
+      * default — include every blob (used by the unbounded .zip export)."""
     tables: Dict[str, List] = {}
     blobs: Dict[str, Dict[str, str]] = {}
     with _lock:
@@ -685,11 +711,18 @@ def export_state(include_blobs: bool = True) -> Dict:
                 ).fetchall()
                 tables[phys] = [[r[0], r[1], r[2]] for r in rows]
             if include_blobs:
+                keep = _latest_snapshot_blob_names(tables) if latest_snapshots_only else None
                 for cname, items in _mem_blob_store(key).items():
-                    blobs[cname] = {
-                        n: base64.b64encode(b).decode("ascii")
-                        for n, b in items.items()
-                    }
+                    if latest_snapshots_only and cname == "snapshots":
+                        blobs[cname] = {
+                            n: base64.b64encode(b).decode("ascii")
+                            for n, b in items.items() if n in keep
+                        }
+                    else:
+                        blobs[cname] = {
+                            n: base64.b64encode(b).decode("ascii")
+                            for n, b in items.items()
+                        }
         else:
             conn = _connect()
             try:

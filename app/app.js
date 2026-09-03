@@ -281,6 +281,17 @@ async function ensureDelegatedToken({ force = false } = {}) {
   }
 }
 
+// Force an MFA step-up: re-acquire the customer's ARM token interactively
+// (passing any claims challenge Azure returned) so the new token carries the
+// MFA claim required to *write* Azure resources like support tickets. Returns
+// the fresh token or null. Throws if the popup is blocked/cancelled.
+async function stepUpDelegatedToken(claims) {
+  if (!APP_CONFIG || !APP_CONFIG.delegated_mode || !window.DelegatedAuth) return null;
+  const tok = await window.DelegatedAuth.getArmToken({ stepUp: true, claims: claims || null });
+  window.__ARM_TOKEN = tok || null;
+  return tok;
+}
+
 // ---------------------------------------------------------------- State sync
 // Stateless hosted mode: the server keeps NOTHING on disk. The customer's
 // browser is the durable store. On load we replay the saved document into the
@@ -324,34 +335,52 @@ function scheduleStateSave() {
 }
 
 let _backupQuotaToastShown = false;
+// Try to persist `txt` to localStorage; on QuotaExceeded strip the snapshot
+// blobs and retry so BOM definitions + run history always survive a reload even
+// when the last-analysis payload is too big. Returns true if anything was saved.
+function _writeStateBackup(txt) {
+  const key = _stateKey();
+  try {
+    localStorage.setItem(key, txt);
+    return true;
+  } catch (e) {
+    // Fall back to a tables-only doc (drop the heavy blobs client-side, no
+    // extra round-trip) so the BOMs still restore; snapshots stay .zip-only.
+    try {
+      const doc = JSON.parse(txt);
+      doc.blobs = {};
+      localStorage.setItem(key, JSON.stringify(doc));
+      return true;
+    } catch (e2) {
+      console.warn("state save skipped (localStorage full)", e2);
+      return false;
+    }
+  }
+}
+
 async function saveStateToLocal() {
   if (!_stateSyncEnabled() || _stateSaveInFlight) return;
   _stateSaveInFlight = true;
   try {
-    // Back up only the lightweight BOM/run tables (blobs=false) — snapshot
-    // blobs are large and keep their own .zip download/import path, so we keep
-    // the browser backup well under the ~5MB localStorage quota.
-    const res = await apiFetch("/api/state/export?blobs=false");
+    // Back up the light BOM/run tables plus only the latest analysis per BOM
+    // (blobs=latest) so the last result restores on reload while staying under
+    // the ~5MB localStorage quota. Older snapshots keep their .zip-only path.
+    const res = await apiFetch("/api/state/export?blobs=latest");
     if (!res.ok) return;
     const txt = await res.text();
-    try {
-      localStorage.setItem(_stateKey(), txt);
+    const saved = _writeStateBackup(txt);
+    if (saved) {
       _backupQuotaToastShown = false;
-    } catch (e) {
-      // QuotaExceededError — even the slim state exceeds localStorage. Keep
-      // working in this session (server RAM); it just won't survive a reload.
-      // Show the warning once per session to avoid a stack of duplicate toasts.
-      console.warn("state save skipped (localStorage full)", e);
-      if (!_backupQuotaToastShown) {
-        _backupQuotaToastShown = true;
-        try {
-          showToast(
-            "Browser backup is full — your BOMs may not restore after a reload. " +
-            "Use Settings → Data & storage to download a .zip backup.",
-            "warn"
-          );
-        } catch (_) {}
-      }
+    } else if (!_backupQuotaToastShown) {
+      // Even the tables-only doc exceeded localStorage — warn once per session.
+      _backupQuotaToastShown = true;
+      try {
+        showToast(
+          "Browser backup is full — your BOMs may not restore after a reload. " +
+          "Use Settings → Data & storage to download a .zip backup.",
+          "warn"
+        );
+      } catch (_) {}
     }
     try { updateStorageGauge(); } catch (_) {}
   } catch (e) {
@@ -5204,6 +5233,20 @@ function initSourceRegionDropdown() {
     opt.textContent = r.name + (r.deployment_health === "No" ? " (unhealthy)" : "");
     sel.appendChild(opt);
   }
+  // Default the source region to the active BOM's saved preferred region
+  // (stored as a short name) so the Latency tab and "Best regions" badges
+  // measure from the origin the customer selected in the wizard. Only apply
+  // when the user hasn't already picked a source this session.
+  if (!sel.dataset.userPicked) {
+    const meta = activeBomMeta();
+    const pref = meta && meta.preferred_region ? String(meta.preferred_region).toLowerCase() : "";
+    if (pref) {
+      const match = regions.find(r => String(r.short || "").toLowerCase() === pref
+        || String(r.name || "").toLowerCase() === pref);
+      if (match) sel.value = match.name;
+    }
+  }
+  sel.addEventListener("change", () => { sel.dataset.userPicked = "1"; }, { once: true });
 }
 
 function refreshLatencyChart() {
@@ -5915,6 +5958,7 @@ async function openBomModal(bomId, opts = {}) {
   document.getElementById("bom-tag").value = "";
   document.getElementById("bom-customer").value = "";
   { const rEl = document.getElementById("bom-resilience"); if (rEl) rEl.value = "zone_redundant"; }
+  { const pr = document.getElementById("bom-preferred-region"); if (pr) pr.value = ""; }
   document.getElementById("bom-services-filter").value = "";
   document.getElementById("bom-regions-search").value = "";
   document.getElementById("bom-regions-filter").value = "all";
@@ -6405,6 +6449,25 @@ function renderBomRegionsList() {
   }
   updateRegionGroupBadges();
   filterBomRegions();
+  populateBomPreferredRegionOptions();
+}
+
+// Fill the wizard's "Preferred source region" dropdown from the same region
+// catalog as the region picker. Value = region short name (stable); label =
+// display name. Preserves the current selection across re-renders.
+function populateBomPreferredRegionOptions() {
+  const sel = document.getElementById("bom-preferred-region");
+  if (!sel) return;
+  const prev = sel.value;
+  const cat = (BOM_EDIT.regionsCatalog || []).slice()
+    .sort((a, b) => (a.display_name || a.name).localeCompare(b.display_name || b.name));
+  let html = '<option value="">— None (use default) —</option>';
+  for (const rg of cat) {
+    const label = (rg.display_name || rg.name) + " (" + rg.name + ")";
+    html += `<option value="${escapeHtml(rg.name)}">${escapeHtml(label)}</option>`;
+  }
+  sel.innerHTML = html;
+  if (prev) sel.value = prev;
 }
 
 function updateRegionGroupBadges() {
@@ -6638,6 +6701,7 @@ function applyBomToForm(meta) {
   document.getElementById("bom-tag").value = meta.tag || "";
   document.getElementById("bom-customer").value = meta.customer_name || "";
   { const rEl = document.getElementById("bom-resilience"); if (rEl) rEl.value = _normalizeResilience(meta.resilience); }
+  { const pr = document.getElementById("bom-preferred-region"); if (pr) pr.value = meta.preferred_region || ""; }
   setBomSelectedServices((meta.services || []).map(s => s.name));
   // Seed per-service tier selections from the saved BOM so the step-3
   // tier pickers reflect what was chosen previously.
@@ -6704,6 +6768,7 @@ async function saveBom() {
   const tag = document.getElementById("bom-tag").value.trim();
   const customer_name = document.getElementById("bom-customer").value.trim();
   const resilience = _normalizeResilience((document.getElementById("bom-resilience") || {}).value);
+  const preferred_region = ((document.getElementById("bom-preferred-region") || {}).value || "").trim();
   const services = getBomSelectedServices();
   const required_skus = getBomSkuRows();
   // Persist the explicit region selection so the BOM analyzes exactly what
@@ -6717,7 +6782,7 @@ async function saveBom() {
   const payload = {
     subscription_id: sub,
     subscription_ids: subIds,
-    tag, customer_name, resilience,
+    tag, customer_name, resilience, preferred_region,
     services, regions, required_skus,
     support_override: _collectBomSupportOverride(),
   };
@@ -7020,7 +7085,65 @@ function showToast(message, type = "success") {
   setTimeout(() => toast.remove(), 5200);
 }
 
-// Build a safe "<strong>code</strong>: message" line for the status banners
+// In-app confirmation dialog returning a Promise<boolean>. Native window.confirm
+// can be silently suppressed by the browser (the "prevent additional dialogs"
+// checkbox, sandboxed frames, or corporate policy), which would make a gated
+// action — e.g. submitting a real Azure support ticket — quietly do nothing.
+// This modal is a real DOM element, so it can never be suppressed.
+function showConfirm(message, opts = {}) {
+  const title = opts.title || "Please confirm";
+  const confirmLabel = opts.confirmLabel || "Confirm";
+  const cancelLabel = opts.cancelLabel || "Cancel";
+  const danger = !!opts.danger;
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "app-confirm-overlay";
+    const dialog = document.createElement("div");
+    dialog.className = "app-confirm";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    const h = document.createElement("h3");
+    h.className = "app-confirm-title";
+    h.textContent = title;
+    const p = document.createElement("p");
+    p.className = "app-confirm-msg";
+    p.textContent = message;
+    const actions = document.createElement("div");
+    actions.className = "app-confirm-actions";
+    const cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.className = "btn btn--sm";
+    cancelBtn.textContent = cancelLabel;
+    const okBtn = document.createElement("button");
+    okBtn.type = "button";
+    okBtn.className = "btn btn--sm " + (danger ? "btn--danger" : "btn--accent");
+    okBtn.textContent = confirmLabel;
+    actions.appendChild(cancelBtn);
+    actions.appendChild(okBtn);
+    dialog.appendChild(h);
+    dialog.appendChild(p);
+    dialog.appendChild(actions);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    let done = false;
+    const close = (val) => {
+      if (done) return;
+      done = true;
+      document.removeEventListener("keydown", onKey);
+      overlay.remove();
+      resolve(val);
+    };
+    const onKey = (ev) => {
+      if (ev.key === "Escape") close(false);
+      else if (ev.key === "Enter") close(true);
+    };
+    cancelBtn.addEventListener("click", () => close(false));
+    okBtn.addEventListener("click", () => close(true));
+    overlay.addEventListener("click", (ev) => { if (ev.target === overlay) close(false); });
+    document.addEventListener("keydown", onKey);
+    setTimeout(() => okBtn.focus(), 0);
+  });
+}
 // (which render via innerHTML). All dynamic fields from an API error envelope
 // are escaped so a server- or user-derived message can't inject markup/script.
 function errLine(body, fallback) {
@@ -8886,8 +9009,7 @@ function _supportHtml() {
     <div class="support-intro">
       <h2>Support tickets</h2>
       <p class="muted">Turn a deployment blocker into an Azure support request — a <strong>quota increase</strong>
-      or a <strong>zonal / restricted-SKU access</strong> ticket. Preview builds the exact request with no Azure call;
-      submitting files it via <code>Microsoft.Support</code>.${demo ? " <strong>Demo mode: submission is disabled.</strong>" : ""}</p>
+      or a <strong>zonal / restricted-SKU access</strong> ticket, filed via <code>Microsoft.Support</code>.${demo ? " <strong>Demo mode: submission is disabled.</strong>" : ""}</p>
     </div>
 
     ${_renderRemediationPlanHtml()}
@@ -8920,7 +9042,6 @@ function _supportHtml() {
         <label>Severity <select id="sup-sev">${sevOpts}</select></label>
       </div>
       <div class="support-form-actions">
-        <button type="button" class="btn" id="sup-preview">Preview (dry-run)</button>
         <button type="button" class="btn btn--accent" id="sup-submit" ${demo ? "disabled title='Disabled in demo mode'" : ""}>Submit to Azure</button>
       </div>
       <pre class="support-preview hidden" id="sup-preview-box"></pre>
@@ -9033,15 +9154,41 @@ async function _supportCloseAzureTicket(ticketName, subId, title, btn) {
   subId = (subId || "").trim();
   if (!ticketName || !subId) { showToast("Missing ticket details to close.", "warning"); return; }
   const label = title || ticketName;
-  if (!confirm(`Close Azure support ticket "${label}"?\n\nAzure only allows closing tickets that aren't actively assigned to an engineer.`)) return;
+  const ok = await showConfirm(
+    `Close Azure support ticket "${label}"?\n\nAzure only allows closing tickets that aren't actively assigned to an engineer.`,
+    { title: "Close support ticket", confirmLabel: "Close ticket", danger: true }
+  );
+  if (!ok) return;
   const original = btn ? btn.textContent : "";
   if (btn) { btn.disabled = true; btn.textContent = "Closing…"; }
+
+  const closeOnce = () => apiJson("/api/support/azure-tickets/close", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ subscription_id: subId, ticket_name: ticketName }),
+  });
+
   try {
-    await apiJson("/api/support/azure-tickets/close", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ subscription_id: subId, ticket_name: ticketName }),
-    });
+    try {
+      await closeOnce();
+    } catch (e) {
+      // Azure gated this write behind MFA — step the user up and retry once.
+      if (e && e.body && e.body.error === "mfa_required") {
+        const claims = e.body.details && e.body.details.claims;
+        if (btn) btn.textContent = "Verifying MFA…";
+        showToast("Azure needs multi-factor authentication to close this ticket — please complete the sign-in prompt.", "warning");
+        try {
+          await stepUpDelegatedToken(claims);
+        } catch (authErr) {
+          showToast(`MFA sign-in was cancelled or blocked: ${authErr.message || authErr}`, "error");
+          throw e;
+        }
+        if (btn) btn.textContent = "Closing…";
+        await closeOnce();
+      } else {
+        throw e;
+      }
+    }
     showToast(`✓ Ticket closed: ${label}`, "success");
     await _supportLoadAzureTickets();
   } catch (e) {
@@ -9174,9 +9321,8 @@ function _supportGatherForm() {
   return body;
 }
 
-async function _supportCreate(dryRun) {
+async function _supportCreate() {
   const body = _supportGatherForm();
-  body.dry_run = dryRun;
   if (!body.subscription_id) { showToast("Pick a subscription first.", "warning"); return; }
   if (!body.region) { showToast("Pick a region first.", "warning"); return; }
   if (!body.family) { showToast("Pick a SKU family first.", "warning"); return; }
@@ -9186,25 +9332,55 @@ async function _supportCreate(dryRun) {
   if ((body.kind === "quota" || body.kind === "technical") && !(body.new_limit > 0)) {
     showToast("Enter a target vCPU limit.", "warning"); return;
   }
-  if (!dryRun && !confirm(`Submit a real ${body.kind} support ticket to Azure for ${body.region}?`)) return;
+  const ok = await showConfirm(
+    `Submit a real ${body.kind} support ticket to Azure for ${body.region}?`,
+    { title: "Submit support ticket", confirmLabel: "Submit to Azure" }
+  );
+  if (!ok) return;
   const box = document.getElementById("sup-preview-box");
+  const btn = document.getElementById("sup-submit");
+  const original = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; btn.textContent = "Submitting…"; }
+  if (box) { box.classList.add("hidden"); box.textContent = ""; }
+
+  const submitOnce = () => apiJson("/api/support/tickets", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+
   try {
-    const res = await apiJson("/api/support/tickets", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-    });
-    const ticket = res.ticket;
-    if (dryRun) {
-      SUPPORT.lastPreview = ticket;
-      if (box) { box.textContent = JSON.stringify(ticket.payload, null, 2); box.classList.remove("hidden"); }
-      showToast("Preview built (no Azure call).", "success");
-    } else {
-      showToast(`Ticket submitted: ${ticket.azure_ticket_id || ticket.ticket_name}`, "success");
-      _autoRecheckAfterTicket(body.kind, body.region, body.subscription_id);
+    let res;
+    try {
+      res = await submitOnce();
+    } catch (e) {
+      // Azure rejected the write pending an MFA step-up. The browser-minted ARM
+      // token is password-only; re-acquire an MFA token interactively and retry
+      // once so the customer doesn't hit a dead end.
+      const code = e && e.body && e.body.error;
+      if (code === "mfa_required") {
+        const claims = e.body && e.body.details && e.body.details.claims;
+        if (btn) btn.textContent = "Verifying MFA…";
+        showToast("Azure needs multi-factor authentication to file this ticket — please complete the sign-in prompt.", "warning");
+        try {
+          await stepUpDelegatedToken(claims);
+        } catch (authErr) {
+          showToast(`MFA sign-in was cancelled or blocked: ${authErr.message || authErr}`, "error");
+          throw e;
+        }
+        if (btn) btn.textContent = "Submitting…";
+        res = await submitOnce();
+      } else {
+        throw e;
+      }
     }
+    const ticket = res.ticket;
+    showToast(`Ticket submitted: ${ticket.azure_ticket_id || ticket.ticket_name}`, "success");
+    _autoRecheckAfterTicket(body.kind, body.region, body.subscription_id);
     await _supportReloadTickets();
   } catch (e) {
     showToast(`Ticket failed: ${e.message}`, "error");
     if (box && e.body) { box.textContent = JSON.stringify(e.body, null, 2); box.classList.remove("hidden"); }
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = original || "Submit to Azure"; }
   }
 }
 
@@ -9460,10 +9636,8 @@ function _wireSupportTab(view) {
     );
   });
   _supportLoadAzureTickets();
-  const prev = view.querySelector("#sup-preview");
-  if (prev) prev.addEventListener("click", () => _supportCreate(true));
   const sub = view.querySelector("#sup-submit");
-  if (sub) sub.addEventListener("click", () => _supportCreate(false));
+  if (sub) sub.addEventListener("click", () => _supportCreate());
 
   view.querySelector("#support-blockers-body").addEventListener("click", (ev) => {
     const btn = ev.target.closest("[data-prefill]");

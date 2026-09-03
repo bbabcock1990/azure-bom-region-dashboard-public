@@ -68,6 +68,20 @@
     opts = opts || {};
     if (!pca) return null;
     var scopes = armScopes();
+    var claims = opts.claims || null;
+
+    // Step-up path: Azure rejected a write pending MFA. Force a fresh
+    // interactive auth (passing the claims challenge when Azure provided one) so
+    // the returned ARM token carries the MFA claim. Never silent here.
+    if (opts.stepUp) {
+      var reqUp = { scopes: scopes };
+      if (account) reqUp.account = account;
+      if (cfg.login_hint) reqUp.loginHint = cfg.login_hint;
+      if (claims) reqUp.claims = claims; else reqUp.prompt = "login";
+      var rUp = await pca.acquireTokenPopup(reqUp);
+      account = rUp.account || account;
+      return rUp.accessToken;
+    }
 
     // 1) Silent with a known account (refresh from cache).
     if (account) {
@@ -91,6 +105,7 @@
     if (opts.interactive) {
       var req = { scopes: scopes };
       if (cfg.login_hint) req.loginHint = cfg.login_hint;
+      if (claims) req.claims = claims;
       var r3 = await pca.acquireTokenPopup(req);
       account = r3.account || account;
       return r3.accessToken;
