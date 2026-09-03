@@ -122,8 +122,8 @@
       <div class="tab" data-view="quota">Quota <span id="quota-tab-badge" class="tab-badge hidden">0</span></div>
       <div class="tab" data-view="support">Remediation <span id="support-tab-badge" class="tab-badge hidden">0</span></div>
       <div class="tabs-actions">
-        <button id="btn-export-csv" class="btn btn--sm">Export CSV</button>
-        <button id="btn-export-xlsx" class="btn btn--sm">Export Excel</button>
+        <button id="btn-export-csv" class="btn btn--sm" title="Export the Regions table as CSV">Export Regions (CSV)</button>
+        <button id="btn-export-xlsx" class="btn btn--sm" title="Export the Regions table as Excel">Export Regions (Excel)</button>
       </div>
     </div>
 
@@ -961,12 +961,6 @@
     </div>
           </div>
           <div class="run-status" id="bom-status"></div>
-    <details>
-      <summary>Import from xlsx</summary>
-      <p class="muted">Prefill the form from a <code>bom_template.xlsx</code> or legacy <code>region_results_*.xlsx</code>. This does <strong>not</strong> save anything — review the prefilled fields, then click <strong>Save BOM</strong>.</p>
-      <input type="file" id="bom-import-file" accept=".xlsx" />
-      <button type="button" id="bom-import-go" class="link-btn">Import</button>
-    </details>
   </div>
   <footer>
     <button type="button" id="bom-cancel" class="btn">Cancel</button>
@@ -1023,6 +1017,6 @@
 
 <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
 
-<script src="app.js?v=2026090313"></script>
+<script src="app.js?v=2026090314"></script>
 </body>
 </html>

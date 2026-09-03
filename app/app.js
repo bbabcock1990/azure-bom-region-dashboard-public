@@ -5903,7 +5903,6 @@ async function openBomModal(bomId, opts = {}) {
   document.getElementById("bom-regions-search").value = "";
   document.getElementById("bom-regions-filter").value = "all";
   document.getElementById("bom-skus-tbody").innerHTML = "";
-  document.getElementById("bom-import-file").value = "";
   BOM_EDIT.current = null;
   BOM_EDIT.serviceTiers = {};
 
@@ -6748,40 +6747,6 @@ async function saveBom() {
   } catch (e) {
     setBomStatus(netErrLine(e), "error");
     document.getElementById("bom-save").disabled = false;
-  }
-}
-
-async function importBomFromXlsx() {
-  const file = document.getElementById("bom-import-file").files[0];
-  if (!file) return setBomStatus("Pick an xlsx file first.", "error");
-  setBomStatus("Importing…", "info");
-  const fd = new FormData();
-  fd.append("file", file);
-  try {
-    const r = await apiFetch("/api/bom/import_xlsx", { method: "POST", body: fd });
-    const body = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      return setBomStatus(errLine(body, r.statusText), "error");
-    }
-    if (body.customer_name && !document.getElementById("bom-customer").value.trim()) {
-      document.getElementById("bom-customer").value = body.customer_name;
-    }
-    if (Array.isArray(body.services)) {
-      setBomSelectedServices(body.services.map(s => s.name || s));
-    }
-    if (Array.isArray(body.required_skus) && body.required_skus.length) {
-      document.getElementById("bom-skus-tbody").innerHTML = "";
-      body.required_skus.forEach(addBomSkuRow);
-      renderBomSkuFamilyOptions();
-    }
-    const warns = (body.warnings || []).map(w => `<li>${escapeHtml(w)}</li>`).join("");
-    const warnHtml = warns ? `<ul style="margin:.25rem 0 0 1rem;font-size:.8rem;">${warns}</ul>` : "";
-    setBomStatus(
-      `Prefilled from <code>${escapeHtml(body.source_format || "xlsx")}</code>. Review and click <strong>Save BOM</strong>.${warnHtml}`,
-      "info",
-    );
-  } catch (e) {
-    setBomStatus(netErrLine(e), "error");
   }
 }
 
@@ -9631,7 +9596,6 @@ function init() {
       await ensureBomSkuFamilies(true);
     });
   }
-  document.getElementById("bom-import-go").addEventListener("click", importBomFromXlsx);
   document.getElementById("bom-services-filter").addEventListener("input", (ev) => filterBomServices(ev.target.value));
   document.getElementById("bom-services-select-all").addEventListener("click", () => {
     document.querySelectorAll('#bom-services-list label:not(.hidden) input[data-bom-svc]').forEach(cb => { cb.checked = true; });
