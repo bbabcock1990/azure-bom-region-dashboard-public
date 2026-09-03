@@ -77,15 +77,17 @@ async def main(req: func.HttpRequest) -> func.HttpResponse:
     severity = body.get("severity")
     detail = body.get("detail")
     bom_id = body.get("bom_id")
-    dry_run = bool(body.get("dry_run", True))
     demo = _demo_mode()
     try:
         new_limit = int(body.get("new_limit") or 0)
     except (TypeError, ValueError):
         new_limit = 0
 
+    # Dry-run/preview was removed from the product: every submission is a real
+    # Microsoft.Support ticket. Demo mode is the only path that skips the Azure
+    # call (it has no token and must never file real tickets).
     token: Optional[str] = None
-    if not dry_run and not demo:
+    if not demo:
         token_getter = getattr(
             auth_token, "get_arm_token_for_subscription", auth_token.get_arm_token
         )
@@ -108,7 +110,7 @@ async def main(req: func.HttpRequest) -> func.HttpResponse:
             severity=severity,
             detail=detail,
             bom_id=bom_id,
-            dry_run=dry_run,
+            dry_run=False,
             token=token,
             demo_mode=demo,
         )

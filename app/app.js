@@ -8962,8 +8962,7 @@ function _supportHtml() {
     <div class="support-intro">
       <h2>Support tickets</h2>
       <p class="muted">Turn a deployment blocker into an Azure support request — a <strong>quota increase</strong>
-      or a <strong>zonal / restricted-SKU access</strong> ticket. Preview builds the exact request with no Azure call;
-      submitting files it via <code>Microsoft.Support</code>.${demo ? " <strong>Demo mode: submission is disabled.</strong>" : ""}</p>
+      or a <strong>zonal / restricted-SKU access</strong> ticket, filed via <code>Microsoft.Support</code>.${demo ? " <strong>Demo mode: submission is disabled.</strong>" : ""}</p>
     </div>
 
     ${_renderRemediationPlanHtml()}
@@ -8996,7 +8995,6 @@ function _supportHtml() {
         <label>Severity <select id="sup-sev">${sevOpts}</select></label>
       </div>
       <div class="support-form-actions">
-        <button type="button" class="btn" id="sup-preview">Preview (dry-run)</button>
         <button type="button" class="btn btn--accent" id="sup-submit" ${demo ? "disabled title='Disabled in demo mode'" : ""}>Submit to Azure</button>
       </div>
       <pre class="support-preview hidden" id="sup-preview-box"></pre>
@@ -9254,9 +9252,8 @@ function _supportGatherForm() {
   return body;
 }
 
-async function _supportCreate(dryRun) {
+async function _supportCreate() {
   const body = _supportGatherForm();
-  body.dry_run = dryRun;
   if (!body.subscription_id) { showToast("Pick a subscription first.", "warning"); return; }
   if (!body.region) { showToast("Pick a region first.", "warning"); return; }
   if (!body.family) { showToast("Pick a SKU family first.", "warning"); return; }
@@ -9266,31 +9263,29 @@ async function _supportCreate(dryRun) {
   if ((body.kind === "quota" || body.kind === "technical") && !(body.new_limit > 0)) {
     showToast("Enter a target vCPU limit.", "warning"); return;
   }
-  if (!dryRun) {
-    const ok = await showConfirm(
-      `Submit a real ${body.kind} support ticket to Azure for ${body.region}?`,
-      { title: "Submit support ticket", confirmLabel: "Submit to Azure" }
-    );
-    if (!ok) return;
-  }
+  const ok = await showConfirm(
+    `Submit a real ${body.kind} support ticket to Azure for ${body.region}?`,
+    { title: "Submit support ticket", confirmLabel: "Submit to Azure" }
+  );
+  if (!ok) return;
   const box = document.getElementById("sup-preview-box");
+  const btn = document.getElementById("sup-submit");
+  const original = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; btn.textContent = "Submitting…"; }
+  if (box) { box.classList.add("hidden"); box.textContent = ""; }
   try {
     const res = await apiJson("/api/support/tickets", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     });
     const ticket = res.ticket;
-    if (dryRun) {
-      SUPPORT.lastPreview = ticket;
-      if (box) { box.textContent = JSON.stringify(ticket.payload, null, 2); box.classList.remove("hidden"); }
-      showToast("Preview built (no Azure call).", "success");
-    } else {
-      showToast(`Ticket submitted: ${ticket.azure_ticket_id || ticket.ticket_name}`, "success");
-      _autoRecheckAfterTicket(body.kind, body.region, body.subscription_id);
-    }
+    showToast(`Ticket submitted: ${ticket.azure_ticket_id || ticket.ticket_name}`, "success");
+    _autoRecheckAfterTicket(body.kind, body.region, body.subscription_id);
     await _supportReloadTickets();
   } catch (e) {
     showToast(`Ticket failed: ${e.message}`, "error");
     if (box && e.body) { box.textContent = JSON.stringify(e.body, null, 2); box.classList.remove("hidden"); }
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = original || "Submit to Azure"; }
   }
 }
 
@@ -9546,10 +9541,8 @@ function _wireSupportTab(view) {
     );
   });
   _supportLoadAzureTickets();
-  const prev = view.querySelector("#sup-preview");
-  if (prev) prev.addEventListener("click", () => _supportCreate(true));
   const sub = view.querySelector("#sup-submit");
-  if (sub) sub.addEventListener("click", () => _supportCreate(false));
+  if (sub) sub.addEventListener("click", () => _supportCreate());
 
   view.querySelector("#support-blockers-body").addEventListener("click", (ev) => {
     const btn = ev.target.closest("[data-prefill]");
