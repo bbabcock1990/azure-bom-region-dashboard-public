@@ -8301,14 +8301,14 @@ function _openConfidenceLegend() {
   overlay.id = "conf-legend-overlay";
   overlay.className = "conf-legend-overlay";
   const rows = _CONF_LEGEND.map(t =>
-    `<li><span class="conf-badge ${t.cls}">${escapeHtml(t.text)}</span><span class="conf-legend-desc">${escapeHtml(t.desc)}</span></li>`
+    `<li><span class="conf-legend-key"><span class="conf-dot ${t.cls}"></span><span class="conf-badge ${t.cls}">${escapeHtml(t.text)}</span></span><span class="conf-legend-desc">${escapeHtml(t.desc)}</span></li>`
   ).join("");
   overlay.innerHTML = `<div class="conf-legend-modal" role="dialog" aria-label="Confidence levels">
       <div class="conf-legend-head">
         <strong>How confident is each verdict?</strong>
         <button type="button" class="conf-legend-close" aria-label="Close">✕</button>
       </div>
-      <p class="muted">Verdicts are graded by the strength of the evidence behind them:</p>
+      <p class="muted">The colored <span class="conf-dot conf-validated" style="vertical-align:middle"></span> dot beside each region's verdict — in the <strong>Regions&nbsp;→&nbsp;Table</strong> and on each best-region card — shows how strong the evidence behind that verdict is:</p>
       <ul class="conf-legend-list">${rows}</ul>
       <p class="muted conf-legend-foot">Use <strong>⚡ Raise confidence</strong> to run read-only live probes across every region — it creates nothing.</p>
     </div>`;

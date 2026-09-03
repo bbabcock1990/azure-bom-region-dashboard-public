@@ -1459,7 +1459,8 @@ table.region-table tbody tr.selected td { background: var(--ms-blue-light); }
 .conf-legend-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
 .conf-legend-close { background: none; border: none; font-size: 16px; cursor: pointer; color: var(--text-secondary); }
 .conf-legend-list { list-style: none; padding: 0; margin: 10px 0; display: flex; flex-direction: column; gap: 10px; }
-.conf-legend-list li { display: grid; grid-template-columns: 120px 1fr; gap: 10px; align-items: start; }
+.conf-legend-list li { display: grid; grid-template-columns: 150px 1fr; gap: 10px; align-items: center; }
+.conf-legend-key { display: inline-flex; align-items: center; gap: 7px; }
 .conf-legend-desc { font-size: 13px; color: var(--text-secondary); }
 .conf-legend-foot { margin-top: 8px; font-size: 12px; }
 
