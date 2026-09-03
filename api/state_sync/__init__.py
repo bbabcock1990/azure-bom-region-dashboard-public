@@ -42,8 +42,13 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     action = _action(req)
 
     if req.method == "GET" and action == "export":
+        # The browser's periodic localStorage backup passes ?blobs=false to omit
+        # the heavy snapshot blobs (which have their own .zip path) so the small
+        # BOM/run tables always fit under the ~5MB localStorage quota.
+        raw = (req.params.get("blobs") or "").strip().lower()
+        include_blobs = raw not in ("0", "false", "no", "off")
         try:
-            return _json(storage.export_state())
+            return _json(storage.export_state(include_blobs=include_blobs))
         except Exception:
             log.exception("state export failed")
             return _json({"error": "export_failed"}, 500)

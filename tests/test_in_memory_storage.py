@@ -105,6 +105,34 @@ def test_export_import_round_trip():
     auth_token.clear_request_context()
 
 
+def test_export_can_exclude_blobs_for_browser_backup():
+    # The lightweight browser localStorage backup passes include_blobs=False so
+    # the heavy snapshot blobs are omitted while BOM/run tables still round-trip.
+    _bind("carol@example.com")
+    storage.get_table_client("boms").upsert_entity(
+        {"PartitionKey": "bom", "RowKey": "1", "name": "Carol", "skus": 5}
+    )
+    storage.get_blob_container("snapshots").upload_blob(
+        "run1/data.json", '{"big":"blob"}', overwrite=True
+    )
+    slim = storage.export_state(include_blobs=False)
+    full = storage.export_state(include_blobs=True)
+    auth_token.clear_request_context()
+
+    # Tables (BOMs) are always present; blobs are dropped from the slim doc.
+    assert "tbl_boms" in slim["tables"]
+    assert slim["blobs"] == {}
+    assert full["blobs"]["snapshots"]["run1/data.json"]
+
+    # Importing the slim doc restores the BOM but no snapshot blobs.
+    _bind("dave@example.com")
+    summary = storage.import_state(slim)
+    assert summary["rows"] == 1 and summary["blobs"] == 0
+    rows = storage.get_table_client("boms").list_entities()
+    assert len(rows) == 1 and rows[0]["skus"] == 5
+    auth_token.clear_request_context()
+
+
 def test_import_replaces_existing_state():
     _bind("alice@example.com")
     tbl = storage.get_table_client("boms")
