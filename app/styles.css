@@ -3346,6 +3346,67 @@ html.filters-collapsed-init.bomnav-collapsed-init .layout { grid-template-column
   .coach { animation: coach-in .2s ease-out both; }
   .theme-toggle-btn.coach-pulse { animation: none; }
 }
+
+/* ── Interactive coach-mark tour (spotlight + arrow bubble) ─────────────── */
+.cm-ring {
+  position: fixed;
+  z-index: 6000;
+  border-radius: 8px;
+  pointer-events: none;
+  box-shadow:
+    0 0 0 9999px rgba(6, 12, 24, 0.62),
+    0 0 0 2px var(--ms-blue, #2f6feb),
+    0 0 20px 5px rgba(47, 111, 235, 0.55);
+  transition: top .2s ease, left .2s ease, width .2s ease, height .2s ease;
+}
+.cm-bubble {
+  --cm-bg: #173257;
+  position: fixed;
+  z-index: 6001;
+  max-width: 328px;
+  background: linear-gradient(160deg, #1d3a63 0%, #142a4c 100%);
+  color: #eaf2ff;
+  border: 1px solid #2f6feb;
+  border-radius: 12px;
+  padding: 14px 16px;
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.55);
+  pointer-events: auto;
+  animation: cm-pop .18s ease-out both;
+}
+.cm-arrow {
+  position: absolute;
+  width: 14px; height: 14px;
+  background: #1d3a63;
+  border: 1px solid #2f6feb;
+  transform: rotate(45deg);
+}
+.cm-count {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #8fb4ef;
+  margin-bottom: 4px;
+}
+.cm-title { font-weight: 700; font-size: 1.0rem; margin-bottom: 5px; color: #fff; }
+.cm-text { margin: 0 0 12px; font-size: 0.9rem; line-height: 1.5; color: #dbe7fb; }
+.cm-text strong { color: #fff; }
+.cm-text code {
+  background: rgba(0,0,0,0.35); padding: 1px 6px; border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.82rem; color: #ffd479;
+}
+.cm-actions { display: flex; align-items: center; gap: 10px; }
+.cm-actions .cm-spacer { flex: 1 1 auto; }
+.cm-actions .link-btn { color: #b9d2f7; }
+.cm-actions .link-btn:hover { color: #fff; }
+@keyframes cm-pop {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cm-ring { transition: none; }
+  .cm-bubble { animation: none; }
+}
+
 .dataset-upload-btn { cursor: pointer; margin: 0; }
 .dataset-status { font-size: .85em; }
 .ds-badge {

@@ -7588,11 +7588,18 @@ function gettingStartedSteps() {
       body:
         `<p>Open <strong>Settings</strong> to set your <strong>support-ticket owner</strong> and ` +
         `refresh the <strong>region, latency, and SKU</strong> datasets, so every analysis uses ` +
-        `the latest Azure data.</p>`,
+        `the latest Azure data.</p>` +
+        `<p class="muted">Choose <strong>Open Settings & guide me</strong> and arrows will walk you ` +
+        `through exactly what to fill in.</p>`,
       actions: [{
-        label: "⚙ Open Settings",
+        label: "⚙ Open Settings & guide me",
         className: "btn btn--accent btn--sm",
-        run: () => { _setOnboardSettingsDone(); dismissSettingsCoach(true); switchView("settings"); },
+        run: () => {
+          _setOnboardSettingsDone();
+          dismissSettingsCoach(true);
+          switchView("settings");
+          setTimeout(() => startSettingsCoachTour(), 350);
+        },
         close: true,
       }],
     },
@@ -7602,12 +7609,16 @@ function gettingStartedSteps() {
         `<p>A <strong>BOM</strong> describes what the customer deploys: the Azure ` +
         `<strong>services</strong>, the VM <strong>SKU families</strong>, and <strong>required ` +
         `cores</strong>. Name it, pick the subscription(s), then choose services, regions, and SKUs.</p>` +
-        `<p class="muted">Tip: set a <strong>Preferred source region</strong> so latency is measured ` +
-        `from the customer's primary region.</p>`,
+        `<p class="muted">Choose <strong>New BOM & guide me</strong> and arrows will point at each ` +
+        `field as you go.</p>`,
       actions: [{
-        label: "+ New BOM",
+        label: "+ New BOM & guide me",
         className: "btn btn--accent btn--sm",
-        run: () => openBomModal(null, { create: true }),
+        run: () => {
+          Promise.resolve(openBomModal(null, { create: true }))
+            .then(() => startBomWizardCoachTour())
+            .catch(() => startBomWizardCoachTour());
+        },
         close: true,
       }],
     },
@@ -10230,3 +10241,220 @@ function maybeShowSettingsCoach() {
   // Any click that opens Settings should also retire the coachmark.
   gear.addEventListener("click", () => dismissSettingsCoach(true), { once: true });
 }
+
+// ---------------------------------------------------------------- Coach-mark tour engine
+//
+// A reusable spotlight walkthrough: dims the page, rings a real UI element, and
+// shows an arrow bubble ("click here / fill this out / this does xyz") with
+// Back / Next / Skip. Each step can run a `before()` hook to open the right view,
+// modal or wizard step before pointing at its `target` (a CSS selector or a
+// function returning an element). Missing targets are skipped gracefully.
+
+const CM_TOUR = { steps: null, i: 0, ring: null, bubble: null, arrow: null, inner: null, target: null, reposition: null, token: 0 };
+
+function _cmSleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function _cmClamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+async function _cmResolveTarget(target, tries) {
+  tries = tries || 12;
+  for (let k = 0; k < tries; k++) {
+    let el = null;
+    try { el = (typeof target === "function") ? target() : document.querySelector(target); }
+    catch (_e) { el = null; }
+    if (el && el.getBoundingClientRect && el.offsetParent !== null) return el;
+    await _cmSleep(120);
+  }
+  // Last attempt even if offsetParent is null (e.g. fixed elements).
+  try { return (typeof target === "function") ? target() : document.querySelector(target); }
+  catch (_e) { return null; }
+}
+
+function stopCoachmarkTour() {
+  CM_TOUR.token++;
+  if (CM_TOUR.reposition) {
+    window.removeEventListener("resize", CM_TOUR.reposition);
+    window.removeEventListener("scroll", CM_TOUR.reposition, true);
+    CM_TOUR.reposition = null;
+  }
+  [CM_TOUR.ring, CM_TOUR.bubble].forEach(el => { if (el && el.parentNode) el.parentNode.removeChild(el); });
+  CM_TOUR.ring = CM_TOUR.bubble = CM_TOUR.arrow = CM_TOUR.inner = CM_TOUR.target = CM_TOUR.steps = null;
+  CM_TOUR.i = 0;
+}
+
+function startCoachmarkTour(steps, opts) {
+  opts = opts || {};
+  stopCoachmarkTour();
+  const list = (steps || []).filter(Boolean);
+  if (!list.length) return;
+  const myToken = ++CM_TOUR.token;
+  CM_TOUR.steps = list;
+  CM_TOUR.i = 0;
+
+  const ring = document.createElement("div"); ring.className = "cm-ring";
+  const bubble = document.createElement("div");
+  bubble.className = "cm-bubble";
+  bubble.setAttribute("role", "dialog");
+  bubble.setAttribute("aria-label", "Guided walkthrough");
+  const arrow = document.createElement("div"); arrow.className = "cm-arrow";
+  const inner = document.createElement("div"); inner.className = "cm-inner";
+  bubble.appendChild(arrow); bubble.appendChild(inner);
+  document.body.appendChild(ring); document.body.appendChild(bubble);
+  CM_TOUR.ring = ring; CM_TOUR.bubble = bubble; CM_TOUR.arrow = arrow; CM_TOUR.inner = inner;
+
+  function place() {
+    const t = CM_TOUR.target;
+    if (!t) return;
+    const r = t.getBoundingClientRect();
+    const pad = 6;
+    ring.style.top = (r.top - pad) + "px";
+    ring.style.left = (r.left - pad) + "px";
+    ring.style.width = (r.width + pad * 2) + "px";
+    ring.style.height = (r.height + pad * 2) + "px";
+
+    const bw = bubble.offsetWidth, bh = bubble.offsetHeight;
+    const vw = window.innerWidth, vh = window.innerHeight, gap = 14;
+    let placement;
+    if (r.bottom + gap + bh <= vh) placement = "bottom";
+    else if (r.top - gap - bh >= 0) placement = "top";
+    else if (r.right + gap + bw <= vw) placement = "right";
+    else placement = "left";
+
+    arrow.style.top = arrow.style.left = arrow.style.right = arrow.style.bottom = "";
+    let top, left;
+    if (placement === "bottom" || placement === "top") {
+      left = _cmClamp(r.left + r.width / 2 - bw / 2, 8, vw - bw - 8);
+      const ax = _cmClamp(r.left + r.width / 2 - left - 7, 12, bw - 20);
+      if (placement === "bottom") { top = r.bottom + gap; arrow.style.top = "-7px"; }
+      else { top = r.top - gap - bh; arrow.style.bottom = "-7px"; }
+      arrow.style.left = ax + "px";
+    } else {
+      top = _cmClamp(r.top + r.height / 2 - bh / 2, 8, vh - bh - 8);
+      const ay = _cmClamp(r.top + r.height / 2 - top - 7, 12, bh - 20);
+      if (placement === "right") { left = r.right + gap; arrow.style.left = "-7px"; }
+      else { left = r.left - gap - bw; arrow.style.right = "-7px"; }
+      arrow.style.top = ay + "px";
+    }
+    bubble.style.top = Math.round(top) + "px";
+    bubble.style.left = Math.round(left) + "px";
+  }
+  CM_TOUR.reposition = place;
+  window.addEventListener("resize", place);
+  window.addEventListener("scroll", place, true);
+
+  async function show() {
+    if (myToken !== CM_TOUR.token) return; // superseded/stopped
+    const step = CM_TOUR.steps[CM_TOUR.i];
+    if (!step) { finish(); return; }
+    if (step.before) { try { await step.before(); } catch (_e) {} }
+    if (myToken !== CM_TOUR.token) return;
+    const el = await _cmResolveTarget(step.target);
+    if (myToken !== CM_TOUR.token) return;
+    if (!el) { CM_TOUR.i++; return show(); }
+    CM_TOUR.target = el;
+    try { el.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" }); } catch (_e) {}
+    await _cmSleep(step.settle || 240);
+    if (myToken !== CM_TOUR.token) return;
+
+    const last = CM_TOUR.i === CM_TOUR.steps.length - 1;
+    inner.innerHTML =
+      `<div class="cm-count">Step ${CM_TOUR.i + 1} of ${CM_TOUR.steps.length}</div>` +
+      `<div class="cm-title">${escapeHtml(step.title || "")}</div>` +
+      `<div class="cm-text">${step.text || ""}</div>` +
+      `<div class="cm-actions">` +
+        `<button type="button" class="link-btn" data-cm="skip">Skip</button>` +
+        `<span class="cm-spacer"></span>` +
+        (CM_TOUR.i > 0 ? `<button type="button" class="btn btn--sm" data-cm="back">Back</button>` : "") +
+        `<button type="button" class="btn btn--accent btn--sm" data-cm="next">${last ? "Done" : "Next →"}</button>` +
+      `</div>`;
+    inner.querySelectorAll("[data-cm]").forEach(b => b.addEventListener("click", () => {
+      const a = b.dataset.cm;
+      if (a === "skip") return finish();
+      if (a === "back") { CM_TOUR.i = Math.max(0, CM_TOUR.i - 1); return show(); }
+      if (CM_TOUR.i >= CM_TOUR.steps.length - 1) return finish();
+      CM_TOUR.i++; show();
+    }));
+    place();
+  }
+
+  function finish() {
+    if (myToken !== CM_TOUR.token) return;
+    stopCoachmarkTour();
+    if (typeof opts.onDone === "function") { try { opts.onDone(); } catch (_e) {} }
+  }
+
+  show();
+}
+
+// Contextual walkthrough of the Settings screen — points at the ticket-owner
+// fields and the datasets refresh. Launched from Getting Started step 2.
+function startSettingsCoachTour() {
+  startCoachmarkTour([
+    {
+      target: '#owner-first',
+      title: "Set your ticket owner",
+      text: "Fill in the contact <strong>name</strong>, <strong>email</strong> and <strong>country</strong>. " +
+        "Azure requires these on every support ticket — the dashboard reuses them as the defaults.",
+      before: () => switchSettingsTab("owner"),
+    },
+    {
+      target: '#owner-save',
+      title: "Save the owner",
+      text: "Click <strong>Save owner</strong>. It's stored in your browser only — nothing goes to the server.",
+    },
+    {
+      target: '[data-settings-tab="datasets"]',
+      title: "Refresh your Azure data",
+      text: "Now open <strong>Model datasets</strong> — the regions, latency and SKU reference data the analysis is built on.",
+      before: () => switchSettingsTab("owner"),
+    },
+    {
+      target: '#datasets-list',
+      title: "Pull the latest from Azure",
+      text: "Click <strong>Refresh from Azure</strong> on each dataset so your analysis uses current region &amp; SKU availability. " +
+        "That's it — head back and create your first BOM.",
+      before: () => switchSettingsTab("datasets"),
+    },
+  ]);
+}
+
+// Contextual walkthrough of the BOM wizard — points at each field and what it
+// drives. Launched from Getting Started step 3 after the wizard opens.
+function startBomWizardCoachTour() {
+  startCoachmarkTour([
+    {
+      target: '#bom-tag',
+      title: "Name the BOM",
+      text: "A short, memorable label (e.g. <code>Contoso-Prod</code>) so you can tell BOMs apart in the left-hand list.",
+      before: () => bomWizardGoTo(1),
+    },
+    {
+      target: '#bom-sub',
+      title: "Pick the subscription(s)",
+      text: "Select the customer subscription(s) to analyze. SKU, quota and region availability are read from these.",
+    },
+    {
+      target: '#bom-preferred-region',
+      title: "Preferred source region",
+      text: "Optional: the customer's primary region. Latency to every other region is measured <em>from</em> here, and it becomes the default source on the Latency tab.",
+    },
+    {
+      target: '#bom-wizard-nav [data-wstep="2"]',
+      title: "Services & Regions",
+      text: "Step 2: choose the Azure <strong>services</strong> and the <strong>regions</strong> to include in the analysis.",
+      before: () => bomWizardGoTo(1),
+    },
+    {
+      target: '#bom-wizard-nav [data-wstep="3"]',
+      title: "SKUs & Capacity",
+      text: "Step 3: add VM <strong>SKU families</strong> and the <strong>required cores</strong> — this is what drives the Quota Status check.",
+      before: () => bomWizardGoTo(1),
+    },
+    {
+      target: '#bom-wizard-next',
+      title: "Save, then run",
+      text: "Click <strong>Next</strong> through each step and <strong>Save</strong>. Then hit <strong>▶ Refresh analysis</strong> in the BOM's panel to analyze all ~38 regions.",
+      before: () => bomWizardGoTo(1),
+    },
+  ]);
+}
+
