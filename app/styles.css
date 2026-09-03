@@ -3350,7 +3350,7 @@ html.filters-collapsed-init.bomnav-collapsed-init .layout { grid-template-column
 /* ── Interactive coach-mark tour (spotlight + arrow bubble) ─────────────── */
 .cm-ring {
   position: fixed;
-  z-index: 6000;
+  z-index: 9600;
   border-radius: 8px;
   pointer-events: none;
   box-shadow:
@@ -3362,7 +3362,7 @@ html.filters-collapsed-init.bomnav-collapsed-init .layout { grid-template-column
 .cm-bubble {
   --cm-bg: #173257;
   position: fixed;
-  z-index: 6001;
+  z-index: 9601;
   max-width: 328px;
   background: linear-gradient(160deg, #1d3a63 0%, #142a4c 100%);
   color: #eaf2ff;
