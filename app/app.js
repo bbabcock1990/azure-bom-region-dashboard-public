@@ -324,34 +324,52 @@ function scheduleStateSave() {
 }
 
 let _backupQuotaToastShown = false;
+// Try to persist `txt` to localStorage; on QuotaExceeded strip the snapshot
+// blobs and retry so BOM definitions + run history always survive a reload even
+// when the last-analysis payload is too big. Returns true if anything was saved.
+function _writeStateBackup(txt) {
+  const key = _stateKey();
+  try {
+    localStorage.setItem(key, txt);
+    return true;
+  } catch (e) {
+    // Fall back to a tables-only doc (drop the heavy blobs client-side, no
+    // extra round-trip) so the BOMs still restore; snapshots stay .zip-only.
+    try {
+      const doc = JSON.parse(txt);
+      doc.blobs = {};
+      localStorage.setItem(key, JSON.stringify(doc));
+      return true;
+    } catch (e2) {
+      console.warn("state save skipped (localStorage full)", e2);
+      return false;
+    }
+  }
+}
+
 async function saveStateToLocal() {
   if (!_stateSyncEnabled() || _stateSaveInFlight) return;
   _stateSaveInFlight = true;
   try {
-    // Back up only the lightweight BOM/run tables (blobs=false) — snapshot
-    // blobs are large and keep their own .zip download/import path, so we keep
-    // the browser backup well under the ~5MB localStorage quota.
-    const res = await apiFetch("/api/state/export?blobs=false");
+    // Back up the light BOM/run tables plus only the latest analysis per BOM
+    // (blobs=latest) so the last result restores on reload while staying under
+    // the ~5MB localStorage quota. Older snapshots keep their .zip-only path.
+    const res = await apiFetch("/api/state/export?blobs=latest");
     if (!res.ok) return;
     const txt = await res.text();
-    try {
-      localStorage.setItem(_stateKey(), txt);
+    const saved = _writeStateBackup(txt);
+    if (saved) {
       _backupQuotaToastShown = false;
-    } catch (e) {
-      // QuotaExceededError — even the slim state exceeds localStorage. Keep
-      // working in this session (server RAM); it just won't survive a reload.
-      // Show the warning once per session to avoid a stack of duplicate toasts.
-      console.warn("state save skipped (localStorage full)", e);
-      if (!_backupQuotaToastShown) {
-        _backupQuotaToastShown = true;
-        try {
-          showToast(
-            "Browser backup is full — your BOMs may not restore after a reload. " +
-            "Use Settings → Data & storage to download a .zip backup.",
-            "warn"
-          );
-        } catch (_) {}
-      }
+    } else if (!_backupQuotaToastShown) {
+      // Even the tables-only doc exceeded localStorage — warn once per session.
+      _backupQuotaToastShown = true;
+      try {
+        showToast(
+          "Browser backup is full — your BOMs may not restore after a reload. " +
+          "Use Settings → Data & storage to download a .zip backup.",
+          "warn"
+        );
+      } catch (_) {}
     }
     try { updateStorageGauge(); } catch (_) {}
   } catch (e) {
@@ -7020,7 +7038,65 @@ function showToast(message, type = "success") {
   setTimeout(() => toast.remove(), 5200);
 }
 
-// Build a safe "<strong>code</strong>: message" line for the status banners
+// In-app confirmation dialog returning a Promise<boolean>. Native window.confirm
+// can be silently suppressed by the browser (the "prevent additional dialogs"
+// checkbox, sandboxed frames, or corporate policy), which would make a gated
+// action — e.g. submitting a real Azure support ticket — quietly do nothing.
+// This modal is a real DOM element, so it can never be suppressed.
+function showConfirm(message, opts = {}) {
+  const title = opts.title || "Please confirm";
+  const confirmLabel = opts.confirmLabel || "Confirm";
+  const cancelLabel = opts.cancelLabel || "Cancel";
+  const danger = !!opts.danger;
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "app-confirm-overlay";
+    const dialog = document.createElement("div");
+    dialog.className = "app-confirm";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    const h = document.createElement("h3");
+    h.className = "app-confirm-title";
+    h.textContent = title;
+    const p = document.createElement("p");
+    p.className = "app-confirm-msg";
+    p.textContent = message;
+    const actions = document.createElement("div");
+    actions.className = "app-confirm-actions";
+    const cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.className = "btn btn--sm";
+    cancelBtn.textContent = cancelLabel;
+    const okBtn = document.createElement("button");
+    okBtn.type = "button";
+    okBtn.className = "btn btn--sm " + (danger ? "btn--danger" : "btn--accent");
+    okBtn.textContent = confirmLabel;
+    actions.appendChild(cancelBtn);
+    actions.appendChild(okBtn);
+    dialog.appendChild(h);
+    dialog.appendChild(p);
+    dialog.appendChild(actions);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    let done = false;
+    const close = (val) => {
+      if (done) return;
+      done = true;
+      document.removeEventListener("keydown", onKey);
+      overlay.remove();
+      resolve(val);
+    };
+    const onKey = (ev) => {
+      if (ev.key === "Escape") close(false);
+      else if (ev.key === "Enter") close(true);
+    };
+    cancelBtn.addEventListener("click", () => close(false));
+    okBtn.addEventListener("click", () => close(true));
+    overlay.addEventListener("click", (ev) => { if (ev.target === overlay) close(false); });
+    document.addEventListener("keydown", onKey);
+    setTimeout(() => okBtn.focus(), 0);
+  });
+}
 // (which render via innerHTML). All dynamic fields from an API error envelope
 // are escaped so a server- or user-derived message can't inject markup/script.
 function errLine(body, fallback) {
@@ -9033,7 +9109,11 @@ async function _supportCloseAzureTicket(ticketName, subId, title, btn) {
   subId = (subId || "").trim();
   if (!ticketName || !subId) { showToast("Missing ticket details to close.", "warning"); return; }
   const label = title || ticketName;
-  if (!confirm(`Close Azure support ticket "${label}"?\n\nAzure only allows closing tickets that aren't actively assigned to an engineer.`)) return;
+  const ok = await showConfirm(
+    `Close Azure support ticket "${label}"?\n\nAzure only allows closing tickets that aren't actively assigned to an engineer.`,
+    { title: "Close support ticket", confirmLabel: "Close ticket", danger: true }
+  );
+  if (!ok) return;
   const original = btn ? btn.textContent : "";
   if (btn) { btn.disabled = true; btn.textContent = "Closing…"; }
   try {
@@ -9186,7 +9266,13 @@ async function _supportCreate(dryRun) {
   if ((body.kind === "quota" || body.kind === "technical") && !(body.new_limit > 0)) {
     showToast("Enter a target vCPU limit.", "warning"); return;
   }
-  if (!dryRun && !confirm(`Submit a real ${body.kind} support ticket to Azure for ${body.region}?`)) return;
+  if (!dryRun) {
+    const ok = await showConfirm(
+      `Submit a real ${body.kind} support ticket to Azure for ${body.region}?`,
+      { title: "Submit support ticket", confirmLabel: "Submit to Azure" }
+    );
+    if (!ok) return;
+  }
   const box = document.getElementById("sup-preview-box");
   try {
     const res = await apiJson("/api/support/tickets", {

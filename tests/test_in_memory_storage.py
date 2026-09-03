@@ -133,6 +133,33 @@ def test_export_can_exclude_blobs_for_browser_backup():
     auth_token.clear_request_context()
 
 
+def test_export_latest_snapshots_only_keeps_last_run_per_bom():
+    # The browser backup passes latest_snapshots_only=True so the last analysis
+    # per BOM restores on reload while older snapshots are dropped.
+    _bind("erin@example.com")
+    runs = storage.get_table_client("runs")
+    snaps = storage.get_blob_container("snapshots")
+    # BOM "b1": two succeeded runs — only the newest blob should be kept.
+    snaps.upload_blob("b1-old/data.json", '{"run":"old"}', overwrite=True)
+    snaps.upload_blob("b1-new/data.json", '{"run":"new"}', overwrite=True)
+    runs.upsert_entity({"PartitionKey": "b1", "RowKey": "2026-01-01", "status": "succeeded", "snapshot_blob": "b1-old/data.json"})
+    runs.upsert_entity({"PartitionKey": "b1", "RowKey": "2026-02-01", "status": "succeeded", "snapshot_blob": "b1-new/data.json"})
+    # BOM "b2": one succeeded run — its blob is kept.
+    snaps.upload_blob("b2/data.json", '{"run":"b2"}', overwrite=True)
+    runs.upsert_entity({"PartitionKey": "b2", "RowKey": "2026-01-15", "status": "succeeded", "snapshot_blob": "b2/data.json"})
+
+    doc = storage.export_state(include_blobs=True, latest_snapshots_only=True)
+    auth_token.clear_request_context()
+
+    kept = set(doc["blobs"].get("snapshots", {}).keys())
+    assert kept == {"b1-new/data.json", "b2/data.json"}, kept
+    # The full export keeps everything for the .zip path.
+    _bind("erin@example.com")
+    full = storage.export_state(include_blobs=True)
+    auth_token.clear_request_context()
+    assert "b1-old/data.json" in full["blobs"]["snapshots"]
+
+
 def test_import_replaces_existing_state():
     _bind("alice@example.com")
     tbl = storage.get_table_client("boms")

@@ -3193,6 +3193,27 @@ html.filters-collapsed-init.bomnav-collapsed-init .layout { grid-template-column
 .storage-usage-bar > span.is-warn { background: #d99a00; }
 .storage-usage-bar > span.is-danger { background: var(--warn, #D83B01); }
 .storage-usage-note { margin: 6px 0 0; font-size: 12px; }
+.app-confirm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(4, 8, 18, 0.62);
+  backdrop-filter: blur(2px);
+}
+.app-confirm {
+  width: min(440px, calc(100vw - 40px));
+  padding: 20px 22px;
+  border: 1px solid var(--border, #33415580);
+  border-radius: 12px;
+  background: var(--panel, #131a2b);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+}
+.app-confirm-title { margin: 0 0 8px; font-size: 16px; }
+.app-confirm-msg { margin: 0 0 18px; white-space: pre-line; color: var(--muted, #b7c0d8); }
+.app-confirm-actions { display: flex; justify-content: flex-end; gap: 10px; }
 .settings-storage-path code {
   display: inline-block;
   margin-top: 4px;
