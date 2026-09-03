@@ -656,10 +656,16 @@ def wipe_snapshot_blobs() -> int:
 _STATE_VERSION = 1
 
 
-def export_state() -> Dict:
+def export_state(include_blobs: bool = True) -> Dict:
     """Serialize the current signed-in customer's whole store to a JSON-able
     dict. Works in in-memory mode (per-user RAM) and, as a fallback, over the
-    on-disk backend so the same export/import path is testable everywhere."""
+    on-disk backend so the same export/import path is testable everywhere.
+
+    When ``include_blobs`` is False the snapshot blob payloads (the bulk of the
+    document) are omitted. This powers the lightweight browser localStorage
+    backup: BOM definitions and run metadata (the tables) are tiny and always
+    fit under the browser's ~5MB quota, while the heavy snapshot blobs keep
+    their own unbounded .zip download/import path."""
     tables: Dict[str, List] = {}
     blobs: Dict[str, Dict[str, str]] = {}
     with _lock:
@@ -678,11 +684,12 @@ def export_state() -> Dict:
                     f'SELECT pk, rk, data FROM "{phys}"'
                 ).fetchall()
                 tables[phys] = [[r[0], r[1], r[2]] for r in rows]
-            for cname, items in _mem_blob_store(key).items():
-                blobs[cname] = {
-                    n: base64.b64encode(b).decode("ascii")
-                    for n, b in items.items()
-                }
+            if include_blobs:
+                for cname, items in _mem_blob_store(key).items():
+                    blobs[cname] = {
+                        n: base64.b64encode(b).decode("ascii")
+                        for n, b in items.items()
+                    }
         else:
             conn = _connect()
             try:

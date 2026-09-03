@@ -3166,6 +3166,33 @@ html.filters-collapsed-init.bomnav-collapsed-init .layout { grid-template-column
 .settings-danger h3 { margin: 0 0 4px; font-size: 14px; }
 .settings-danger-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 4px 0 14px; }
 .settings-storage-path { margin: 8px 0 12px; }
+.storage-usage {
+  margin: 6px 0 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--border, #33415580);
+  border-radius: 10px;
+  background: rgba(122, 162, 255, 0.06);
+}
+.storage-usage.hidden { display: none; }
+.storage-usage-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.storage-usage-head strong { font-size: 14px; }
+.storage-usage-bar {
+  height: 10px;
+  border-radius: 6px;
+  background: rgba(148, 163, 184, 0.22);
+  overflow: hidden;
+}
+.storage-usage-bar > span {
+  display: block;
+  height: 100%;
+  width: 0%;
+  border-radius: 6px;
+  background: var(--accent, #2f6a4a);
+  transition: width 0.35s ease, background 0.2s ease;
+}
+.storage-usage-bar > span.is-warn { background: #d99a00; }
+.storage-usage-bar > span.is-danger { background: var(--warn, #D83B01); }
+.storage-usage-note { margin: 6px 0 0; font-size: 12px; }
 .settings-storage-path code {
   display: inline-block;
   margin-top: 4px;

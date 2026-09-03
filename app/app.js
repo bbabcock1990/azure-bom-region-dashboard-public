@@ -323,21 +323,37 @@ function scheduleStateSave() {
   _stateSaveTimer = setTimeout(saveStateToLocal, 1000);
 }
 
+let _backupQuotaToastShown = false;
 async function saveStateToLocal() {
   if (!_stateSyncEnabled() || _stateSaveInFlight) return;
   _stateSaveInFlight = true;
   try {
-    const res = await apiFetch("/api/state/export");
+    // Back up only the lightweight BOM/run tables (blobs=false) — snapshot
+    // blobs are large and keep their own .zip download/import path, so we keep
+    // the browser backup well under the ~5MB localStorage quota.
+    const res = await apiFetch("/api/state/export?blobs=false");
     if (!res.ok) return;
     const txt = await res.text();
     try {
       localStorage.setItem(_stateKey(), txt);
+      _backupQuotaToastShown = false;
     } catch (e) {
-      // QuotaExceededError — state too large for localStorage. Keep working in
-      // this session (server RAM); it just won't survive a reload.
+      // QuotaExceededError — even the slim state exceeds localStorage. Keep
+      // working in this session (server RAM); it just won't survive a reload.
+      // Show the warning once per session to avoid a stack of duplicate toasts.
       console.warn("state save skipped (localStorage full)", e);
-      try { showToast("Local backup skipped — data too large to save in this browser.", "warn"); } catch (_) {}
+      if (!_backupQuotaToastShown) {
+        _backupQuotaToastShown = true;
+        try {
+          showToast(
+            "Browser backup is full — your BOMs may not restore after a reload. " +
+            "Use Settings → Data & storage to download a .zip backup.",
+            "warn"
+          );
+        } catch (_) {}
+      }
     }
+    try { updateStorageGauge(); } catch (_) {}
   } catch (e) {
     console.warn("state export failed", e);
   } finally {
@@ -7694,6 +7710,46 @@ function loadDataSettings() {
   }
   const openBtn = document.getElementById("owner-open-folder");
   if (openBtn) openBtn.classList.toggle("hidden", !isLocal);
+  // The browser backup gauge only applies to the hosted (delegated) mode where
+  // localStorage is the durable store; hide it for the local desktop app.
+  const gauge = document.getElementById("storage-usage-block");
+  if (gauge) gauge.classList.toggle("hidden", !_stateSyncEnabled());
+  const refreshBtn = document.getElementById("storage-usage-refresh");
+  if (refreshBtn && !refreshBtn._wired) {
+    refreshBtn._wired = true;
+    refreshBtn.addEventListener("click", updateStorageGauge);
+  }
+  updateStorageGauge();
+}
+
+// Approximate the localStorage backup budget (~5MB, measured in UTF-16 code
+// units) and render the current usage as a labelled progress bar. Called when
+// the Data & storage tab opens and after every browser backup write.
+const _BROWSER_BACKUP_BUDGET_BYTES = 5 * 1024 * 1024;
+function updateStorageGauge() {
+  const fill = document.getElementById("storage-usage-fill");
+  const text = document.getElementById("storage-usage-text");
+  if (!fill || !text) return;
+  let usedBytes = 0;
+  try {
+    const raw = localStorage.getItem(_stateKey());
+    // localStorage stores strings as UTF-16, so ~2 bytes per code unit.
+    if (raw) usedBytes = raw.length * 2;
+  } catch (_) {}
+  const pct = Math.max(0, Math.min(100, (usedBytes / _BROWSER_BACKUP_BUDGET_BYTES) * 100));
+  fill.style.width = pct.toFixed(1) + "%";
+  fill.classList.toggle("is-warn", pct >= 75 && pct < 90);
+  fill.classList.toggle("is-danger", pct >= 90);
+  const bar = fill.parentElement;
+  if (bar) bar.setAttribute("aria-valuenow", Math.round(pct));
+  const fmt = (b) => b >= 1024 * 1024
+    ? (b / (1024 * 1024)).toFixed(2) + " MB"
+    : Math.max(1, Math.round(b / 1024)) + " KB";
+  let msg = `${fmt(usedBytes)} of ~5 MB used (${pct.toFixed(0)}%).`;
+  if (pct >= 90) msg += " Backup is nearly full — download a .zip below to preserve your data.";
+  else if (pct >= 75) msg += " Getting full — consider downloading a .zip backup.";
+  else msg += " Plenty of room for your BOMs and analysis history.";
+  text.textContent = msg;
 }
 
 async function loadOwnerSettings() {
