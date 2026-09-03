@@ -7693,7 +7693,7 @@ function _collectBomSupportOverride() {
 // Switch the active panel within the Settings view. Lazy-loads each tab's
 // data the first time (and on every re-open, so the content stays fresh).
 function switchSettingsTab(tab) {
-  const tabs = ["owner", "datasets", "pricing", "activity"];
+  const tabs = ["owner", "permissions", "datasets", "pricing", "activity"];
   if (!tabs.includes(tab)) tab = "owner";
   STATE.settingsTab = tab;
   document.querySelectorAll("[data-settings-tab]").forEach(btn => {
@@ -7705,6 +7705,7 @@ function switchSettingsTab(tab) {
     p.classList.toggle("is-active", p.getAttribute("data-settings-panel") === tab);
   });
   if (tab === "owner") loadOwnerSettings();
+  else if (tab === "permissions") loadPermissionsSettings();
   else if (tab === "datasets") loadDatasetsSettings();
   else if (tab === "pricing") loadPricingSettings();
   else if (tab === "activity") loadActivityLog();
@@ -7854,6 +7855,113 @@ async function saveOwnerSettings() {
     showToast("Ticket owner saved.", "success");
   } catch (e) {
     if (status) status.textContent = `❌ ${e.message}`;
+  }
+}
+
+// ---------------------------------------------------------------- Permissions
+
+// Populate the subscription picker (reusing the already-loaded list) and default
+// it to whatever subscription is focused on the dashboard.
+async function loadPermissionsSettings() {
+  const sel = document.getElementById("perm-sub");
+  if (!sel) return;
+  let subs = window._loadedSubscriptions || [];
+  if (!subs.length) {
+    sel.innerHTML = '<option disabled selected>Loading subscriptions…</option>';
+    try {
+      const r = await apiJson("/api/az/subscriptions");
+      subs = r.subscriptions || [];
+      window._loadedSubscriptions = subs;
+    } catch (_e) { subs = []; }
+  }
+  if (!subs.length) {
+    sel.innerHTML = '<option disabled selected>No subscriptions found — sign in first.</option>';
+    return;
+  }
+  const focused = focusedSubscriptionId();
+  sel.innerHTML = subs.map(s =>
+    `<option value="${escapeHtml(s.id)}"${s.id === focused ? " selected" : ""}>${escapeHtml(s.name)} (${s.id.substring(0, 8)}…)</option>`
+  ).join("");
+}
+
+async function checkPermissions() {
+  const sel = document.getElementById("perm-sub");
+  const statusEl = document.getElementById("perm-status");
+  const summaryEl = document.getElementById("perm-summary");
+  const resultsEl = document.getElementById("perm-results");
+  const btn = document.getElementById("perm-check");
+  const subId = sel && sel.value;
+  if (!subId) {
+    if (statusEl) statusEl.textContent = "Pick a subscription first.";
+    return;
+  }
+  if (btn) btn.disabled = true;
+  if (statusEl) statusEl.textContent = "Checking…";
+  if (summaryEl) { summaryEl.classList.add("hidden"); summaryEl.innerHTML = ""; }
+  if (resultsEl) resultsEl.innerHTML = '<p class="muted">Reading your effective permissions…</p>';
+  try {
+    const r = await apiJson(`/api/permissions/check?subscription_id=${encodeURIComponent(subId)}`);
+    if (statusEl) statusEl.textContent = "";
+    renderPermissionResults(r);
+  } catch (e) {
+    if (statusEl) statusEl.textContent = "";
+    if (summaryEl) summaryEl.classList.add("hidden");
+    if (resultsEl) {
+      resultsEl.innerHTML =
+        `<p class="note warn">Couldn't complete the permission check: ${escapeHtml(e.message || String(e))}</p>`;
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function _permRow(cap) {
+  const granted = cap.granted;
+  const badge = granted
+    ? `<span class="perm-badge perm-verified">✓ Verified</span>`
+    : `<span class="perm-badge perm-check">✕ Check</span>`;
+  const tag = cap.required
+    ? `<span class="perm-tag perm-required">Required</span>`
+    : `<span class="perm-tag perm-optional">Optional</span>`;
+  const acts = (cap.actions || []).map(a => {
+    const isMissing = (cap.missing || []).includes(a);
+    return `<code class="perm-action${isMissing ? " perm-action-missing" : ""}">${escapeHtml(a)}</code>`;
+  }).join(" ");
+  return `<li class="perm-row${granted ? "" : " perm-row-missing"}">
+    <div class="perm-row-head">${badge}${tag}<strong class="perm-row-title">${escapeHtml(cap.title)}</strong></div>
+    <div class="perm-row-why muted">${escapeHtml(cap.why)}</div>
+    <div class="perm-row-actions">${acts}</div>
+  </li>`;
+}
+
+function renderPermissionResults(data) {
+  const summaryEl = document.getElementById("perm-summary");
+  const resultsEl = document.getElementById("perm-results");
+  const caps = (data && data.capabilities) || [];
+  const sum = (data && data.summary) || {};
+  if (summaryEl) {
+    const reqOk = sum.all_required_ok;
+    const cls = reqOk ? "perm-summary-ok" : "perm-summary-warn";
+    const icon = reqOk ? "✅" : "⚠️";
+    const headline = reqOk
+      ? "All required permissions verified"
+      : `${sum.required_total - sum.required_ok} required permission(s) missing`;
+    summaryEl.className = `perm-summary ${cls}`;
+    summaryEl.innerHTML = `<span class="perm-summary-icon">${icon}</span>
+      <div><strong>${escapeHtml(headline)}</strong>
+      <div class="muted">Required ${sum.required_ok}/${sum.required_total} · Optional ${sum.optional_ok}/${sum.optional_total} verified.
+      ${reqOk ? "Optional gaps only limit automation features, not the core analysis." : "The core analysis needs every required capability — ask an owner for the missing role (e.g. Reader)."}</div></div>`;
+    summaryEl.classList.remove("hidden");
+  }
+  if (resultsEl) {
+    const required = caps.filter(c => c.required);
+    const optional = caps.filter(c => !c.required);
+    const section = (title, rows) => rows.length
+      ? `<h3 class="perm-group-title">${title}</h3><ul class="perm-list">${rows.map(_permRow).join("")}</ul>`
+      : "";
+    resultsEl.innerHTML =
+      section("Required for core analysis", required) +
+      section("Optional — automation features", optional);
   }
 }
 
@@ -9341,6 +9449,7 @@ function init() {
   });
   const pricingSaveBtn = document.getElementById("pricing-save");
   if (pricingSaveBtn) pricingSaveBtn.addEventListener("click", savePricingSettings);
+  { const pc = document.getElementById("perm-check"); if (pc) pc.addEventListener("click", checkPermissions); }
   document.getElementById("btn-export-csv").addEventListener("click", exportCsv);
   document.getElementById("btn-export-xlsx").addEventListener("click", exportXlsx);
   { const vb = document.getElementById("btn-verify-all"); if (vb) vb.addEventListener("click", verifyAllRegions); }

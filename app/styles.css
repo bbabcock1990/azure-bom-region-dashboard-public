@@ -1464,6 +1464,32 @@ table.region-table tbody tr.selected td { background: var(--ms-blue-light); }
 .conf-legend-desc { font-size: 13px; color: var(--text-secondary); }
 .conf-legend-foot { margin-top: 8px; font-size: 12px; }
 
+/* Permissions blade */
+.perm-controls { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; margin: 4px 0 16px; }
+.perm-sub-picker { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.perm-sub-picker select { min-width: 320px; padding: 6px 8px; }
+.perm-summary { display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px; border-radius: 10px; margin: 0 0 16px; border: 1px solid transparent; }
+.perm-summary.hidden { display: none; }
+.perm-summary-icon { font-size: 20px; line-height: 1; }
+.perm-summary-ok { background: rgba(34,160,90,.10); border-color: rgba(34,160,90,.30); }
+.perm-summary-warn { background: rgba(200,140,20,.10); border-color: rgba(200,140,20,.30); }
+.perm-group-title { margin: 18px 0 8px; font-size: 14px; }
+.perm-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 8px; }
+.perm-row { border: 1px solid var(--border, rgba(140,140,140,.25)); border-radius: 10px; padding: 10px 12px; }
+.perm-row-missing { border-color: rgba(200,140,20,.45); background: rgba(200,140,20,.05); }
+.perm-row-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.perm-row-title { font-size: 14px; }
+.perm-row-why { font-size: 12.5px; margin: 4px 0 6px; }
+.perm-row-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.perm-badge { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; border: 1px solid transparent; white-space: nowrap; }
+.perm-verified { background: rgba(34,160,90,.15); color: #1a8f52; border-color: rgba(34,160,90,.35); }
+.perm-check { background: rgba(200,140,20,.15); color: #b8860b; border-color: rgba(200,140,20,.35); }
+.perm-tag { font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 999px; text-transform: uppercase; letter-spacing: .03em; }
+.perm-required { background: rgba(90,120,180,.14); color: #4a6bb0; }
+.perm-optional { background: rgba(140,140,140,.16); color: var(--text-secondary); }
+.perm-action { font-size: 11.5px; background: rgba(140,140,140,.12); padding: 1px 6px; border-radius: 5px; }
+.perm-action-missing { background: rgba(200,140,20,.16); color: #b8860b; }
+
 /* Overview cockpit strip */
 .overview-cockpit { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 14px; }
 .cockpit-chip {
