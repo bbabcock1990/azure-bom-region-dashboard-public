@@ -7,7 +7,7 @@ from _shared import bom_services
 from _shared import arm_skus
 
 
-def _make_bom_data(regions, required_families):
+def _make_bom_data(regions, required_families, services=None):
     header, records = bom_services.synthesize_empty_bom(
         [{"name": r, "display_name": r} for r in regions]
     )
@@ -15,6 +15,7 @@ def _make_bom_data(regions, required_families):
         "bom_header": header,
         "bom_records": records,
         "required_families": required_families,
+        "services": services or [],
     }
 
 
@@ -138,3 +139,49 @@ def test_compile_snapshot_raises_on_target_401_for_refresh(monkeypatch):
         )
 
     assert ex.value.code == "arm_arm_token_expired"
+
+
+def test_compile_snapshot_threads_services_into_meta(monkeypatch):
+    def fake_fetch(*, arm_token, subscription_id, want_regions, want_families, **kwargs):
+        return [{
+            "region": "eastus",
+            "family": "standardDav6Family",
+            "display": "Dav6",
+            "zones": [True, True, True],
+            "sub_restricted": False,
+            "sub_restriction_raw": "Available",
+        }]
+
+    monkeypatch.setattr(compile_mod.arm_sku_availability, "fetch_arm_sku_records", fake_fetch)
+    monkeypatch.setattr(compile_mod.quota_groups, "check_quota_groups", lambda *a, **k: {
+        "subscription_id": None, "status": "unknown", "has_quota_groups": False, "groups": [],
+    })
+    monkeypatch.setattr(compile_mod.quota_groups, "check_subscription_quota", lambda *a, **k: {
+        "subscription_id": "11111111-1111-1111-1111-111111111111", "status": "unknown", "regions": {},
+    })
+
+    services = [
+        {"name": "Azure SQL Database", "tier": "business_critical"},
+        {"name": "Azure Automation"},
+    ]
+    snap = compile_mod.compile_snapshot(
+        subscription_id="11111111-1111-1111-1111-111111111111",
+        subscriptions=[{
+            "subscription_id": "11111111-1111-1111-1111-111111111111",
+            "arm_token": "t", "status": "ok", "role": "target",
+        }],
+        bom_data=_make_bom_data(["eastus"], [{
+            "primary_family": "standardDav6Family",
+            "primary_label": "Dav6",
+            "alt_family": None,
+            "alt_label": None,
+            "required_cores": 100,
+        }], services=services),
+        triggered_by_email="t@example.com",
+        triggered_by_oid="oid",
+    )
+
+    assert snap["meta"]["services"] == services
+    # The tier round-trips so the dashboard can compute ZRS readiness.
+    sql = next(s for s in snap["meta"]["services"] if s["name"] == "Azure SQL Database")
+    assert sql["tier"] == "business_critical"

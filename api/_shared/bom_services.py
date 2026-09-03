@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -33,11 +34,26 @@ COMPUTE_SKUS_API_VERSION = "2024-07-01"
 DEFAULT_TIMEOUT_S = 60.0
 MAX_PARALLEL = 8
 
+# Sentinel returned by the provider-show helper when ARM doesn't recognize a
+# provider namespace at all (404 InvalidResourceNamespace) — i.e. the service's
+# resource provider isn't available to this subscription/tenant. It's kept
+# distinct from an empty list (provider exists but offers no region) so the UI
+# can tell "provider not registered here" apart from "not offered in region".
+PROVIDER_ABSENT = "\u0000provider-absent"
+
 _DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 _CATALOG_PATH = os.path.join(_DATA_DIR, "bom_service_catalog.json")
 
 # Cache the catalog at module load — it's a small static file.
 _CATALOG_CACHE: Optional[List[Dict]] = None
+
+
+def reset_dataset_caches() -> None:
+    """Drop memoized dataset state (service catalog + latency display map)
+    so a freshly uploaded override is picked up without a restart."""
+    global _CATALOG_CACHE, _REGION_DISPLAY_CACHE
+    _CATALOG_CACHE = None
+    _REGION_DISPLAY_CACHE = None
 
 
 class BomServicesError(Exception):
@@ -52,6 +68,44 @@ class BomServicesError(Exception):
 
 # ─── Catalog ─────────────────────────────────────────────────────────────────
 
+def _normalize_tiers(raw) -> List[Dict]:
+    """Normalize an optional ``tiers`` array on a catalog entry.
+
+    Each tier is ``{"id": str, "label": str, "zone_redundant": bool}``.
+    ``id`` is the stable machine key we persist on a BOM service and
+    validate against; ``label`` is display text; ``zone_redundant`` seeds
+    the future ZRS (zone-redundant storage/HA) readiness check. Malformed
+    tiers are dropped defensively so a bad catalog edit can't break load.
+    """
+    if not isinstance(raw, list):
+        return []
+    out: List[Dict] = []
+    seen: set = set()
+    for t in raw:
+        if not isinstance(t, dict):
+            continue
+        tid = str(t.get("id") or "").strip()
+        if not tid or tid.lower() in seen:
+            continue
+        seen.add(tid.lower())
+        out.append({
+            "id": tid,
+            "label": str(t.get("label") or tid).strip(),
+            "zone_redundant": bool(t.get("zone_redundant", False)),
+        })
+    return out
+
+
+def tiers_for_service(name: str) -> List[Dict]:
+    """Return the normalized tier list for a service name (or [])."""
+    if not name:
+        return []
+    entry = catalog_by_name().get(str(name).strip())
+    if not entry:
+        return []
+    return list(entry.get("tiers") or [])
+
+
 def load_builtin_catalog() -> List[Dict]:
     """Return the static service catalog from the JSON seed file.
 
@@ -60,7 +114,8 @@ def load_builtin_catalog() -> List[Dict]:
     """
     global _CATALOG_CACHE
     if _CATALOG_CACHE is None:
-        with open(_CATALOG_PATH, "r", encoding="utf-8") as f:
+        from . import dataset_store
+        with open(dataset_store.resolve_path("service_catalog"), "r", encoding="utf-8") as f:
             data = json.load(f)
         services = data.get("services") or []
         # Defensive copy + normalize types so callers can't accidentally
@@ -71,6 +126,9 @@ def load_builtin_catalog() -> List[Dict]:
                 "provider": str(s["provider"]).strip(),
                 "resource_type": str(s["resource_type"]).strip(),
                 "zone_check": bool(s.get("zone_check", False)),
+                "category": (str(s.get("category")).strip()
+                             if s.get("category") else "Other"),
+                "tiers": _normalize_tiers(s.get("tiers")),
             }
             for s in services
             if s.get("name") and s.get("provider") and s.get("resource_type")
@@ -108,7 +166,7 @@ def load_catalog() -> List[Dict]:
             log.info("bom_services: skipping custom service %s (shadows built-in)",
                      v["name"])
             continue
-        out.append({**v, "is_custom": True})
+        out.append({**v, "is_custom": True, "category": v.get("category") or "Custom services"})
 
     # Stable sort: built-ins first, then customs, each alphabetical.
     out.sort(key=lambda s: (s["is_custom"], s["name"].lower()))
@@ -180,6 +238,43 @@ def _strip_bearer(token: str) -> str:
     return t
 
 
+def _arm_get_with_retry(
+    client: httpx.Client,
+    url: str,
+    *,
+    params: Dict[str, str],
+    headers: Dict[str, str],
+    attempts: int = 4,
+) -> httpx.Response:
+    """GET with small exponential backoff on transient failures.
+
+    ARM (and the TLS path to it) occasionally drops a connection mid-flight —
+    ``WinError 10054`` / ``ConnectError`` / ``ReadError`` — especially under a
+    parallel fan-out, and can return 429/502/503/504. Retrying a handful of
+    times turns those blips into a successful call instead of failing the whole
+    run. Deterministic 4xx (401/403/404/etc.) are returned immediately for the
+    caller to interpret."""
+    last_exc: Optional[Exception] = None
+    for i in range(attempts):
+        try:
+            r = client.get(url, params=params, headers=headers)
+        except (httpx.TransportError, httpx.RemoteProtocolError) as ex:
+            last_exc = ex
+            if i == attempts - 1:
+                break
+            time.sleep(0.4 * (2 ** i))
+            continue
+        if r.status_code in (429, 500, 502, 503, 504) and i < attempts - 1:
+            time.sleep(0.4 * (2 ** i))
+            continue
+        return r
+    raise BomServicesError(
+        "arm_provider_show_failed",
+        f"ARM request to {url} failed after {attempts} attempts: {last_exc!r}",
+        502,
+    )
+
+
 def _fetch_provider_locations_one(
     client: httpx.Client,
     *,
@@ -192,7 +287,7 @@ def _fetch_provider_locations_one(
     service is globally available (e.g. Azure DNS zones)."""
     url = f"{ARM_BASE}/providers/{provider}"
     params = {"api-version": PROVIDER_API_VERSION}
-    r = client.get(url, params=params, headers=headers)
+    r = _arm_get_with_retry(client, url, params=params, headers=headers)
     if r.status_code == 401:
         raise BomServicesError(
             "arm_unauthorized",
@@ -206,6 +301,16 @@ def _fetch_provider_locations_one(
             f"token lacks Reader on the chosen subscription's tenant.",
             403,
         )
+    if r.status_code == 404:
+        # The provider namespace doesn't exist in this tenant/cloud (ARM
+        # returns 404 InvalidResourceNamespace). That means the service's
+        # resource provider isn't available to this subscription — return the
+        # ABSENT sentinel so the caller can label it honestly ("provider not
+        # available in this subscription") rather than implying we checked
+        # every region.
+        log.info("bom_services: provider show 404 for %s — provider absent",
+                 provider)
+        return [PROVIDER_ABSENT]
     if r.status_code >= 400:
         raise BomServicesError(
             "arm_provider_show_failed",
@@ -221,7 +326,28 @@ def _fetch_provider_locations_one(
             f"ARM returned non-JSON for provider show {provider}: {ex}",
             502,
         )
-    for rt in data.get("resourceTypes") or []:
+    resource_types = data.get("resourceTypes") or []
+
+    # ``*`` means "the whole provider" — union the regional locations across
+    # every resource type it exposes. Used by the auto-pulled, provider-level
+    # catalog entries so a service is "available" wherever the provider offers
+    # anything.
+    if resource_type == "*":
+        regional: set = set()
+        for rt in resource_types:
+            for loc in rt.get("locations") or []:
+                if loc and str(loc).lower() != "global":
+                    regional.add(str(loc))
+        if regional:
+            return sorted(regional)
+        # The provider is registered and exposes resource types, but none of
+        # them report a regional location. That's the signature of a global /
+        # control-plane service (e.g. Azure Advisor, whose resource types all
+        # have locations: []) — it isn't tied to any region, so treat it as
+        # available everywhere rather than nowhere.
+        return ["*"] if resource_types else []
+
+    for rt in resource_types:
         if rt.get("resourceType", "").lower() == resource_type.lower():
             locs = rt.get("locations") or []
             if any((loc or "").lower() == "global" for loc in locs):
@@ -483,17 +609,43 @@ def check_services_availability(
             else:
                 key = f"{svc['provider']}/{svc['resource_type']}"
                 available_locs = provider_locations.get(key, [])
-                matched = (
-                    "*" in available_locs
-                    or region_name.lower() in [str(loc).lower() for loc in available_locs]
-                    or any(_normalize_region(loc) == norm_name for loc in available_locs)
+                absent = available_locs == [PROVIDER_ABSENT]
+                is_global = (not absent) and "*" in available_locs
+                matched = is_global or (
+                    (not absent) and (
+                        region_name.lower() in [str(loc).lower() for loc in available_locs]
+                        or any(_normalize_region(loc) == norm_name for loc in available_locs)
+                    )
                 )
                 if matched:
-                    services_result[svc_name] = {"available": True, "detail": ""}
-                else:
+                    services_result[svc_name] = {
+                        "available": True,
+                        "detail": "global service (not region-specific)" if is_global else "",
+                    }
+                elif absent:
+                    # Provider namespace is not registered on this
+                    # subscription. ARM won't report a regional footprint
+                    # until the provider is registered, so availability is
+                    # UNKNOWN — not a "no regions" verdict. Treat as an amber
+                    # "registration required" warning that does NOT fail the
+                    # BOM; the user can register the provider and re-run.
                     services_result[svc_name] = {
                         "available": False,
-                        "detail": "not in provider list",
+                        "status": "registration_required",
+                        "provider": svc["provider"],
+                        "detail": (
+                            "requires provider registration "
+                            f"({svc['provider']})"
+                        ),
+                    }
+                else:
+                    if not available_locs:
+                        detail = "not available in any region"
+                    else:
+                        detail = f"not available in {display}"
+                    services_result[svc_name] = {
+                        "available": False,
+                        "detail": detail,
                     }
                     overall = "FAIL"
 
@@ -518,7 +670,7 @@ def synthesize_bom_records(
 
     Header is ``[Region, Display Name, Overall Status, <svc1>, <svc2>, …]``.
     Each record has the per-service column populated with
-    ``"✅ Available"`` / ``"❌ not in provider list"`` strings so
+    ``"✅ Available"`` / ``"❌ not available …"`` strings so
     ``extract_missing_services()`` sees the same ❌ markers and
     ``Overall Status`` contains ``"SUPPORTED"`` / ``"UNSUPPORTED"``.
 
@@ -545,6 +697,15 @@ def synthesize_bom_records(
             detail = svc_result.get("detail") or ""
             if available is True:
                 rec[name] = f"✅ {detail}" if detail else "✅ Available"
+            elif svc_result.get("status") == "registration_required":
+                # ⚠️ marker — deliberately NOT "❌" and NOT containing "not
+                # available", so extract_missing_services() ignores it and it
+                # does not fail the region. extract_registration_required()
+                # picks it up for the amber warning + one-click register.
+                rec[name] = (
+                    f"⚠️ {detail}" if detail
+                    else "⚠️ requires provider registration"
+                )
             else:
                 rec[name] = f"❌ {detail}" if detail else "❌ Not available"
         records.append(rec)
@@ -587,7 +748,8 @@ def load_region_display_map(data_dir: str) -> Dict[str, str]:
     global _REGION_DISPLAY_CACHE
     if _REGION_DISPLAY_CACHE is not None:
         return dict(_REGION_DISPLAY_CACHE)
-    path = os.path.join(data_dir, "azure_region_latency.csv")
+    from . import dataset_store
+    path = dataset_store.resolve_path("latency")
     out: Dict[str, str] = {}
     if not os.path.exists(path):
         _REGION_DISPLAY_CACHE = out

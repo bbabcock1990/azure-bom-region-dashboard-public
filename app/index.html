@@ -17,12 +17,18 @@
   <!-- SheetJS for Excel export -->
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 
+  <!-- MSAL.js for delegated (multi-customer) browser sign-in. Only used when
+       the server reports delegated_mode; mints the customer's ARM token
+       client-side so tokens never touch the server. -->
+  <script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.28.1/lib/msal-browser.min.js"></script>
+  <script src="msal-auth.js?v=2026090306"></script>
+
   <!-- Apply persisted theme + filters state BEFORE styles.css loads to prevent
        FOUC. Kept external (not inline) so the CSP can forbid inline scripts.
        Order matters: this must run before the <link> below. -->
   <script src="preinit.js?v=2026061503"></script>
 
-  <link rel="stylesheet" href="styles.css?v=2026062910" />
+  <link rel="stylesheet" href="styles.css?v=2026090312" />
 </head>
 <body>
 
@@ -43,23 +49,34 @@
     <button type="button" id="open-guide" class="theme-toggle-btn" title="Getting Started guide" aria-label="Open the Getting Started guide">
       <span class="theme-toggle-icon" aria-hidden="true">?</span>
     </button>
+    <button type="button" id="open-settings" class="theme-toggle-btn" title="Settings &amp; activity log" aria-label="Open settings and activity log">
+      <span class="theme-toggle-icon" aria-hidden="true">⚙</span>
+    </button>
     <button type="button" id="theme-toggle" class="theme-toggle-btn" title="Toggle light/dark theme" aria-label="Toggle theme">
       <span class="theme-toggle-icon" aria-hidden="true">☾</span>
     </button>
   </div>
 </header>
 
+<div id="demo-banner" class="demo-banner hidden"></div>
+
 <div class="layout" id="layout">
 
-  <aside class="sidebar" id="sidebar">
-    <div class="bomnav" id="bomnav">
-      <div class="bomnav-head">
-        <h3>Bills of Materials <span class="bomnav-count" id="bomnav-count"></span></h3>
-        <button type="button" id="bomnav-new" class="btn btn--accent btn--sm" title="Create a new BOM">+ New</button>
+  <aside class="sidebar bomnav-rail" id="sidebar">
+    <div class="bomnav-body" id="bomnav-body">
+      <div class="bomnav" id="bomnav">
+        <div class="bomnav-head">
+          <h3>Bills of Materials <span class="bomnav-count" id="bomnav-count"></span></h3>
+          <button type="button" id="bomnav-new" class="btn btn--accent btn--sm" title="Create a new BOM">+ New</button>
+        </div>
+        <input type="text" id="bomnav-search" class="bomnav-search" placeholder="Filter BOMs…" autocomplete="off" spellcheck="false" />
+        <div class="bomnav-list" id="bomnav-list"></div>
       </div>
-      <input type="text" id="bomnav-search" class="bomnav-search" placeholder="Filter BOMs…" autocomplete="off" spellcheck="false" />
-      <div class="bomnav-list" id="bomnav-list"></div>
     </div>
+    <button type="button" class="bomnav-handle" id="bomnav-handle" title="Show/hide Bills of Materials" aria-label="Show or hide Bills of Materials">
+      <span class="bomnav-handle-label">Bills of Materials</span>
+      <span class="bomnav-handle-caret" aria-hidden="true">‹</span>
+    </button>
   </aside>
 
   <main>
@@ -101,19 +118,29 @@
 
     <div class="tabs">
       <div class="tab active" data-view="overview">Overview</div>
-      <div class="tab" data-view="table">Table</div>
-      <div class="tab" data-view="map">Map</div>
-      <div class="tab" data-view="latency">Latency Chart</div>
-      <div class="tab" data-view="compare">Compare</div>
-      <div class="tab" data-view="quota">Quota per Region <span id="quota-tab-badge" class="tab-badge hidden">0</span></div>
-      <div class="tab" data-view="settings" id="tab-settings">Settings</div>
+      <div class="tab" data-view="regions">Regions</div>
+      <div class="tab" data-view="quota">Quota <span id="quota-tab-badge" class="tab-badge hidden">0</span></div>
+      <div class="tab" data-view="support">Remediation <span id="support-tab-badge" class="tab-badge hidden">0</span></div>
       <div class="tabs-actions">
-        <button id="btn-export-csv" class="btn btn--sm">Export CSV</button>
-        <button id="btn-export-xlsx" class="btn btn--sm">Export Excel</button>
+        <button id="btn-export-csv" class="btn btn--sm" title="Export the Regions table as CSV">Export Regions (CSV)</button>
+        <button id="btn-export-xlsx" class="btn btn--sm" title="Export the Regions table as Excel">Export Regions (Excel)</button>
       </div>
     </div>
 
+    <div class="region-subtabs hidden" id="region-subtabs">
+      <button type="button" class="region-subtab active" data-sub="table">Table</button>
+      <button type="button" class="region-subtab" data-sub="map">Map</button>
+      <button type="button" class="region-subtab" data-sub="latency">Latency Chart</button>
+      <button type="button" class="region-subtab" data-sub="compare">Compare</button>
+    </div>
+
     <div class="view" id="view-overview">
+
+      <div class="reco-banner hidden" id="overview-reco"></div>
+
+      <section class="best-region-panel hidden" id="best-region-panel"></section>
+
+      <div class="overview-cockpit hidden" id="overview-cockpit"></div>
 
       <section class="overview-blade" id="overview-blade">
         <div class="overview-card">
@@ -171,6 +198,15 @@
     </div>
 
     <div class="view hidden" id="view-table">
+      <div class="verify-all-bar" id="verify-all-bar">
+        <button id="btn-verify-all" class="btn btn--sm btn--primary" type="button" title="Run a read-only live zone-redundancy probe across every region to raise confidence. Creates nothing.">⚡ Verify all regions</button>
+        <button id="btn-verify-cancel" class="btn btn--sm hidden" type="button">Cancel</button>
+        <div class="verify-progress hidden" id="verify-progress">
+          <div class="verify-progress-track"><div class="verify-progress-fill" id="verify-progress-fill"></div></div>
+          <span class="verify-progress-label" id="verify-progress-label"></span>
+        </div>
+        <span class="verify-all-note" id="verify-all-note"></span>
+      </div>
       <table class="regions" id="regions-table">
         <thead>
           <tr>
@@ -180,6 +216,7 @@
             <th>AZ 1/2/3</th>
             <th class="quota-col hidden" data-sort="quota">Quota</th>
             <th data-sort="recommendation">Recommendation</th>
+            <th class="cost-col hidden num" data-sort="est_monthly" title="Estimated monthly cost — estimate only">Est. $/mo</th>
             <th>Alternative Regions</th>
           </tr>
         </thead>
@@ -250,64 +287,259 @@
       </div>
     </div>
     <div class="view hidden" id="view-settings">
-      <div class="settings-wrap">
-        <section id="settings-activity" class="settings-section">
-          <h2>Activity Log</h2>
-          <p class="muted">
-            Audit trail of every Azure API call, quota request, BOM change, and user action. Use this to track all dashboard activity.
-          </p>
-          <div class="activity-controls">
-            <label class="activity-control">
-              <span>Subscription</span>
-              <select id="activity-filter-sub">
-                <option value="">All</option>
-              </select>
-            </label>
-            <label class="activity-control">
-              <span>Event type</span>
-              <select id="activity-filter-event">
-                <option value="">All</option>
-              </select>
-            </label>
-            <label class="activity-control">
-              <span>Limit</span>
-              <select id="activity-filter-limit">
-                <option value="100">100</option>
-                <option value="200" selected>200</option>
-                <option value="500">500</option>
-                <option value="1000">1000</option>
-              </select>
-            </label>
-            <label class="activity-control">
-              <span>Lookback</span>
-              <select id="activity-filter-days">
-                <option value="1">1 day</option>
-                <option value="3">3 days</option>
-                <option value="7" selected>7 days</option>
-                <option value="30">30 days</option>
-              </select>
-            </label>
-            <button type="button" id="activity-refresh" class="btn btn--primary">Refresh</button>
-            <button type="button" id="activity-clear" class="link-btn danger">Clear log</button>
-            <span class="muted" id="activity-status"></span>
+      <div class="settings-shell">
+        <header class="settings-header">
+          <h1>Settings</h1>
+          <p class="muted">Manage your default support contact, the model's reference data, and the activity log.</p>
+        </header>
+        <div class="settings-layout">
+          <nav class="settings-nav" role="tablist" aria-label="Settings sections">
+            <button type="button" class="settings-nav-item is-active" data-settings-tab="owner" role="tab" aria-selected="true">
+              <span class="settings-nav-icon" aria-hidden="true">👤</span>
+              <span class="settings-nav-text"><strong>Ticket owner</strong><small>Default Azure support contact</small></span>
+            </button>
+            <button type="button" class="settings-nav-item" data-settings-tab="permissions" role="tab" aria-selected="false">
+              <span class="settings-nav-icon" aria-hidden="true">🔑</span>
+              <span class="settings-nav-text"><strong>Permissions</strong><small>Access check for this account</small></span>
+            </button>
+            <button type="button" class="settings-nav-item" data-settings-tab="datasets" role="tab" aria-selected="false">
+              <span class="settings-nav-icon" aria-hidden="true">🗂️</span>
+              <span class="settings-nav-text"><strong>Model datasets</strong><small>Latency, regions &amp; catalogs</small></span>
+            </button>
+            <button type="button" class="settings-nav-item" data-settings-tab="pricing" role="tab" aria-selected="false">
+              <span class="settings-nav-icon" aria-hidden="true">💵</span>
+              <span class="settings-nav-text"><strong>Cost &amp; pricing</strong><small>ACD discount, OS &amp; estimates</small></span>
+            </button>
+            <button type="button" class="settings-nav-item" data-settings-tab="activity" role="tab" aria-selected="false">
+              <span class="settings-nav-icon" aria-hidden="true">📜</span>
+              <span class="settings-nav-text"><strong>Activity log</strong><small>Audit trail of all actions</small></span>
+            </button>
+            <button type="button" class="settings-nav-item" data-settings-tab="data" role="tab" aria-selected="false">
+              <span class="settings-nav-icon" aria-hidden="true">🗄️</span>
+              <span class="settings-nav-text"><strong>Data &amp; storage</strong><small>Snapshots, import/export &amp; wipe</small></span>
+            </button>
+          </nav>
+          <div class="settings-panels">
+            <section id="settings-owner" class="settings-panel is-active" data-settings-panel="owner">
+              <h2>Ticket owner</h2>
+              <p class="muted">
+                The Azure support contact used as defaults on every ticket created from this dashboard.
+                Azure requires a contact name, email, and country.
+              </p>
+              <div class="settings-owner-grid">
+                <label>First name <input type="text" id="owner-first" maxlength="60" autocomplete="off" /></label>
+                <label>Last name <input type="text" id="owner-last" maxlength="60" autocomplete="off" /></label>
+                <label>Email <input type="email" id="owner-email" maxlength="120" autocomplete="off" /></label>
+                <label>Additional emails (CC) <input type="text" id="owner-cc" maxlength="400" autocomplete="off" /></label>
+                <label>Phone <input type="text" id="owner-phone" maxlength="40" autocomplete="off" /></label>
+                <label>Country <input type="text" id="owner-country" maxlength="60" autocomplete="off" /></label>
+                <label>Time zone <input type="text" id="owner-tz" maxlength="80" autocomplete="off" /></label>
+                <label>Default severity
+                  <select id="owner-sev">
+                    <option value="minimal">Minimal</option>
+                    <option value="moderate">Moderate</option>
+                    <option value="critical">Critical</option>
+                  </select>
+                </label>
+                <label class="settings-owner-wide">Validation resource group <span class="muted" style="font-weight:400;">· optional (advanced)</span>
+                  <div class="muted" id="owner-valrg-sub" style="margin:2px 0 4px;font-size:0.85em;"></div>
+                  <input type="text" id="owner-valrg" list="owner-valrg-list" maxlength="90" autocomplete="off" placeholder="Leave blank for read-only checks" />
+                  <datalist id="owner-valrg-list"></datalist>
+                  <small class="muted">Optional. Leave blank to run <strong>read-only checks</strong> (quota, SKU &amp; zonal availability) — no resource group needed. To also run ARM <strong>deployment-level pre-flight</strong>, point this at an <strong>existing</strong> resource group. It's saved <strong>per subscription</strong> (an RG only exists inside one subscription) and applies to whichever subscription is selected on the dashboard. Pre-flight creates no resources and incurs no cost. <span id="owner-valrg-hint"></span></small>
+                  <div class="owner-valrg-create">
+                    <input type="text" id="owner-valrg-loc" list="owner-valrg-loc-list" maxlength="40" autocomplete="off" placeholder="Location (e.g. eastus)" />
+                    <datalist id="owner-valrg-loc-list"></datalist>
+                    <button type="button" class="btn btn--sm" id="owner-valrg-create">➕ Create if it doesn't exist</button>
+                    <span class="muted" id="owner-valrg-create-status"></span>
+                  </div>
+                  <small class="muted">Creating a resource group is free and holds nothing — it just gives the deep check somewhere to validate. You need Contributor on the subscription.</small>
+                </label>
+              </div>
+              <div class="support-form-actions">
+                <button type="button" class="btn btn--accent" id="owner-save">Save owner</button>
+                <span class="muted" id="owner-status"></span>
+              </div>
+            </section>
+            <section id="settings-permissions" class="settings-panel" data-settings-panel="permissions">
+              <h2>Permissions</h2>
+              <p class="muted">
+                Checks whether the <strong>signed-in account</strong> has the Azure permissions the
+                dashboard needs on a subscription. Required capabilities power the core analysis
+                (region readiness, quota, SKU &amp; zonal availability); optional ones unlock automation
+                like deployment pre-flight, quota-increase requests, and support tickets. This is a
+                <strong>read-only</strong> check — it lists your own effective permissions and matches
+                them locally; it changes nothing.
+              </p>
+              <div class="perm-controls">
+                <label class="perm-sub-picker">
+                  <span>Subscription</span>
+                  <select id="perm-sub"></select>
+                </label>
+                <button type="button" class="btn btn--accent" id="perm-check">Check permissions</button>
+                <span class="muted" id="perm-status"></span>
+              </div>
+              <div id="perm-summary" class="perm-summary hidden"></div>
+              <div id="perm-results" class="perm-results">
+                <p class="muted">Pick a subscription and choose <strong>Check permissions</strong> to run the access check.</p>
+              </div>
+            </section>
+            <section id="settings-datasets" class="settings-panel" data-settings-panel="datasets">
+              <h2>Model datasets</h2>
+              <p class="muted">
+                The reference data the analysis is built on — the region latency
+                matrix, region &amp; service catalogs, and the default region / SKU
+                seed lists. These stay current automatically: pull the region
+                catalog and SKU families live from your Azure subscription with
+                <strong>Refresh from Azure</strong>, or point a dataset at a file
+                URL (e.g. a GitHub raw link) and <strong>Refresh from URL</strong>.
+                Every refresh is validated, takes effect immediately, and never
+                overwrites the built-in copy — use <strong>Revert</strong> to
+                restore it. <strong>Download</strong> exports the current file.
+              </p>
+              <div id="datasets-list" class="datasets-list">
+                <p class="muted" id="datasets-loading">Loading datasets…</p>
+              </div>
+            </section>
+            <section id="settings-pricing" class="settings-panel" data-settings-panel="pricing">
+              <h2>Cost &amp; pricing</h2>
+              <p class="muted">
+                Controls the BOM cost estimate. Compute cost is pulled live from the public
+                <strong>Azure Retail Prices API</strong> (per-vCPU list price × required cores).
+                Non-compute cost is estimated as a percentage uplift on compute plus any
+                per-service figures you enter below.
+              </p>
+              <p class="note warn" id="pricing-disclaimer">
+                ⚠️ All cost figures are <strong>estimates only</strong> — list prices anchored to a
+                representative VM size, not a quote. Actual cost depends on real VM sizes, run
+                hours, storage, egress, licensing, and your negotiated agreement.
+              </p>
+              <div class="pricing-grid">
+                <label>ACD discount %
+                  <input type="number" id="pricing-acd" min="0" max="100" step="0.5" />
+                  <small class="muted">Azure Consumption Discount applied on top of list price.</small>
+                </label>
+                <label>Pricing OS
+                  <select id="pricing-os">
+                    <option value="linux">Linux (no license)</option>
+                    <option value="windows">Windows</option>
+                  </select>
+                </label>
+                <label>Hours / month
+                  <input type="number" id="pricing-hours" min="1" max="744" step="1" />
+                  <small class="muted">730 = 24×365÷12.</small>
+                </label>
+                <label>Currency
+                  <input type="text" id="pricing-currency" maxlength="3" style="text-transform:uppercase" />
+                </label>
+                <label>Non-compute uplift %
+                  <input type="number" id="pricing-uplift" min="0" max="500" step="1" />
+                  <small class="muted">Catch-all for storage, network, etc. as a % of compute.</small>
+                </label>
+                <label>Cheaper-SKU min savings %
+                  <input type="number" id="pricing-alt-min" min="0" max="90" step="1" />
+                  <small class="muted">Only suggest equivalents at least this much cheaper per vCPU.</small>
+                </label>
+                <label class="pricing-check">
+                  <input type="checkbox" id="pricing-suggest-alts" />
+                  <span>Suggest cheaper size-equivalent SKUs<br><small class="muted">Compare each family against AMD/ARM/newer-gen siblings priced in-region. Retired &amp; announced-for-retirement series are never suggested; temp-disk parity is preserved.</small></span>
+                </label>
+                <label class="pricing-check">
+                  <input type="checkbox" id="pricing-allow-older-gen" />
+                  <span>Allow older-generation swaps<br><small class="muted">Off by default (only same-or-newer generation). Enable to also consider older generations where they're cheaper.</small></span>
+                </label>
+              </div>
+              <h3>Per-service monthly estimates <small class="muted">(optional)</small></h3>
+              <p class="muted">
+                Enter a flat monthly figure for any non-compute service in this BOM. These are
+                added on top of the uplift. Leave blank to rely on the uplift alone.
+              </p>
+              <div id="pricing-services" class="pricing-services">
+                <p class="muted" id="pricing-services-empty">No non-compute services in the current BOM.</p>
+              </div>
+              <div class="pricing-actions">
+                <button type="button" class="btn btn--accent" id="pricing-save">Save pricing settings</button>
+                <span id="pricing-save-msg" class="muted"></span>
+              </div>
+            </section>
+            <section id="settings-activity" class="settings-panel" data-settings-panel="activity">
+              <h2>Activity log</h2>
+              <p class="muted">
+                Audit trail of every Azure API call, quota request, BOM change, and user action. Use this to track all dashboard activity.
+              </p>
+              <div class="activity-controls">
+                <label class="activity-control">
+                  <span>Subscription</span>
+                  <select id="activity-filter-sub">
+                    <option value="">All</option>
+                  </select>
+                </label>
+                <label class="activity-control">
+                  <span>Event type</span>
+                  <select id="activity-filter-event">
+                    <option value="">All</option>
+                  </select>
+                </label>
+                <label class="activity-control">
+                  <span>Limit</span>
+                  <select id="activity-filter-limit">
+                    <option value="100">100</option>
+                    <option value="200" selected>200</option>
+                    <option value="500">500</option>
+                    <option value="1000">1000</option>
+                  </select>
+                </label>
+                <label class="activity-control">
+                  <span>Lookback</span>
+                  <select id="activity-filter-days">
+                    <option value="1">1 day</option>
+                    <option value="3">3 days</option>
+                    <option value="7" selected>7 days</option>
+                    <option value="30">30 days</option>
+                  </select>
+                </label>
+                <button type="button" id="activity-refresh" class="btn btn--primary">Refresh</button>
+                <button type="button" id="activity-clear" class="link-btn danger">Clear log</button>
+                <span class="muted" id="activity-status"></span>
+              </div>
+              <div class="activity-table-scroll">
+                <table class="activity-table" id="activity-table">
+                  <thead>
+                    <tr>
+                      <th>Time (UTC)</th>
+                      <th>Event</th>
+                      <th>Status</th>
+                      <th>API Scope</th>
+                      <th>Subscription</th>
+                      <th>Run</th>
+                      <th>Actor</th>
+                      <th>Duration</th>
+                      <th>Message</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </section>
+            <section id="settings-data" class="settings-panel" data-settings-panel="data">
+              <h2>Data &amp; storage</h2>
+              <p class="muted">Back up, restore, or clear the snapshots and analysis history stored in your private session for this dashboard. None of these actions touch Azure.</p>
+              <p class="muted settings-storage-path" id="owner-storage-path-line">Snapshots and local data are saved on this machine under:<br>
+                <code id="owner-storage-path">…</code></p>
+              <div class="settings-danger-actions">
+                <button type="button" class="btn btn--sm" id="owner-open-folder">📂 Open snapshots folder</button>
+                <button type="button" class="btn btn--sm" id="owner-download-snapshots">⬇ Download snapshots (.zip)</button>
+                <button type="button" class="btn btn--sm" id="owner-import-snapshots">⬆ Import snapshots (.zip)</button>
+                <input type="file" id="owner-import-file" accept=".zip,application/zip" hidden />
+                <span class="muted" id="owner-snapshots-status"></span>
+              </div>
+              <div class="settings-danger">
+                <h3>Danger zone</h3>
+                <p class="muted">Delete all local snapshots and analysis history (support contact settings are kept). Does not touch Azure.</p>
+                <button type="button" class="btn btn--danger" id="owner-wipe">Wipe local state</button>
+              </div>
+            </section>
           </div>
-          <table class="activity-table" id="activity-table">
-            <thead>
-              <tr>
-                <th>Time (UTC)</th>
-                <th>Event</th>
-                <th>Status</th>
-                <th>API Scope</th>
-                <th>Subscription</th>
-                <th>Run</th>
-                <th>Actor</th>
-                <th>Duration</th>
-                <th>Message</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </section>
+        </div>
       </div>
     </div>
   </main>
@@ -335,19 +567,29 @@
       <h3>Geo / Continent</h3>
       <div id="filter-continents"></div>
 
-      <h3>SKU Selection</h3>
-      <div class="filter-subtitle muted" id="filter-sku-subtitle"></div>
-      <label class="checkrow"><input type="checkbox" id="filter-v6-only" /> Only show regions using primary SKUs</label>
-      <label class="checkrow" id="filter-fallback-row"><input type="checkbox" id="filter-v5-fallback" /> Only show regions on fallback SKUs</label>
+      <h3>Quota</h3>
+      <label class="checkrow"><input type="checkbox" data-filter="quota" value="sufficient" checked /> Sufficient</label>
+      <label class="checkrow"><input type="checkbox" data-filter="quota" value="insufficient" checked /> Insufficient</label>
+      <label class="checkrow"><input type="checkbox" data-filter="quota" value="unknown" checked /> Unknown / not accessible</label>
 
-      <h3>Zone Restrictions</h3>
-      <label class="checkrow"><input type="checkbox" id="filter-restricted-only" /> Only with restriction</label>
+      <h3>Availability Zones</h3>
+      <label class="checkrow"><input type="checkbox" data-filter="az" value="has_az" checked /> Zone-enabled regions</label>
+      <label class="checkrow"><input type="checkbox" data-filter="az" value="regional" checked /> Regional only (no AZs)</label>
+
+      <h3>Deployment Constraints</h3>
+      <div class="filter-subtitle muted" id="filter-sku-subtitle"></div>
+      <label class="checkrow"><input type="checkbox" id="filter-missing-services" /> Only regions missing BOM services</label>
+      <label class="checkrow" id="filter-fallback-row"><input type="checkbox" id="filter-v5-fallback" /> Only regions relying on a fallback SKU</label>
+      <label class="checkrow"><input type="checkbox" id="filter-restricted-only" /> Only regions with zone restrictions</label>
 
       <div class="stats" id="stats">
         <div class="stat"><span>Showing</span><strong id="stat-shown">0</strong></div>
         <div class="stat"><span>Total regions</span><strong id="stat-total">0</strong></div>
         <div class="stat"><span>Ready</span><strong id="stat-ready">0</strong></div>
         <div class="stat"><span>Other verdicts</span><strong id="stat-other-verdicts">0</strong></div>
+        <div class="stat cost-stat hidden" id="stat-est-wrap" title="Estimated monthly BOM cost (compute + non-compute) for the cheapest Ready region. Estimate only.">
+          <span>Est. $/mo <small>(cheapest ready)</small></span><strong id="stat-est-cost">—</strong>
+        </div>
       </div>
     </div>
   </aside>
@@ -422,7 +664,7 @@
               <ul class="gs-tabs">
                 <li>
                   <strong>BOM Name</strong> — a short, memorable label
-                  (e.g. <code>Avaya-Prod</code>) that shows up in the
+                  (e.g. <code>Contoso-Prod</code>) that shows up in the
                   BOM list so it's easy to tell BOMs apart.
                 </li>
                 <li>
@@ -572,14 +814,67 @@
     <button class="close" id="bom-modal-close" aria-label="Close">&times;</button>
   </header>
   <div class="modal-body">
+    <div class="bom-wizard-nav" id="bom-wizard-nav">
+      <button type="button" class="bom-wizard-tab is-current" data-wstep="1"><span>1</span> Basics</button>
+      <button type="button" class="bom-wizard-tab" data-wstep="2"><span>2</span> Services &amp; Regions</button>
+      <button type="button" class="bom-wizard-tab" data-wstep="3"><span>3</span> SKUs &amp; Capacity</button>
+    </div>
+    <div class="bom-wizard-step is-current" data-wstep="1">
     <div class="run-step">
       <label for="bom-tag">BOM Name</label>
-      <input type="text" id="bom-tag" placeholder="Avaya-Prod, Contoso-Dev, …" autocomplete="off" maxlength="80" />
+      <input type="text" id="bom-tag" placeholder="Contoso-Prod, Contoso-Dev, …" autocomplete="off" maxlength="80" />
       <p class="muted">The name shown in the BOM list (preferred over customer name and subscription ID). Letters, digits, spaces and <code>-._/&amp;:()</code> allowed.</p>
     </div>
     <div class="run-step">
       <label for="bom-customer">Customer name</label>
-      <input type="text" id="bom-customer" placeholder="Avaya, Contoso Health, …" autocomplete="off" maxlength="80" />
+      <input type="text" id="bom-customer" placeholder="Contoso, Contoso Health, …" autocomplete="off" maxlength="80" />
+    </div>
+    <div class="run-step">
+      <label for="bom-resilience">Availability target</label>
+      <select id="bom-resilience" style="width:100%;">
+        <option value="zone_redundant">Zone-redundant (multi-AZ / HA) — needs Availability Zones</option>
+        <option value="regional">Regional (single-zone tolerant) — zone redundancy not required</option>
+      </select>
+      <p class="muted">How this workload is deployed. <strong>Zone-redundant</strong> spreads services across Availability Zones for HA, so a tier that's restricted from zone redundancy in a region is a <strong>hard blocker</strong> (region goes red). <strong>Regional</strong> tolerates a single zone, so zone-redundancy restrictions are <strong>advisory only</strong> and won't block a region.</p>
+    </div>
+    <div class="run-step">
+      <label>Support contact for this BOM <span class="muted">(optional)</span></label>
+      <div class="bom-owner-grid">
+        <input type="text" id="bom-owner-first" placeholder="First name" autocomplete="off" maxlength="60" />
+        <input type="text" id="bom-owner-last" placeholder="Last name" autocomplete="off" maxlength="60" />
+        <input type="email" id="bom-owner-email" placeholder="owner@company.com" autocomplete="off" maxlength="120" />
+      </div>
+      <details class="bom-support-advanced">
+        <summary>Additional support details</summary>
+        <div class="settings-owner-grid bom-support-grid">
+          <label>Phone
+            <input type="text" id="bom-owner-phone" placeholder="+1 555 0100" autocomplete="off" maxlength="40" />
+          </label>
+          <label>Country
+            <input type="text" id="bom-owner-country" placeholder="US" autocomplete="off" maxlength="2" />
+          </label>
+          <label>Preferred time zone
+            <input type="text" id="bom-owner-tz" placeholder="Pacific Standard Time" autocomplete="off" maxlength="60" />
+          </label>
+          <label>Preferred contact method
+            <select id="bom-owner-method">
+              <option value="email">Email</option>
+              <option value="phone">Phone</option>
+            </select>
+          </label>
+          <label>Default severity
+            <select id="bom-owner-sev">
+              <option value="minimal">Minimal (Sev C)</option>
+              <option value="moderate">Moderate (Sev B)</option>
+              <option value="critical">Critical (Sev A)</option>
+            </select>
+          </label>
+          <label>Additional emails (CC)
+            <input type="text" id="bom-owner-cc" placeholder="a@x.com, b@y.com" autocomplete="off" maxlength="200" />
+          </label>
+        </div>
+      </details>
+      <p class="muted">Who Azure support tickets for <strong>this BOM</strong> are filed under. Fields default to your global support settings and can be overridden here per BOM. Timezone, phone, contact method, severity and additional contacts live under <strong>Additional support details</strong> — change the global defaults anytime under the <strong>Settings</strong> gear.</p>
     </div>
     <div class="run-step">
       <label for="bom-sub">Subscriptions</label>
@@ -588,6 +883,8 @@
       </select>
       <p class="muted">Select one or more subscriptions to include in the BOM analysis. Hold Ctrl/Cmd to multi-select.</p>
     </div>
+    </div>
+    <div class="bom-wizard-step" data-wstep="2">
     <div class="run-step">
       <label>Services</label>
       <div class="bom-services-toolbar">
@@ -611,7 +908,7 @@
         <p class="muted">Custom services are saved to your local catalog and become selectable below. To manage the <em>built-in</em> list, edit <code>api/_shared/data/bom_service_catalog.json</code> and restart the dashboard.</p>
         <div class="bom-custom-status" id="bom-custom-svc-status"></div>
       </details>
-      <p class="muted">The dashboard will call ARM <code>providers/{namespace}?api-version=2024-07-01</code> for each selected service to compute per-region availability. <code>Premium SSD v2</code> additionally calls <code>Microsoft.Compute/skus</code> for live zone data.</p>
+      <p class="muted">Pick the services in your architecture. The dashboard checks each one's per-region availability when you run the BOM.</p>
     </div>
     <div class="run-step">
       <label>Regions</label>
@@ -642,6 +939,8 @@
       </details>
       <p class="muted">Regions chosen here scope the analysis run. Leave the default list checked to use all of Azure, or narrow it for a customer that only wants to deploy in specific regions.</p>
     </div>
+    </div>
+    <div class="bom-wizard-step" data-wstep="3">
     <div class="run-step">
       <label>Required SKUs &amp; cores</label>
       <table class="bom-skus-table">
@@ -663,17 +962,21 @@
       </div>
       <p class="muted">Pick a <strong>Family ID</strong> from the dropdown — the list is loaded live from Azure (<code>Microsoft.Compute/skus</code>) so the case-sensitive values (e.g. <code>standardDav6Family</code>, <code>standardDASv5Family</code>) are always exact. You can still type a value if it isn't listed. The dashboard auto-derives the short VM label (e.g. <code>Dav6</code>, <code>Dasv5</code>). Cores must be ≥ 0; required cores drive the <em>Quota Status</em> per region.</p>
     </div>
-    <div class="run-status" id="bom-status"></div>
-    <details>
-      <summary>Import from xlsx</summary>
-      <p class="muted">Prefill the form from a <code>bom_template.xlsx</code> or legacy <code>region_results_*.xlsx</code>. This does <strong>not</strong> save anything — review the prefilled fields, then click <strong>Save BOM</strong>.</p>
-      <input type="file" id="bom-import-file" accept=".xlsx" />
-      <button type="button" id="bom-import-go" class="link-btn">Import</button>
-    </details>
+    <div class="run-step" id="bom-service-tiers-step" hidden>
+      <label>Service tiers</label>
+      <p class="muted">Some selected services offer <strong>service tiers</strong> (e.g. Azure SQL: Basic / Standard / Premium, or General Purpose / Business Critical / Hyperscale). Choose a tier where it matters — tiers marked <span class="tier-zr-note">zone-redundant capable</span> can be made resilient across Availability Zones, which the region readiness check will validate.</p>
+      <div id="bom-service-tiers-list" class="bom-service-tiers"></div>
+    </div>
+          </div>
+          <div class="run-status" id="bom-status"></div>
   </div>
   <footer>
     <button type="button" id="bom-cancel" class="btn">Cancel</button>
-    <button type="button" id="bom-save" class="btn btn--primary">Save</button>
+    <div class="bom-wizard-footer-nav">
+      <button type="button" id="bom-wizard-back" class="btn" hidden>← Back</button>
+      <button type="button" id="bom-wizard-next" class="btn btn--accent">Next →</button>
+      <button type="button" id="bom-save" class="btn btn--primary" hidden>Save</button>
+    </div>
   </footer>
 </div>
 
@@ -722,6 +1025,6 @@
 
 <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
 
-<script src="app.js?v=2026062910"></script>
+<script src="app.js?v=2026090316"></script>
 </body>
 </html>

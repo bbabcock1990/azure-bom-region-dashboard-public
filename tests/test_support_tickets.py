@@ -1,0 +1,408 @@
+"""Tests for the automated support-ticket feature: settings persistence,
+payload building, dry-run (no network), and a mocked real submission.
+"""
+import os
+
+import httpx
+import pytest
+import respx
+from unittest.mock import MagicMock, patch
+
+
+@pytest.fixture()
+def isolated_storage(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_STORAGE_DIR", str(tmp_path))
+    monkeypatch.delenv("ALLOWED_ORIGIN", raising=False)
+    # Fresh import of storage-backed modules is unnecessary — storage reads the
+    # env per call — but clear any cached settings module state defensively.
+    yield
+
+
+# ─── settings ────────────────────────────────────────────────────────────────
+
+def test_settings_defaults_and_roundtrip(isolated_storage):
+    from _shared import support_settings
+    s = support_settings.get_settings()
+    assert s["default_severity"] == "moderate"
+    assert s["country"] == "US"
+    assert support_settings.is_configured() is False
+
+    saved = support_settings.save_settings({
+        "contact_first_name": "Ada", "primary_email": "ada@example.com",
+        "default_severity": "BOGUS",  # clamps to moderate
+        "junk_key": "ignored",
+    })
+    assert saved["contact_first_name"] == "Ada"
+    assert saved["default_severity"] == "moderate"
+    assert "junk_key" not in saved
+    assert support_settings.is_configured() is True
+
+
+def test_validation_rg_per_subscription_merge_and_resolve(isolated_storage):
+    from _shared import support_settings
+    # Defaults: empty map, resolve to "" for any subscription.
+    assert support_settings.get_settings()["validation_resource_groups"] == {}
+    assert support_settings.resolve_validation_rg("sub-a") == ""
+
+    # Save an RG for sub-a; sub-b unaffected.
+    support_settings.save_settings({"validation_resource_groups": {"sub-a": "rg-a"}})
+    assert support_settings.resolve_validation_rg("sub-a") == "rg-a"
+    assert support_settings.resolve_validation_rg("sub-b") == ""
+
+    # Merge (not clobber): adding sub-b keeps sub-a.
+    support_settings.save_settings({"validation_resource_groups": {"sub-b": "rg-b"}})
+    assert support_settings.resolve_validation_rg("sub-a") == "rg-a"
+    assert support_settings.resolve_validation_rg("sub-b") == "rg-b"
+
+    # Empty value clears just that subscription's entry.
+    support_settings.save_settings({"validation_resource_groups": {"sub-a": ""}})
+    assert support_settings.resolve_validation_rg("sub-a") == ""
+    assert support_settings.resolve_validation_rg("sub-b") == "rg-b"
+
+
+def test_validation_rg_legacy_global_fallback(isolated_storage):
+    from _shared import support_settings
+    # Legacy global value is used when no per-subscription entry exists.
+    support_settings.save_settings({"validation_resource_group": "legacy-rg"})
+    assert support_settings.resolve_validation_rg("sub-x") == "legacy-rg"
+    # A per-subscription entry overrides the legacy global for that sub.
+    support_settings.save_settings({"validation_resource_groups": {"sub-x": "rg-x"}})
+    assert support_settings.resolve_validation_rg("sub-x") == "rg-x"
+    assert support_settings.resolve_validation_rg("sub-y") == "legacy-rg"
+
+
+# ─── payload building (pure) ─────────────────────────────────────────────────
+
+def test_build_quota_ticket_payload_shape(isolated_storage):
+    from _shared import support_tickets
+    payload = support_tickets.build_quota_ticket_payload(
+        subscription_id="11111111-1111-1111-1111-111111111111",
+        region="eastus", family="standardDav6Family", new_limit=300,
+        severity="moderate", settings={"primary_email": "a@b.com", "country": "US"},
+        problem_classification_id="/x/problemClassifications/y", family_label="Dadv6",
+    )
+    props = payload["properties"]
+    assert props["serviceId"].endswith(support_tickets.QUOTA_SERVICE_GUID)
+    assert props["severity"] == "moderate"
+    assert props["quotaTicketDetails"]["quotaChangeRequests"][0]["region"] == "eastus"
+    # Azure Support requires ISO 3166-1 alpha-3 for country ("US" -> "USA").
+    assert props["contactDetails"]["country"] == "USA"
+
+
+def test_iso3_country_normalization():
+    from _shared import support_tickets as st
+    assert st._iso3_country("US") == "USA"
+    assert st._iso3_country("us") == "USA"
+    assert st._iso3_country("USA") == "USA"      # already alpha-3
+    assert st._iso3_country("GB") == "GBR"
+    assert st._iso3_country("United States") == "USA"
+    assert st._iso3_country("") == "USA"          # default
+    assert st._iso3_country("ZZ") == "USA"        # unknown -> default
+
+
+# ─── dry-run: no network ─────────────────────────────────────────────────────
+
+def test_create_ticket_dry_run_is_offline_and_tracked(isolated_storage):
+    from _shared import support_tickets, support_settings
+    support_settings.save_settings({"contact_first_name": "Ada", "primary_email": "ada@example.com"})
+    result = support_tickets.create_ticket(
+        kind="quota", subscription_id="11111111-1111-1111-1111-111111111111",
+        region="eastus", family="standardDav6Family", new_limit=300,
+        dry_run=True, token=None,
+    )
+    assert result["status"] == "preview"
+    assert result["dry_run"] is True
+    assert result["payload"]["properties"]["title"]
+    # tracked and listable
+    listed = support_tickets.list_tickets()
+    assert any(t["ticket_name"] == result["ticket_name"] for t in listed)
+
+
+def test_create_ticket_demo_mode_never_submits(isolated_storage):
+    from _shared import support_tickets
+    result = support_tickets.create_ticket(
+        kind="technical", subscription_id="11111111-1111-1111-1111-111111111111",
+        region="westus2", family="standardNCadsH100v5Family", new_limit=100,
+        zones=["1", "2"], dry_run=False, token="should-not-be-used", demo_mode=True,
+    )
+    assert result["status"] == "preview"
+    assert result["dry_run"] is True
+
+
+def test_zonal_ticket_is_quota_shaped_with_zonal_payload(isolated_storage):
+    from _shared import support_tickets as st
+    result = st.create_ticket(
+        kind="technical", subscription_id="11111111-1111-1111-1111-111111111111",
+        region="australiaeast", family="StandardDsv7Family", family_label="Dsv7",
+        new_limit=900, zones=["1", "3"], dry_run=True, token=None,
+    )
+    props = result["payload"]["properties"]
+    # Filed under the quota service (cores-vCPUs), NOT a technical ticket.
+    assert props["serviceId"].endswith(st.QUOTA_SERVICE_GUID)
+    assert "technicalTicketDetails" not in props
+    qtd = props["quotaTicketDetails"]
+    assert qtd["quotaChangeRequestVersion"] == "1.0"
+    reqs = qtd["quotaChangeRequests"]
+    assert len(reqs) == 2  # one per requested zone
+    # Region is uppercased + space-stripped; payload carries the portal format.
+    assert all(r["region"] == "AUSTRALIAEAST" for r in reqs)
+    p0 = reqs[0]["payload"]
+    assert "VMFamily:StandardDsv7Family" in p0
+    assert "NewLimit:900" in p0
+    assert "Type:Zonal" in p0
+    assert "DeploymentStack:ARM" in p0
+    assert "LogicalAvailabilityZone:Zone 1" in p0
+    # Offline preview (no token) falls back to a generic physical AZ label.
+    assert "AvailabilityZone:Physical AZ01" in p0
+    assert "LogicalAvailabilityZone:Zone 3" in reqs[1]["payload"]
+
+
+def test_zonal_ticket_requires_zones_and_limit(isolated_storage):
+    from _shared import support_tickets as st
+    sub = "11111111-1111-1111-1111-111111111111"
+    with pytest.raises(st.SupportError) as ex1:
+        st.create_ticket(kind="technical", subscription_id=sub, region="eastus",
+                         family="StandardDsv7Family", new_limit=100, zones=[], dry_run=True)
+    assert ex1.value.code == "bad_zones"
+    with pytest.raises(st.SupportError) as ex2:
+        st.create_ticket(kind="technical", subscription_id=sub, region="eastus",
+                         family="StandardDsv7Family", new_limit=0, zones=["1"], dry_run=True)
+    assert ex2.value.code == "bad_limit"
+
+
+def test_physical_zone_map_parses_availability_zone_mappings(isolated_storage):
+    from _shared import support_tickets as st
+    sub = "11111111-1111-1111-1111-111111111111"
+    with patch("_shared.support_tickets.httpx.Client") as MC:
+        client = MC.return_value.__enter__.return_value
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"value": [
+            {"name": "australiaeast", "availabilityZoneMappings": [
+                {"logicalZone": "1", "physicalZone": "australiaeast-az2"},
+                {"logicalZone": "2", "physicalZone": "australiaeast-az1"},
+            ]},
+            {"name": "eastus", "availabilityZoneMappings": [
+                {"logicalZone": "1", "physicalZone": "eastus-az3"},
+            ]},
+        ]}
+        client.get.return_value = resp
+        out = st._physical_zone_map(sub, "australiaeast", "token")
+    assert out == {"1": "Physical AZ02", "2": "Physical AZ01"}
+
+
+def test_create_ticket_bad_kind(isolated_storage):
+    from _shared import support_tickets
+    with pytest.raises(support_tickets.SupportError) as ex:
+        support_tickets.create_ticket(
+            kind="nope", subscription_id="11111111-1111-1111-1111-111111111111",
+            region="eastus", family="x", dry_run=True,
+        )
+    assert ex.value.code == "bad_kind"
+
+
+# ─── real submission (mocked ARM) ────────────────────────────────────────────
+
+@respx.mock
+def test_create_ticket_real_submit_mocked(isolated_storage):
+    from _shared import support_tickets, support_settings
+    support_settings.save_settings({
+        "contact_first_name": "Ada", "primary_email": "ada@example.com", "country": "US",
+    })
+    sub = "11111111-1111-1111-1111-111111111111"
+
+    respx.get(url__regex=r".*/problemClassifications").mock(
+        return_value=httpx.Response(200, json={
+            "value": [{
+                "id": f"/providers/Microsoft.Support/services/{support_tickets.QUOTA_SERVICE_GUID}/problemClassifications/pc-guid",
+                "properties": {"displayName": "Compute VM (cores-vCPUs) quota increase"},
+            }]
+        })
+    )
+    put_route = respx.put(url__regex=r".*/supportTickets/.*").mock(
+        return_value=httpx.Response(201, json={
+            "id": f"/subscriptions/{sub}/providers/Microsoft.Support/supportTickets/bomdash",
+            "properties": {"status": "Open", "supportTicketId": "2400010"},
+        })
+    )
+
+    result = support_tickets.create_ticket(
+        kind="quota", subscription_id=sub, region="eastus",
+        family="standardDav6Family", new_limit=300,
+        dry_run=False, token="fake-token",
+    )
+    assert put_route.called
+    assert result["status"] == "submitted"
+    assert result["azure_status"] == "Open"
+    assert result["dry_run"] is False
+
+
+@respx.mock
+def test_real_submit_fails_when_classification_unresolved(isolated_storage):
+    from _shared import support_tickets, support_settings
+    support_settings.save_settings({
+        "contact_first_name": "Ada", "primary_email": "ada@example.com", "country": "US",
+    })
+    respx.get(url__regex=r".*/problemClassifications").mock(
+        return_value=httpx.Response(200, json={"value": []})
+    )
+    with pytest.raises(support_tickets.SupportError) as ex:
+        support_tickets.create_ticket(
+            kind="quota", subscription_id="11111111-1111-1111-1111-111111111111",
+            region="eastus", family="standardDav6Family", new_limit=300,
+            dry_run=False, token="fake-token",
+        )
+    assert ex.value.code == "classification_unresolved"
+
+
+def test_real_submit_requires_contact(isolated_storage):
+    from _shared import support_tickets
+    # no settings saved → contact incomplete
+    with pytest.raises(support_tickets.SupportError) as ex:
+        support_tickets.create_ticket(
+            kind="quota", subscription_id="11111111-1111-1111-1111-111111111111",
+            region="eastus", family="standardDav6Family", new_limit=300,
+            dry_run=False, token="fake-token",
+        )
+    assert ex.value.code in ("contact_incomplete", "classification_unresolved")
+
+
+# ─── live Azure ticket listing (mocked ARM) ──────────────────────────────────
+
+@respx.mock
+def test_list_azure_tickets_filters_closed_and_normalizes(isolated_storage):
+    from _shared import support_tickets
+    sub = "11111111-1111-1111-1111-111111111111"
+    respx.get(url__regex=r".*/supportTickets(\?.*)?$").mock(
+        return_value=httpx.Response(200, json={"value": [
+            {"name": "2400001", "properties": {
+                "title": "Open quota case", "severity": "moderate", "status": "Open",
+                "createdDate": "2026-08-01T00:00:00Z", "supportTicketId": "2400001",
+                "quotaTicketDetails": {}}},
+            {"name": "2400002", "properties": {
+                "title": "Closed case", "severity": "minimal", "status": "Closed",
+                "createdDate": "2026-07-01T00:00:00Z", "supportTicketId": "2400002"}},
+        ]})
+    )
+    tickets = support_tickets.list_azure_tickets(sub, "fake-token", open_only=True)
+    assert len(tickets) == 1
+    t = tickets[0]
+    assert t["ticket_name"] == "2400001"
+    assert t["kind"] == "quota"
+    assert t["azure_status"] == "Open"
+    assert t["external"] is True
+    assert t["subscription_id"] == sub
+
+
+@respx.mock
+def test_list_azure_tickets_includes_closed_when_requested(isolated_storage):
+    from _shared import support_tickets
+    sub = "11111111-1111-1111-1111-111111111111"
+    respx.get(url__regex=r".*/supportTickets(\?.*)?$").mock(
+        return_value=httpx.Response(200, json={"value": [
+            {"name": "a", "properties": {"status": "Open", "createdDate": "2026-08-02T00:00:00Z"}},
+            {"name": "b", "properties": {"status": "Closed", "createdDate": "2026-08-01T00:00:00Z"}},
+        ]})
+    )
+    tickets = support_tickets.list_azure_tickets(sub, "fake-token", open_only=False)
+    assert {t["ticket_name"] for t in tickets} == {"a", "b"}
+    # newest first
+    assert tickets[0]["ticket_name"] == "a"
+
+
+def test_list_azure_tickets_rejects_bad_subscription(isolated_storage):
+    from _shared import support_tickets
+    with pytest.raises(support_tickets.SupportError) as ex:
+        support_tickets.list_azure_tickets("not-a-guid", "fake-token")
+    assert ex.value.code == "bad_subscription"
+
+
+@respx.mock
+def test_list_azure_tickets_surfaces_arm_error(isolated_storage):
+    from _shared import support_tickets
+    sub = "11111111-1111-1111-1111-111111111111"
+    respx.get(url__regex=r".*/supportTickets(\?.*)?$").mock(
+        return_value=httpx.Response(403, json={"error": {"message": "no support plan"}})
+    )
+    with pytest.raises(support_tickets.SupportError) as ex:
+        support_tickets.list_azure_tickets(sub, "fake-token")
+    assert ex.value.status == 403
+    assert "support plan" in ex.value.message.lower()
+
+
+# ─── close ticket ────────────────────────────────────────────────────────────
+
+@respx.mock
+def test_close_azure_ticket_patches_and_returns_status(isolated_storage):
+    from _shared import support_tickets
+    import json as _json
+    sub = "11111111-1111-1111-1111-111111111111"
+    route = respx.patch(url__regex=r".*/supportTickets/2400001(\?.*)?$").mock(
+        return_value=httpx.Response(200, json={"properties": {"status": "Closed"}})
+    )
+    out = support_tickets.close_azure_ticket(sub, "2400001", "fake-token")
+    assert route.called
+    assert out["ticket_name"] == "2400001"
+    assert out["azure_status"] == "Closed"
+    assert _json.loads(route.calls[0].request.content)["status"] == "Closed"
+
+
+def test_close_azure_ticket_rejects_bad_subscription(isolated_storage):
+    from _shared import support_tickets
+    with pytest.raises(support_tickets.SupportError) as ex:
+        support_tickets.close_azure_ticket("not-a-guid", "2400001", "fake-token")
+    assert ex.value.code == "bad_subscription"
+
+
+def test_close_azure_ticket_requires_name(isolated_storage):
+    from _shared import support_tickets
+    sub = "11111111-1111-1111-1111-111111111111"
+    with pytest.raises(support_tickets.SupportError) as ex:
+        support_tickets.close_azure_ticket(sub, "", "fake-token")
+    assert ex.value.code == "bad_name"
+
+
+@respx.mock
+def test_close_azure_ticket_surfaces_arm_error(isolated_storage):
+    from _shared import support_tickets
+    sub = "11111111-1111-1111-1111-111111111111"
+    respx.patch(url__regex=r".*/supportTickets/2400001(\?.*)?$").mock(
+        return_value=httpx.Response(409, json={"error": {"message": "ticket is assigned"}})
+    )
+    with pytest.raises(support_tickets.SupportError) as ex:
+        support_tickets.close_azure_ticket(sub, "2400001", "fake-token")
+    assert ex.value.status == 409
+    assert "assigned" in ex.value.message.lower()
+
+
+# ─── problem-classification resolution ───────────────────────────────────────
+
+@respx.mock
+def test_resolve_classification_picks_best_scoring_match():
+    from _shared import support_tickets
+    respx.get(url__regex=r".*/problemClassifications(\?.*)?$").mock(
+        return_value=httpx.Response(200, json={"value": [
+            {"id": "/x/problemClassifications/batch", "properties": {"displayName": "Batch accounts"}},
+            {"id": "/x/problemClassifications/cores", "properties": {"displayName": "Compute-VM (cores-vCPUs) subscription limit increases"}},
+            {"id": "/x/problemClassifications/storage", "properties": {"displayName": "Storage accounts"}},
+        ]})
+    )
+    pc = support_tickets.resolve_problem_classification("tok", support_tickets.QUOTA_SERVICE_GUID, ["cores", "vcpu"])
+    assert pc == "/x/problemClassifications/cores"
+
+
+@respx.mock
+def test_resolve_classification_returns_none_when_nothing_matches():
+    from _shared import support_tickets
+    # None of these relate to the keywords → must NOT fall back to an arbitrary
+    # (wrong) classification, which would make ARM reject the ticket with a 400.
+    respx.get(url__regex=r".*/problemClassifications(\?.*)?$").mock(
+        return_value=httpx.Response(200, json={"value": [
+            {"id": "/x/problemClassifications/batch", "properties": {"displayName": "Batch accounts"}},
+            {"id": "/x/problemClassifications/storage", "properties": {"displayName": "Storage accounts"}},
+        ]})
+    )
+    pc = support_tickets.resolve_problem_classification("tok", support_tickets.QUOTA_SERVICE_GUID, ["cores", "vcpu"])
+    assert pc is None
+
+

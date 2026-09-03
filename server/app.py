@@ -29,6 +29,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from api._shared import httpfunc  # noqa: E402
+from api._shared import auth_token  # noqa: E402
 
 from fastapi import FastAPI  # noqa: E402
 
@@ -40,6 +41,8 @@ APP_DIR = _REPO_ROOT / "app"
 # Optional Azure route params ({name?}) are registered as two explicit paths.
 ROUTES = [
     ("snapshots/diff", ["GET"], "snapshot_diff"),
+    ("snapshots/export", ["GET"], "snapshots_export"),
+    ("snapshots/import", ["POST"], "snapshots_import"),
     ("snapshots/latest", ["GET"], "snapshots_latest"),
     ("snapshots/{run_id}", ["GET"], "snapshots_get"),
     ("snapshots", ["GET"], "snapshots_list"),
@@ -49,13 +52,20 @@ ROUTES = [
     ("quota/request-increase", ["POST"], "quota_increase"),
     ("quota/request-status", ["GET"], "quota_request_status"),
     ("quota/history", ["GET", "POST"], "quota_history"),
+    ("providers/register", ["POST"], "register_provider"),
+    ("providers/status", ["GET"], "register_provider"),
     ("subscription_metadata/{bom_id}", ["GET", "PUT", "DELETE"], "subscription_metadata"),
     ("subscription_metadata", ["GET", "POST", "PUT", "DELETE"], "subscription_metadata"),
     ("subscriptions", ["GET"], "subscriptions_list"),
     ("az/subscriptions", ["GET"], "az_subscriptions"),
+    ("az/resource-groups", ["GET", "POST"], "az_resource_groups"),
+    ("permissions/check", ["GET"], "permissions_check"),
     ("bom/import_xlsx", ["POST"], "bom_import_xlsx"),
     ("bom/sensitivity", ["GET"], "bom_sensitivity"),
     ("bom/sku_families", ["GET"], "bom_sku_families"),
+    ("bom/zonal-capability", ["POST"], "bom_zonal_capability"),
+    ("bom/zonal-verifications", ["GET", "POST"], "bom_zonal_verifications"),
+    ("bom/deep-check", ["POST"], "bom_deep_check"),
     ("bom/service_catalog/{name}", ["GET", "POST", "DELETE"], "bom_service_catalog"),
     ("bom/service_catalog", ["GET", "POST", "DELETE"], "bom_service_catalog"),
     ("bom/region_catalog/{name}", ["GET", "POST", "DELETE"], "bom_region_catalog"),
@@ -65,6 +75,24 @@ ROUTES = [
     ("activity_log/clear", ["POST"], "activity_log_clear"),
     ("activity_log", ["GET"], "activity_log_list"),
     ("donor-quota-scan", ["POST"], "donor_quota_scan"),
+    ("app-config", ["GET"], "app_config"),
+    ("support/settings", ["GET", "POST"], "support_settings"),
+    ("support/azure-tickets/close", ["POST"], "support_azure_ticket_close"),
+    ("support/azure-tickets", ["GET"], "support_azure_tickets"),
+    ("support/tickets/{ticket_name}", ["GET", "POST"], "support_ticket_get"),
+    ("support/tickets", ["GET"], "support_tickets_list"),
+    ("support/tickets", ["POST"], "support_ticket_create"),
+    ("pricing/settings", ["GET", "POST"], "pricing_settings"),
+    ("pricing/estimate", ["POST"], "pricing_estimate"),
+    ("pricing/validate-alternatives", ["POST"], "pricing_validate_alt"),
+    ("datasets/{dataset_id}/refresh", ["POST"], "datasets"),
+    ("datasets/{dataset_id}/source", ["POST", "DELETE"], "datasets"),
+    ("datasets/{dataset_id}", ["GET", "POST", "DELETE"], "datasets"),
+    ("datasets", ["GET"], "datasets"),
+    ("local-state/wipe", ["POST"], "local_state_wipe"),
+    ("local-state/open-folder", ["POST"], "local_state_open_folder"),
+    ("state/{action}", ["GET", "POST"], "state_sync"),
+    ("demo/seed", ["POST"], "demo_seed"),
 ]
 
 
@@ -113,10 +141,28 @@ async def _adapt_request(request: Request) -> httpfunc.HttpRequest:
 def _make_endpoint(handler):
     async def endpoint(request: Request) -> Response:
         req = await _adapt_request(request)
-        if inspect.iscoroutinefunction(handler):
-            resp = await handler(req)
-        else:
-            resp = await run_in_threadpool(handler, req)
+        # Stateless multi-customer plumbing: bind the signed-in customer's
+        # delegated ARM token (minted in their browser, forwarded per request)
+        # and stable user key (Easy Auth principal id) for the duration of this
+        # request only, then clear them. Nothing is retained across requests, so
+        # concurrent customers never share tokens or state.
+        arm_token = request.headers.get("x-bom-access-token")
+        user_key = (
+            request.headers.get("x-ms-client-principal-id")
+            or request.headers.get("x-bom-user-key")
+        )
+        ctx_bound = False
+        if arm_token or user_key:
+            auth_token.set_request_context(arm_token=arm_token, user_key=user_key)
+            ctx_bound = True
+        try:
+            if inspect.iscoroutinefunction(handler):
+                resp = await handler(req)
+            else:
+                resp = await run_in_threadpool(handler, req)
+        finally:
+            if ctx_bound:
+                auth_token.clear_request_context()
         return Response(
             content=resp.get_body(),
             status_code=resp.status_code,
@@ -151,6 +197,16 @@ def create_app() -> FastAPI:
 
     # Static frontend last, so /api/* routes take precedence.
     app.mount("/", StaticFiles(directory=str(APP_DIR), html=True), name="static")
+
+    # In demo mode, seed a sample BOM + snapshot so the dashboard is populated
+    # on first launch (before any Azure sign-in). Best-effort; never fatal.
+    try:
+        from api._shared import demo_seed
+        if demo_seed.seed_if_empty():
+            print("==> Demo mode: seeded sample BOM + analysis snapshot")
+    except Exception:  # pragma: no cover - defensive
+        pass
+
     return app
 
 

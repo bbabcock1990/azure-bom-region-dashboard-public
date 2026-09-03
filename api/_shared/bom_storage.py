@@ -187,6 +187,69 @@ def _validate_customer_name(name: Optional[str]) -> Optional[str]:
     return s
 
 
+# Availability target of the workload. Determines whether a zone-redundancy
+# (ZRS/HA) restriction is a hard deployment blocker ("zone_redundant") or merely
+# advisory ("regional", single-zone tolerant). Defaults to zone_redundant so
+# existing BOMs keep treating AZ restrictions as blockers.
+VALID_RESILIENCE = ("regional", "zone_redundant")
+
+
+def _validate_resilience(value: Optional[str]) -> str:
+    v = str(value or "").strip().lower()
+    return v if v in VALID_RESILIENCE else "zone_redundant"
+
+
+# Per-BOM support-contact override. Mirrors the global support_settings fields
+# so each BOM can carry its own ticket owner + contact profile, initialized from
+# the global defaults but independently editable. Stored as a compact JSON blob.
+_SUPPORT_OVERRIDE_FIELDS = (
+    "contact_first_name",
+    "contact_last_name",
+    "primary_email",
+    "additional_emails",
+    "phone",
+    "country",
+    "preferred_timezone",
+    "preferred_contact_method",
+    "preferred_language",
+    "default_severity",
+)
+_VALID_SEVERITIES = ("minimal", "moderate", "critical")
+MAX_SUPPORT_FIELD_LEN = 200
+
+
+def _validate_support_override(obj) -> Dict[str, str]:
+    """Return a cleaned per-BOM support override dict.
+
+    Only known fields are kept (unknown keys dropped), every value is coerced to
+    a trimmed string, severity is constrained to the accepted set, and empty
+    fields are omitted so the blob only carries genuine overrides. Non-dict
+    input yields an empty override (BOM simply inherits the global profile).
+    """
+    if not isinstance(obj, dict):
+        return {}
+    cleaned: Dict[str, str] = {}
+    for key in _SUPPORT_OVERRIDE_FIELDS:
+        if key not in obj or obj[key] is None:
+            continue
+        val = str(obj[key]).strip()
+        if not val:
+            continue
+        if key == "default_severity":
+            val = val.lower()
+            if val not in _VALID_SEVERITIES:
+                continue
+        if len(val) > MAX_SUPPORT_FIELD_LEN:
+            raise BomStorageError(
+                "bad_support_override",
+                f"support_override.{key} is too long ({len(val)} chars; "
+                f"max {MAX_SUPPORT_FIELD_LEN}).",
+                400,
+            )
+        cleaned[key] = val
+    return cleaned
+
+
 def _validate_segments(segments_csv: Optional[str]) -> str:
     """Returns a normalized uppercase CSV. Empty / None becomes the
     default "EA,ANY"."""
@@ -274,11 +337,14 @@ def _validate_services(items: List[Dict]) -> List[Dict]:
         )
     names: List[str] = []
     seen: set = set()
+    tiers: Dict[str, str] = {}
     for i, item in enumerate(items):
+        tier = ""
         if isinstance(item, str):
             name = item.strip()
         elif isinstance(item, dict):
             name = str(item.get("name") or "").strip()
+            tier = str(item.get("tier") or "").strip()
         else:
             raise BomStorageError(
                 "bad_services",
@@ -292,16 +358,38 @@ def _validate_services(items: List[Dict]) -> List[Dict]:
             continue
         seen.add(name)
         names.append(name)
+        if tier:
+            tiers[name] = tier
     if not names:
         return []
     try:
         resolved = bom_services.resolve_services(names)
     except bom_services.BomServicesError as ex:
         raise BomStorageError(ex.code, ex.message, ex.status)
-    # Preserve the user's order; emit minimal records (just name) since
-    # provider/resource_type/zone_check are looked up from the catalog
-    # at every run anyway.
-    return [{"name": s["name"]} for s in resolved]
+    # Preserve the user's order; emit minimal records (name + optional tier).
+    # provider/resource_type/zone_check/tiers are looked up from the catalog
+    # at every run anyway. A tier is only persisted when it's valid for that
+    # service's catalog tier list, so stale/invalid tiers are dropped loudly-safe.
+    out: List[Dict] = []
+    for s in resolved:
+        rec: Dict = {"name": s["name"]}
+        want = tiers.get(s["name"])
+        if want:
+            valid_ids = {t["id"].lower() for t in bom_services.tiers_for_service(s["name"])}
+            if want.lower() in valid_ids:
+                # Normalize to the catalog's canonical id casing.
+                for t in bom_services.tiers_for_service(s["name"]):
+                    if t["id"].lower() == want.lower():
+                        rec["tier"] = t["id"]
+                        break
+            else:
+                raise BomStorageError(
+                    "bad_services",
+                    f"Service '{s['name']}' has no tier '{want}'.",
+                    400,
+                )
+        out.append(rec)
+    return out
 
 
 def _validate_regions(items) -> List[str]:
@@ -390,6 +478,14 @@ def _entity_to_record(e: Dict) -> Dict:
     if not subscription_ids:
         primary_sub = e.get("subscription_id") or e.get("RowKey")
         subscription_ids = [primary_sub] if primary_sub else []
+    try:
+        support_override = json.loads(e.get("support_override_json") or "{}")
+        if not isinstance(support_override, dict):
+            support_override = {}
+    except Exception:
+        log.warning("subscription_metadata: support_override_json corrupt for %s",
+                    e.get("RowKey"))
+        support_override = {}
     return {
         "bom_id": e.get("RowKey"),
         "subscription_id": subscription_ids[0] if subscription_ids else (e.get("subscription_id") or e.get("RowKey")),
@@ -397,9 +493,11 @@ def _entity_to_record(e: Dict) -> Dict:
         "tag": e.get("tag") or None,
         "customer_name": e.get("customer_name") or None,
         "customer_segments": e.get("customer_segments") or "EA,ANY",
+        "resilience": _validate_resilience(e.get("resilience")),
         "required_skus": required_skus,
         "services": services,
         "regions": regions,
+        "support_override": support_override,
         "bom_updated_at": e.get("bom_updated_at") or None,
         "bom_updated_by": e.get("bom_updated_by") or None,
     }
@@ -441,9 +539,11 @@ def create(
     tag: Optional[str] = None,
     customer_name: Optional[str] = None,
     customer_segments: Optional[str] = None,
+    resilience: Optional[str] = None,
     required_skus: Optional[List[Dict]] = None,
     services: Optional[List[Dict]] = None,
     regions: Optional[List] = None,
+    support_override: Optional[Dict] = None,
     updated_by: str,
 ) -> Dict:
     """Create a brand-new BOM with a freshly allocated bom_id. The same
@@ -455,9 +555,11 @@ def create(
         tag=tag,
         customer_name=customer_name,
         customer_segments=customer_segments,
+        resilience=resilience,
         required_skus=required_skus or [],
         services=services or [],
         regions=regions or [],
+        support_override=support_override,
         updated_by=updated_by,
     )
 
@@ -470,9 +572,11 @@ def upsert(
     tag: Optional[str],
     customer_name: Optional[str],
     customer_segments: Optional[str],
+    resilience: Optional[str] = None,
     required_skus: List[Dict],
     services: List[Dict],
     regions: Optional[List] = None,
+    support_override: Optional[Dict] = None,
     updated_by: str,
 ) -> Dict:
     """Validate, persist, and return the saved record keyed by ``bom_id``.
@@ -484,17 +588,21 @@ def upsert(
     tag = _validate_tag(tag)
     customer_name = _validate_customer_name(customer_name)
     segments_csv = _validate_segments(customer_segments)
+    resilience_val = _validate_resilience(resilience)
     cleaned_skus = _validate_required_skus(required_skus or [])
     cleaned_services = _validate_services(services or [])
     cleaned_regions = _validate_regions(regions or [])
+    cleaned_override = _validate_support_override(support_override or {})
 
     skus_json = json.dumps(cleaned_skus, ensure_ascii=False)
     services_json = json.dumps(cleaned_services, ensure_ascii=False)
     regions_json = json.dumps(cleaned_regions, ensure_ascii=False)
     subscription_ids_json = json.dumps(normalized_sub_ids, ensure_ascii=False)
+    support_override_json = json.dumps(cleaned_override, ensure_ascii=False)
     _ensure_json_size(skus_json, what="required_skus")
     _ensure_json_size(services_json, what="services")
     _ensure_json_size(regions_json, what="regions")
+    _ensure_json_size(support_override_json, what="support_override")
 
     entity = {
         "PartitionKey": PARTITION,
@@ -504,9 +612,11 @@ def upsert(
         "tag": tag or "",
         "customer_name": customer_name or "",
         "customer_segments": segments_csv,
+        "resilience": resilience_val,
         "required_skus_json": skus_json,
         "services_json": services_json,
         "regions_json": regions_json,
+        "support_override_json": support_override_json,
         "bom_updated_at": _now_iso(),
         "bom_updated_by": (updated_by or "")[:80],
     }

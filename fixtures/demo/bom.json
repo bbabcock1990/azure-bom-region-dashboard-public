@@ -1,0 +1,16 @@
+{
+  "pk": "sub",
+  "rk": "0c04d0143c354ea8adf7537872e92f97",
+  "data": {
+    "subscription_id": "d3305e11-0000-4a00-b000-0000c0ffee01",
+    "subscription_ids_json": "[\"d3305e11-0000-4a00-b000-0000c0ffee01\"]",
+    "tag": "Contoso \u2014 Sample BOM",
+    "customer_name": "Contoso Ltd (sample)",
+    "customer_segments": "EA,ANY",
+    "required_skus_json": "[{\"primary_family\": \"standardDadv6Family\", \"primary_label\": \"Dadv6\", \"alt_family\": \"standardBasv2Family\", \"alt_label\": \"Basv2\", \"required_cores\": 100}]",
+    "services_json": "[{\"name\": \"Azure Automation\"}, {\"name\": \"Azure Firewall\"}, {\"name\": \"Azure Monitor\"}, {\"name\": \"Azure NAT Gateway\"}]",
+    "regions_json": "[\"australiacentral\", \"australiacentral2\", \"australiaeast\", \"australiasoutheast\", \"austriaeast\", \"belgiumcentral\", \"brazilsouth\", \"brazilsoutheast\", \"canadacentral\", \"canadaeast\", \"centralindia\", \"centralus\", \"chilecentral\", \"denmarkeast\", \"eastasia\", \"eastus\", \"eastus2\", \"francecentral\", \"francesouth\", \"germanynorth\", \"germanywestcentral\", \"indonesiacentral\", \"israelcentral\", \"italynorth\", \"japaneast\", \"japanwest\", \"koreacentral\", \"koreasouth\", \"malaysiawest\", \"mexicocentral\", \"newzealandnorth\", \"northcentralus\", \"northeurope\", \"norwayeast\", \"norwaywest\", \"polandcentral\", \"qatarcentral\", \"southafricanorth\", \"southafricawest\", \"southcentralus\", \"southindia\", \"southeastasia\", \"spaincentral\", \"swedencentral\", \"switzerlandnorth\", \"switzerlandwest\", \"uaecentral\", \"uaenorth\", \"uksouth\", \"ukwest\", \"westcentralus\", \"westeurope\", \"westindia\", \"westus\", \"westus2\", \"westus3\"]",
+    "bom_updated_at": "2026-08-05T16:28:51Z",
+    "bom_updated_by": "demo-user"
+  }
+}

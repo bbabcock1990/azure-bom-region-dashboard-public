@@ -7,7 +7,9 @@ const STATE = {
   filtered: [],               // currently visible regions
   sortKey: "name",
   sortDir: 1,
-  view: "table",
+  view: "overview",
+  regionsSub: "table",        // active sub-view within the Regions tab
+  settingsTab: "owner",       // active tab within the Settings view
   selectedSlots: ["", "", ""],
   map: null,
   mapLayer: null,
@@ -98,6 +100,28 @@ function focusedSubscriptionId() {
 function focusedSubscriptionName() {
   const subId = focusedSubscriptionId();
   return subId ? _subNameById(subId) : "";
+}
+
+// The validation RG is stored per-subscription (an RG only lives inside one
+// subscription). Resolve the one saved for a given subscription, falling back
+// to the legacy global value for back-compat.
+function _valRgForSub(subId) {
+  const s = SUPPORT.settings || {};
+  const map = s.validation_resource_groups || {};
+  const sub = String(subId || "").trim();
+  if (sub && map[sub]) return String(map[sub]).trim();
+  return String(s.validation_resource_group || "").trim();
+}
+
+// Jump to Settings → Ticket owner and focus the validation-RG field. Used by the
+// contextual "enable deployment validation" affordance on the deep check.
+function openValidationRgSettings() {
+  try { switchView("settings"); } catch (_e) {}
+  try { switchSettingsTab("owner"); } catch (_e) {}
+  setTimeout(() => {
+    const el = document.getElementById("owner-valrg");
+    if (el) { try { el.scrollIntoView({ behavior: "smooth", block: "center" }); el.focus(); } catch (_e) {} }
+  }, 60);
 }
 
 // ---------------------------------------------------------------- Theme
@@ -211,8 +235,114 @@ function initThemeController() {
 
 async function apiFetch(path, opts = {}) {
   const headers = Object.assign({}, opts.headers || {});
+  // Delegated (multi-customer) mode: forward the customer's browser-minted ARM
+  // token so the stateless server can read Azure as that customer. The token
+  // lives only in the browser; it is never persisted server-side.
+  try {
+    if (
+      window.__ARM_TOKEN &&
+      typeof path === "string" &&
+      path.indexOf("/api/") === 0 &&
+      !("X-Bom-Access-Token" in headers)
+    ) {
+      headers["X-Bom-Access-Token"] = window.__ARM_TOKEN;
+    }
+  } catch (e) {}
   const res = await fetch(path, Object.assign({ credentials: "same-origin" }, opts, { headers }));
+  // Stateless hosted mode: after any successful mutation, mirror the server's
+  // per-user RAM store back to the customer's browser (debounced). Skips the
+  // state-sync endpoints themselves to avoid a feedback loop.
+  try {
+    const m = (opts.method || "GET").toUpperCase();
+    if (
+      res.ok &&
+      typeof path === "string" &&
+      path.indexOf("/api/") === 0 &&
+      path.indexOf("/api/state/") !== 0 &&
+      (m === "POST" || m === "PUT" || m === "DELETE" || m === "PATCH")
+    ) {
+      scheduleStateSave();
+    }
+  } catch (e) {}
   return res;
+}
+
+// Acquire (and cache in-memory) the customer's ARM token via MSAL for delegated
+// mode. Returns the token string or null. ``interactive`` allows a sign-in popup.
+async function ensureDelegatedToken({ force = false } = {}) {
+  if (!APP_CONFIG || !APP_CONFIG.delegated_mode || !window.DelegatedAuth) return null;
+  try {
+    const tok = await window.DelegatedAuth.getArmToken({ interactive: force });
+    window.__ARM_TOKEN = tok || null;
+    return tok;
+  } catch (e) {
+    window.__ARM_TOKEN = null;
+    throw e;
+  }
+}
+
+// ---------------------------------------------------------------- State sync
+// Stateless hosted mode: the server keeps NOTHING on disk. The customer's
+// browser is the durable store. On load we replay the saved document into the
+// server's per-user RAM; after any change we mirror the server's state back to
+// localStorage, namespaced by the signed-in user so concurrent customers on the
+// same machine never collide.
+function _stateKey() {
+  let uid = "";
+  try {
+    const a = window.DelegatedAuth && window.DelegatedAuth.account;
+    if (a) uid = a.homeAccountId || a.localAccountId || a.username || "";
+  } catch (e) {}
+  if (!uid) uid = (APP_CONFIG && (APP_CONFIG.user_id || APP_CONFIG.user_name)) || "anon";
+  return "bomState:" + uid;
+}
+
+function _stateSyncEnabled() {
+  return !!(APP_CONFIG && APP_CONFIG.delegated_mode);
+}
+
+async function hydrateStateFromLocal() {
+  if (!_stateSyncEnabled()) return;
+  let raw = null;
+  try { raw = localStorage.getItem(_stateKey()); } catch (e) {}
+  if (!raw) return;
+  try {
+    await apiFetch("/api/state/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: raw,
+    });
+  } catch (e) { console.warn("state hydrate failed", e); }
+}
+
+let _stateSaveTimer = null;
+let _stateSaveInFlight = false;
+function scheduleStateSave() {
+  if (!_stateSyncEnabled()) return;
+  if (_stateSaveTimer) clearTimeout(_stateSaveTimer);
+  _stateSaveTimer = setTimeout(saveStateToLocal, 1000);
+}
+
+async function saveStateToLocal() {
+  if (!_stateSyncEnabled() || _stateSaveInFlight) return;
+  _stateSaveInFlight = true;
+  try {
+    const res = await apiFetch("/api/state/export");
+    if (!res.ok) return;
+    const txt = await res.text();
+    try {
+      localStorage.setItem(_stateKey(), txt);
+    } catch (e) {
+      // QuotaExceededError — state too large for localStorage. Keep working in
+      // this session (server RAM); it just won't survive a reload.
+      console.warn("state save skipped (localStorage full)", e);
+      try { showToast("Local backup skipped — data too large to save in this browser.", "warn"); } catch (_) {}
+    }
+  } catch (e) {
+    console.warn("state export failed", e);
+  } finally {
+    _stateSaveInFlight = false;
+  }
 }
 
 async function apiJson(path, opts = {}) {
@@ -309,6 +439,29 @@ async function loadSnapshot(runId) {
   applyFilters();
   refreshMap();
   if (STATE.view === "quota") renderQuotaTab();
+  fetchPricingEstimate();
+  ensureZrsRefData();
+  _hydrateVerifyAll().catch(() => {});
+}
+
+// Preload the reference data the ZRS (zone-redundancy) readiness check needs:
+//   * a region → has-AZ map (from the region catalog), and
+//   * the service catalog (so we know which selected tiers are ZRS-capable).
+// Both loaders are cached, so this is cheap on repeat snapshot loads. Failures
+// are non-fatal — the readiness section simply won't render.
+async function ensureZrsRefData() {
+  try {
+    const [regions] = await Promise.all([
+      ensureBomRegionsCatalog().catch(() => null),
+      ensureBomCatalog().catch(() => null),
+    ]);
+    STATE.regionAzMap = {};
+    for (const rg of (regions || BOM_EDIT.regionsCatalog || [])) {
+      if (rg && rg.name) STATE.regionAzMap[String(rg.name).toLowerCase()] = !!rg.has_az;
+    }
+  } catch (e) {
+    /* non-fatal */
+  }
 }
 
 // The header is always app-branded now. Per-BOM / per-snapshot context is
@@ -336,7 +489,7 @@ function renderBomPanel() {
     if (bodyEl) bodyEl.classList.add("hidden");
     if (emptyEl) {
       emptyEl.classList.remove("hidden");
-      emptyEl.innerHTML = 'Select a Bill of Materials from the left, or click <strong>+ New</strong> to create one.';
+      renderOnboardingStepper(emptyEl);
     }
     return;
   }
@@ -397,6 +550,140 @@ function renderBomPanel() {
   }
 }
 
+// ---------------------------------------------------------------- Onboarding
+// Active empty-state stepper shown when no BOM is selected/exists. Replaces the
+// old passive "select a BOM" text with a guided path: sign in → create a BOM,
+// plus a one-click "explore with sample data" escape hatch. Re-rendered on
+// sign-in state changes via updateSigninChip().
+function _isSignedIn() {
+  return !!(TOKEN.info && (TOKEN.info.expires_in_seconds || 0) > 0);
+}
+
+function renderOnboardingStepper(host) {
+  if (!host) return;
+  const hasBoms = Object.keys((BOM_META && BOM_META.index) || {}).length > 0;
+  const signedIn = _isSignedIn();
+  const who = signedIn ? (TOKEN.info.az_user || "signed in") : "";
+  const demo = !!(APP_CONFIG && APP_CONFIG.demo_mode);
+
+  // If BOMs already exist the user just hasn't picked one — keep it lightweight.
+  if (hasBoms) {
+    host.innerHTML =
+      '<div class="onboard-pick">Select a Bill of Materials from the left, ' +
+      'or <button type="button" class="link-btn" data-onboard="new">create a new one</button>.</div>';
+    const btn = host.querySelector('[data-onboard="new"]');
+    if (btn) btn.addEventListener("click", () => openBomModal(null, { create: true }));
+    return;
+  }
+
+  const step1Done = signedIn;
+  const step2Done = _onboardSettingsDone();
+  const s1State = step1Done ? "done" : "active";
+  const s2State = !step1Done ? "todo" : (step2Done ? "done" : "active");
+  const s3State = !step1Done ? "todo" : (step2Done ? "active" : "todo");
+
+  host.innerHTML = `
+    <div class="onboard">
+      <div class="onboard-head">
+        <h2>Welcome — let's plan a deployment</h2>
+        <p class="muted">Three quick steps to see where a customer's Bill of Materials can deploy,
+        where quota or zonal access is a blocker, and which regions are best.</p>
+      </div>
+      <ol class="onboard-steps">
+        <li class="onboard-step is-${s1State}" data-step="1">
+          <span class="onboard-num">${step1Done ? "✓" : "1"}</span>
+          <div class="onboard-body">
+            <h3>Sign in to Azure</h3>
+            <p class="muted">${step1Done
+              ? `Signed in as <strong>${escapeHtml(who)}</strong>.`
+              : "A one-time browser sign-in mints a read-only ARM token to query SKU, region and quota data."}</p>
+            <div class="onboard-actions">
+              ${step1Done
+                ? '<button type="button" class="btn btn--sm" data-onboard="signin">Switch account</button>'
+                : '<button type="button" class="btn btn--accent" data-onboard="signin">Sign in</button>'}
+            </div>
+          </div>
+        </li>
+        <li class="onboard-step is-${s2State}" data-step="2">
+          <span class="onboard-num">${step2Done ? "✓" : "2"}</span>
+          <div class="onboard-body">
+            <h3>Configure &amp; refresh your settings</h3>
+            <p class="muted">Open <strong>Settings</strong> to set your support ticket owner and
+            refresh the model datasets (regions, latency, SKUs) so your analysis uses the latest Azure data.</p>
+            <div class="onboard-actions">
+              <button type="button" class="btn btn--accent" data-onboard="settings" ${step1Done ? "" : "disabled"}>⚙ Open Settings</button>
+              ${step1Done ? "" : '<span class="muted small">Sign in first</span>'}
+            </div>
+          </div>
+        </li>
+        <li class="onboard-step is-${s3State}" data-step="3">
+          <span class="onboard-num">3</span>
+          <div class="onboard-body">
+            <h3>Create your first BOM</h3>
+            <p class="muted">Name it, pick the customer subscription(s), then choose the services,
+            regions and SKUs to analyze.</p>
+            <div class="onboard-actions">
+              <button type="button" class="btn btn--accent" data-onboard="new" ${step1Done ? "" : "disabled"}>+ New BOM</button>
+              ${step1Done ? "" : '<span class="muted small">Sign in first</span>'}
+            </div>
+          </div>
+        </li>
+      </ol>
+      ${demo ? "" : `
+      <div class="onboard-or"><span>or</span></div>
+      <div class="onboard-demo">
+        <button type="button" class="btn" data-onboard="demo">▶ Explore with sample data</button>
+        <span class="muted small">Loads a bundled example BOM &amp; analysis — no Azure sign-in needed.</span>
+      </div>`}
+    </div>`;
+
+  const signinBtn = host.querySelector('[data-onboard="signin"]');
+  if (signinBtn) signinBtn.addEventListener("click", () => {
+    // Open the sign-in modal so the browser flow + any errors are visible,
+    // then kick off the interactive sign-in.
+    openSigninModal();
+    refreshAuthToken({ force: true });
+  });
+  const settingsBtn = host.querySelector('[data-onboard="settings"]');
+  if (settingsBtn) settingsBtn.addEventListener("click", () => {
+    _setOnboardSettingsDone();
+    dismissSettingsCoach();
+    switchView("settings");
+  });
+  const newBtn = host.querySelector('[data-onboard="new"]');
+  if (newBtn) newBtn.addEventListener("click", () => openBomModal(null, { create: true }));
+  const demoBtn = host.querySelector('[data-onboard="demo"]');
+  if (demoBtn) demoBtn.addEventListener("click", () => loadSampleData(demoBtn));
+}
+
+// Remembers that the user has visited Settings from the onboarding stepper, so
+// step 2 shows as complete on subsequent renders/reloads.
+const ONBOARD_SETTINGS_KEY = "onboard_settings_done";
+function _onboardSettingsDone() {
+  try { return localStorage.getItem(ONBOARD_SETTINGS_KEY) === "1"; }
+  catch (_e) { return false; }
+}
+function _setOnboardSettingsDone() {
+  try { localStorage.setItem(ONBOARD_SETTINGS_KEY, "1"); } catch (_e) {}
+}
+
+// Seed the bundled sample BOM on demand, then reload the list and open it so
+// the user sees a fully populated dashboard immediately.
+async function loadSampleData(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = "Loading sample…"; }
+  try {
+    const r = await apiJson("/api/demo/seed", { method: "POST" });
+    await loadSubscriptions();
+    await loadSnapshotsList();
+    const target = r.bom_id && BOM_META.index[r.bom_id] ? r.bom_id : (Object.keys(BOM_META.index)[0] || "");
+    if (target) await selectBom(target);
+    showToast(r.seeded ? "Sample data loaded." : "Sample data already present.", "success");
+  } catch (e) {
+    showToast(e.message || "Could not load sample data.", "error");
+    if (btn) { btn.disabled = false; btn.textContent = "▶ Explore with sample data"; }
+  }
+}
+
 function renderSubscriptionSwitcher() {
   const hosts = [
     document.getElementById("quota-subscription-control"),
@@ -413,12 +700,21 @@ function renderSubscriptionSwitcher() {
     const name = _subNameById(subId) || `Subscription ${index + 1}`;
     return `<option value="${escapeHtml(subId)}">${escapeHtml(name)}</option>`;
   }).join("");
-  const disabled = ids.length <= 1 ? " disabled" : "";
+  const single = ids.length <= 1;
   hosts.forEach((host) => {
     const isQuotaTab = host.id === "quota-subscription-control";
+    const labelText = isQuotaTab ? "Subscription:" : "Viewing quota for";
+    if (single) {
+      const name = _subNameById(activeId) || _subNameById(ids[0]) || `Subscription 1`;
+      host.innerHTML = `<label class="quota-control quota-control--subscription${isQuotaTab ? " quota-control--inline" : ""}" data-subscription-switcher-wrap="1">
+        <span>${labelText}</span>
+        <span class="quota-control__static" title="This BOM is scoped to a single subscription — pick a different subscription only when a BOM covers more than one.">${escapeHtml(name)}</span>
+      </label>`;
+      return;
+    }
     host.innerHTML = `<label class="quota-control quota-control--subscription${isQuotaTab ? " quota-control--inline" : ""}" data-subscription-switcher-wrap="1">
-      <span>${isQuotaTab ? "Subscription:" : "Viewing quota for"}</span>
-      <select data-subscription-switcher="1" aria-label="Select the subscription context for quota views"${disabled}>${options}</select>
+      <span>${labelText}</span>
+      <select data-subscription-switcher="1" title="Switch which subscription's quota you're viewing for this BOM" aria-label="Select the subscription context for quota views">${options}</select>
     </label>`;
     const sel = host.querySelector("[data-subscription-switcher]");
     if (sel) sel.value = activeId || "";
@@ -586,14 +882,26 @@ function readFilters() {
   const search = (document.getElementById("filter-search").value || "").toLowerCase();
   const verdictChecked = Array.from(document.querySelectorAll('[data-filter="verdict"]:checked')).map(e => e.value);
   const continentChecked = Array.from(document.querySelectorAll('[data-filter="continent"]:checked')).map(e => e.value);
+  const quotaChecked = Array.from(document.querySelectorAll('[data-filter="quota"]:checked')).map(e => e.value);
+  const azChecked = Array.from(document.querySelectorAll('[data-filter="az"]:checked')).map(e => e.value);
   return {
     search,
     verdict: new Set(verdictChecked),
     continent: new Set(continentChecked),
-    v6Only: document.getElementById("filter-v6-only").checked,
+    quota: new Set(quotaChecked),
+    az: new Set(azChecked),
+    missingOnly: document.getElementById("filter-missing-services").checked,
     v5Fallback: document.getElementById("filter-v5-fallback").checked,
     restrictedOnly: document.getElementById("filter-restricted-only").checked,
   };
+}
+
+// Collapse the detailed quota verdict into the three buckets the filter offers.
+function _quotaFilterBucket(r) {
+  const v = getRegionQuotaVerdict(STATE.snapshot, r.short || "").verdict;
+  if (v === "pass" || v === "none") return "sufficient";
+  if (v === "fail" || v === "partial" || v === "no_group") return "insufficient";
+  return "unknown"; // unknown, not_accessible, no_sub
 }
 
 function applyFilters() {
@@ -606,12 +914,15 @@ function applyFilters() {
     if (f.search && !r.name.toLowerCase().includes(f.search)) return false;
     if (f.verdict.size && !f.verdict.has(deployment.verdict)) return false;
     if (f.continent.size && !f.continent.has(r.geo)) return false;
-    // primary_used / fell_back are the generic fields emitted by current
-    // engine. Fall back to legacy v6_viable / sku_fallbacks shape so old
-    // snapshots keep filtering correctly.
-    const primaryUsed = (r.primary_used != null) ? r.primary_used : r.v6_viable;
+    if (f.quota.size && !f.quota.has(_quotaFilterBucket(r))) return false;
+    if (f.az.size) {
+      const azBucket = (_regionSupportsAz(r) === false) ? "regional" : "has_az";
+      if (!f.az.has(azBucket)) return false;
+    }
+    if (f.missingOnly && !((r.missing_services || []).length > 0)) return false;
+    // fell_back is the generic engine field. Fall back to legacy
+    // sku_fallbacks shape so old snapshots keep filtering correctly.
     const fellBack = (r.fell_back != null) ? r.fell_back : ((r.sku_fallbacks || []).length > 0);
-    if (f.v6Only && !primaryUsed) return false;
     if (f.v5Fallback) {
       if (r.deployment_health !== "Yes" || !fellBack) return false;
     }
@@ -631,6 +942,9 @@ function applyFilters() {
   renderTable();
   refreshMap();
   renderOverviewCharts();
+  renderBestRegionPanel();
+  renderOverviewCockpit();
+  renderOverviewReco();
   updateStats();
 }
 
@@ -642,6 +956,1055 @@ function updateStats() {
   document.getElementById("stat-total").textContent = all.length;
   document.getElementById("stat-ready").textContent = ready;
   document.getElementById("stat-other-verdicts").textContent = all.length - ready;
+  updateCostStat();
+}
+
+// ---------------------------------------------------------------- Cost estimate (pricing)
+
+const PRICING = { settings: null, estimate: null, loading: false, reqKey: "", altValidation: {}, zonalCap: {} };
+const PRICING_DISCLAIMER = "Estimate only — list price anchored to a representative VM size, not a quote. Excludes storage, egress, licensing & negotiated terms.";
+
+function _fmtMoney(n, currency, opts) {
+  if (n == null || !Number.isFinite(Number(n))) return "—";
+  const cur = (currency || "USD").toUpperCase();
+  const frac = (opts && opts.cents) ? 2 : 0;
+  try {
+    return new Intl.NumberFormat(undefined, { style: "currency", currency: cur, maximumFractionDigits: frac }).format(Number(n));
+  } catch (e) {
+    return `${cur} ${Number(n).toLocaleString(undefined, { maximumFractionDigits: frac })}`;
+  }
+}
+
+// Non-compute service names present in the current BOM snapshot.
+function _bomServiceNames(snap) {
+  const svcs = _currentBomServices(snap);
+  return svcs.map(s => String((s && (s.name || s)) || "")).filter(Boolean);
+}
+
+// The BOM's selected services (with any per-service tier). Prefer the loaded
+// snapshot's meta (self-contained, matches what was analyzed); fall back to the
+// active BOM record so tiers/ZRS surface even before the BOM is re-run.
+function _currentBomServices(snap) {
+  const s = snap || STATE.snapshot;
+  const fromSnap = ((s && s.meta) || {}).services;
+  if (Array.isArray(fromSnap) && fromSnap.length) return fromSnap;
+  const meta = STATE.activeBomId ? getBomMeta(STATE.activeBomId) : null;
+  return (meta && Array.isArray(meta.services)) ? meta.services : [];
+}
+
+// Map of service name → selected tier id from the snapshot's BOM (or {}).
+function _bomServiceTiers(snap) {
+  const svcs = _currentBomServices(snap);
+  const out = {};
+  for (const s of svcs) {
+    if (s && s.name && s.tier) out[String(s.name)] = String(s.tier);
+  }
+  return out;
+}
+
+// Friendly label for a service tier id: prefer the catalog label, else prettify.
+function _tierLabel(serviceName, tierId) {
+  if (!tierId) return "";
+  const tiers = _catalogTiersFor(serviceName);
+  const hit = tiers.find(t => t.id === tierId);
+  if (hit) return hit.label.replace(/\s*\(.*\)$/, "");
+  return tierId.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+}
+
+// Build the estimate request from the current snapshot (all regions + BOM cores + services).
+function _pricingRequestBody() {
+  const snap = STATE.snapshot;
+  if (!snap) return null;
+  const regions = (snap.regions || []).map(r => r.short).filter(Boolean);
+  if (!regions.length) return null;
+  const families = _getCoresRequirements(snap).map(r => ({
+    family: r.primary_family,
+    label: r.primary_label,
+    required_cores: r.required_cores,
+    // Availability fallback the backend prices when the primary generation
+    // isn't sold in a region (e.g. Dsv7 → Dsv6 in Austria East).
+    alt_family: r.alt_family || null,
+    alt_label: r.alt_label || null,
+  }));
+  return { regions, families, services: _bomServiceNames(snap) };
+}
+
+// Fetch (once per unique request+settings signature) the BOM cost estimate.
+async function fetchPricingEstimate(force) {
+  const body = _pricingRequestBody();
+  if (!body || !body.families.length) { PRICING.estimate = null; PRICING.reqKey = ""; _applyPricingToUI(); return; }
+  const key = JSON.stringify(body) + "|" + JSON.stringify(PRICING.settings || {});
+  if (!force && key === PRICING.reqKey && PRICING.estimate) return;
+  PRICING.reqKey = key;
+  PRICING.loading = true;
+  _applyPricingToUI();
+  try {
+    PRICING.estimate = await apiJson("/api/pricing/estimate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    console.warn("pricing estimate failed:", e && e.message);
+    PRICING.estimate = null;
+  } finally {
+    PRICING.loading = false;
+    _applyPricingToUI();
+  }
+}
+
+function _pricingRegionInfo(short) {
+  const est = PRICING.estimate;
+  if (!est || !est.regions) return null;
+  return est.regions[String(short || "").toLowerCase()] || null;
+}
+
+// Stash per-region totals (for sort) and refresh table cells, stat, drilldown.
+function _applyPricingToUI() {
+  const est = PRICING.estimate;
+  const regions = (STATE.snapshot && STATE.snapshot.regions) || [];
+  for (const r of regions) {
+    const info = est && est.regions ? est.regions[String(r.short || "").toLowerCase()] : null;
+    r.est_monthly = (info && info.priced_any) ? Number(info.monthly_net) : 0;
+  }
+  if (document.querySelector("#regions-table tbody")) renderTable();
+  updateCostStat();
+  const dd = document.getElementById("drilldown");
+  if (dd && !dd.classList.contains("hidden") && STATE.activeDrilldownRegion) {
+    _refreshDrilldownCost(STATE.activeDrilldownRegion);
+  }
+}
+
+// Overview KPI: cheapest Ready region net monthly (fallback: cheapest any).
+function updateCostStat() {
+  const wrap = document.getElementById("stat-est-wrap");
+  const el = document.getElementById("stat-est-cost");
+  if (!wrap || !el) return;
+  const hasReq = snapshotHasCoresRequirements(STATE.snapshot);
+  wrap.classList.toggle("hidden", !hasReq);
+  if (!hasReq) return;
+  if (PRICING.loading && !PRICING.estimate) { el.textContent = "…"; return; }
+  const est = PRICING.estimate;
+  if (!est) { el.textContent = "—"; return; }
+  const regions = (STATE.snapshot && STATE.snapshot.regions) || [];
+  const pick = (readyOnly) => {
+    let best = null;
+    for (const r of regions) {
+      if (readyOnly && getDeploymentVerdictInfo(r).verdict !== "ready") continue;
+      const info = est.regions[String(r.short || "").toLowerCase()];
+      if (!info || !info.priced_any) continue;
+      if (!best || info.monthly_net < best.net) best = { net: info.monthly_net, region: r.name };
+    }
+    return best;
+  };
+  const best = pick(true) || pick(false);
+  if (!best) { el.textContent = "—"; return; }
+  el.textContent = _fmtMoney(best.net, est.currency);
+  wrap.title = `Estimated monthly BOM cost (compute + non-compute) for ${best.region}, the cheapest Ready region. ${PRICING_DISCLAIMER}`;
+}
+
+// Friendly label of the BOM fallback family a region was priced on, if any.
+function _pricedAltLabel(info) {
+  const fams = (info && info.compute && info.compute.families) || [];
+  const alt = fams.find(f => f && f.priced_via_alt);
+  return alt ? (alt.priced_label || "") : "";
+}
+
+// The cost cell shown in the regions table for a region.
+function _costCellHtml(r) {
+  if (!snapshotHasCoresRequirements(STATE.snapshot)) return `<td class="cost-col hidden num"></td>`;
+  const est = PRICING.estimate;
+  const info = _pricingRegionInfo(r.short);
+  let text = "—", title = PRICING_DISCLAIMER, badge = "";
+  if (PRICING.loading && !info) text = "…";
+  else if (info && info.priced_any) {
+    text = _fmtMoney(info.monthly_net, est.currency);
+    if (!info.complete) { text += "*"; title = "Some families could not be priced. " + PRICING_DISCLAIMER; }
+    if (info.priced_via_alt) {
+      const altLbl = _pricedAltLabel(info);
+      badge += ` <span class="cost-alt-badge" title="Your primary SKU generation isn't sold in this region — cost is estimated on your BOM fallback${altLbl ? " (" + altLbl + ")" : ""}. Open the region for details.">↩ fallback</span>`;
+    }
+    if (info.has_cheaper_alt && info.compute && info.compute.alt_savings_pct > 0) {
+      badge += ` <span class="cost-save-badge" title="A cheaper size-equivalent SKU is available in this region — save ~${_fmtMoney(info.compute.alt_savings_monthly_net, est.currency)}/mo. Open the region for details.">▼${info.compute.alt_savings_pct}%</span>`;
+    }
+  } else if (est) text = "n/a";
+  return `<td class="cost-col num" title="${escapeHtml(title)}">${escapeHtml(text)}${badge}</td>`;
+}
+
+// Cheaper size-equivalent SKU suggestions block for the drilldown cost section.
+function _altSavingsBlock(info, cur, regionShort) {
+  const c = info.compute || {};
+  const swaps = c.swaps || [];
+  if (!swaps.length) return "";
+  const rows = swaps.map(s => {
+    const vend = s.vendor ? `<span class="alt-vendor alt-vendor--${s.vendor.toLowerCase()}" title="${escapeHtml(s.note || "")}">${escapeHtml(s.vendor)}</span>` : "";
+    const ret = (s.retirement && s.retirement.note)
+      ? ` <span class="alt-prevgen" title="${escapeHtml((s.retirement.replacement ? "Newer generation available: " + s.retirement.replacement + ". " : "") + "Still fully supported.")}">🕈 ${escapeHtml(s.retirement.note)}</span>`
+      : "";
+    return `<div class="alt-swap">
+      <div class="alt-swap-top">
+        <div class="alt-swap-main">
+          <span class="alt-from">${escapeHtml(s.from_label)}</span>
+          <span class="alt-arrow">→</span>
+          <span class="alt-to">${escapeHtml(s.to_label)}</span> ${vend}${ret}
+        </div>
+        <div class="alt-swap-save">−${_fmtMoney(s.savings_monthly_net, cur)}/mo <span class="muted">(${s.savings_pct}%)</span></div>
+      </div>
+      <div class="alt-swap-valid" data-alt-fam="${escapeHtml(s.to_family)}"><span class="alt-valid checking">checking availability &amp; quota…</span></div>
+    </div>`;
+  }).join("");
+  const total = `Save up to ${_fmtMoney(c.alt_savings_monthly_net, cur)}/mo (${c.alt_savings_pct}%) → optimized ${_fmtMoney(c.optimized_monthly_net, cur)}/mo`;
+  return `
+    <div class="dd-readiness-subtitle alt-title">💡 Cheaper size-equivalent SKUs</div>
+    <div class="alt-headline">${total}</div>
+    <div class="alt-swaps" data-alt-region="${escapeHtml(regionShort || "")}">${rows}</div>
+    <div class="note muted alt-note">Same vCPU &amp; memory, different CPU vendor/generation. <strong>Availability, subscription restrictions and regional vCPU quota are validated live against Azure</strong> for this region &amp; subscription (badges above). ARM SKUs additionally require an ARM64-compatible OS image.</div>`;
+}
+
+// Live validation badge for one suggested alternative family.
+function _altValidBadge(v, regionShort) {
+  if (!v) return `<span class="alt-valid muted">not validated — verify manually</span>`;
+  const title = escapeHtml(v.message || "");
+  const region = escapeHtml(regionShort || "");
+  const armFam = escapeHtml(v.arm_family || "");
+  const label = escapeHtml(v.family || "");
+  const cores = Number(v.required_cores || 0);
+  const limit = (v.quota && v.quota.limit != null) ? Number(v.quota.limit) : "";
+  const ticketLink = (kind, text) =>
+    `<a href="#" class="alt-ticket-link" data-alt-ticket="${kind}" data-alt-region="${region}" data-alt-family="${armFam}" data-alt-label="${label}" data-alt-cores="${cores}" data-alt-limit="${limit}">${text}</a>`;
+  // Surface zone status: partial restrictions (some AZs blocked) or an
+  // explicit all-clear when every zone is usable for this subscription.
+  let zoneNote = "";
+  if (Array.isArray(v.zones) && v.zones.length) {
+    const blocked = v.zones.map((ok, i) => ok ? null : i + 1).filter(Boolean);
+    const avail = v.zones.map((ok, i) => ok ? i + 1 : null).filter(Boolean);
+    if (v.zone_limited && blocked.length) {
+      zoneNote = ` <span class="alt-zone-note" title="Restricted in AZ ${blocked.join(", ")} for this subscription; usable in AZ ${avail.join(", ") || "none"}.">⚠️ AZ-limited (not in ${blocked.map(z => "AZ " + z).join(", ")})</span> ${ticketLink("technical", "Request AZ access →")}`;
+    } else if (v.offered && !v.region_restricted && !blocked.length) {
+      zoneNote = ` <span class="alt-zone-note ok" title="No zonal (AZ) restrictions for this subscription; usable in AZ ${avail.join(", ") || "all"}.">✓ No AZ restrictions</span>`;
+    }
+  }
+  switch (v.verdict) {
+    case "ok":
+      return `<span class="alt-valid ok" title="${title}">✅ Available · quota OK</span>${zoneNote}`;
+    case "quota": {
+      const need = v.quota && v.quota.shortfall != null ? Math.round(v.quota.shortfall) : null;
+      return `<span class="alt-valid warn" title="${title}">⚠️ Quota short${need != null ? ` ${need} vCPU` : ""}</span>${zoneNote} ${ticketLink("quota", "Request quota →")}`;
+    }
+    case "incompatible": {
+      const miss = (v.parity && Array.isArray(v.parity.missing)) ? v.parity.missing.map(m => m.cap) : [];
+      const detail = miss.length ? ` (missing ${escapeHtml(miss.join(", "))})` : "";
+      return `<span class="alt-valid danger" title="${title}">⛔ Not capability-equivalent${detail}</span>`;
+    }
+    case "restricted":
+      return `<span class="alt-valid danger" title="${title}">⛔ Restricted</span> ${ticketLink("technical", "Request access →")}`;
+    case "unavailable":
+      return `<span class="alt-valid danger" title="${title}">⛔ Not offered in region</span>`;
+    default:
+      return `<span class="alt-valid muted" title="${title}">ℹ️ ${escapeHtml(v.message || "Verify availability & quota manually")}</span>${zoneNote}`;
+  }
+}
+
+// Patch the validation slots in the currently-rendered cost section.
+function _patchAltValidation(regionShort, entry) {
+  const slots = document.querySelectorAll(".alt-swap-valid[data-alt-fam]");
+  slots.forEach((slot) => {
+    const fam = slot.getAttribute("data-alt-fam");
+    let badge;
+    if (!entry || entry.status === "loading") {
+      badge = `<span class="alt-valid checking">checking availability &amp; quota…</span>`;
+    } else if (entry.status === "error") {
+      badge = `<span class="alt-valid muted">validation unavailable — verify manually</span>`;
+    } else {
+      badge = _altValidBadge((entry.results || {})[fam], regionShort);
+    }
+    slot.innerHTML = badge;
+  });
+}
+
+// Kick off (or reuse a cached) live availability/quota validation for the
+// cheaper-SKU swaps in this region, then paint the result into the drilldown.
+async function _validateAltsForRegion(r) {
+  if (!r) return;
+  const info = _pricingRegionInfo(r.short);
+  const swaps = (info && info.compute && info.compute.swaps) || [];
+  if (!swaps.length) return;
+  const sub = focusedSubscriptionId() || "";
+  const key = `${String(r.short).toLowerCase()}|${sub}`;
+
+  const cached = PRICING.altValidation[key];
+  if (cached && (cached.status === "done" || cached.status === "error")) {
+    _patchAltValidation(r.short, cached);
+    return;
+  }
+  if (cached && cached.status === "loading") {
+    _patchAltValidation(r.short, cached);
+    return;
+  }
+
+  const entry = { status: "loading", results: {} };
+  PRICING.altValidation[key] = entry;
+  _patchAltValidation(r.short, entry);
+
+  try {
+    const resp = await apiJson("/api/pricing/validate-alternatives", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        subscription_id: sub,
+        region: r.short,
+        alternatives: swaps.map((s) => ({ family: s.to_family, from_family: s.from_family, required_cores: s.required_cores })),
+      }),
+    });
+    entry.status = "done";
+    entry.results = resp.results || {};
+    entry.quota_status = resp.quota_status;
+  } catch (e) {
+    entry.status = "error";
+    entry.error = e;
+  }
+  // Only repaint if the user is still looking at this region.
+  if (String(STATE.activeDrilldownRegion || "").toLowerCase() === String(r.short).toLowerCase()) {
+    _patchAltValidation(r.short, entry);
+  }
+}
+
+// Drilldown cost section body (compute families + non-compute + total).
+// Returns the inner content only — the collapsible section header is added by
+// renderCostEstimateSection so _refreshDrilldownCost can swap the body without
+// disturbing the section's collapse state.
+function _costBodyInner(r) {
+  const est = PRICING.estimate;
+  const info = _pricingRegionInfo(r.short);
+  let inner;
+  if (PRICING.loading && !info) {
+    inner = `<div class="note">Estimating cost…</div>`;
+  } else if (!info || !info.priced_any) {
+    inner = `<div class="note">No cost estimate available for this region.</div>`;
+  } else {
+    const cur = est.currency, c = info.compute, nc = info.noncompute;
+    const famRows = (c.families || []).map(f => f.priced
+      ? `<div class="key">${escapeHtml(f.label)}${f.priced_via_alt ? ` <span class="cost-alt-badge" title="${escapeHtml(f.label)} isn't sold in this region — priced on your BOM fallback ${escapeHtml(f.priced_label || "")}">↩ priced on ${escapeHtml(f.priced_label || "fallback")}</span>` : ""} <span class="muted">(${f.required_cores} vCPU × ${_fmtMoney(f.per_core_hour, cur, { cents: true })}/hr)</span></div><div>${_fmtMoney(f.monthly_net, cur)}/mo</div>`
+      : `<div class="key">${escapeHtml(f.label)} <span class="muted">(${f.required_cores} vCPU)</span></div><div class="muted">not priced</div>`
+    ).join("");
+    const svcRows = (nc.items || []).map(s =>
+      `<div class="key">${escapeHtml(s.service)}</div><div>${_fmtMoney(s.monthly_net, cur)}/mo</div>`
+    ).join("");
+    const acdLine = est.acd_discount_pct ? ` · ACD ${est.acd_discount_pct}% off list ${_fmtMoney(info.monthly_list, cur)}/mo` : "";
+    inner = `
+      <div class="cost-total-row">
+        <div class="cost-total">${_fmtMoney(info.monthly_net, cur)}<small>/mo</small></div>
+        <div class="cost-sub muted">${info.complete ? "" : "Partial — some families unpriced · "}${_fmtMoney(info.monthly_net * 12, cur)}/yr${acdLine}</div>
+      </div>
+      <div class="dd-readiness-subtitle">Compute — ${_fmtMoney(c.monthly_net, cur)}/mo</div>
+      <div class="kv">${famRows || '<div class="muted">none</div>'}</div>
+      ${_altSavingsBlock(info, cur, r.short)}
+      <div class="dd-readiness-subtitle">Non-compute — ${_fmtMoney(nc.monthly_net, cur)}/mo</div>
+      <div class="kv">
+        ${svcRows}
+        <div class="key">Uplift <span class="muted">(${nc.uplift_pct}% of compute)</span></div><div>${_fmtMoney(nc.uplift_net, cur)}/mo</div>
+      </div>`;
+  }
+  const meta = est ? `OS: ${escapeHtml(est.os)} · ${est.hours_per_month} h/mo` : "OS: linux · 730 h/mo";
+  return `<div class="cost-estimate">${inner}</div>
+    <div class="note muted cost-disclaimer">${escapeHtml(PRICING_DISCLAIMER)}<br>${meta}.</div>`;
+}
+
+// Collapsible drilldown section. Each region-drilldown block is wrapped in one
+// of these; collapsed by default to keep the panel compact. `title` and `badge`
+// may contain trusted HTML (callers escape their own dynamic text).
+function _ddSection(title, bodyHtml, opts = {}) {
+  if (bodyHtml == null || String(bodyHtml).trim() === "") return "";
+  const collapsed = opts.collapsed !== false; // default: collapsed
+  const badge = opts.badge || "";
+  const cls = opts.cls ? ` ${opts.cls}` : "";
+  return `<section class="dd-section${collapsed ? " collapsed" : ""}${cls}" data-dd-section>
+    <div class="dd-section-head" role="button" tabindex="0" aria-expanded="${collapsed ? "false" : "true"}">
+      <span class="dd-caret" aria-hidden="true">▸</span>
+      <span class="dd-section-title">${title}</span>
+      <span class="dd-section-badge">${badge}</span>
+    </div>
+    <div class="dd-section-body">${bodyHtml}</div>
+  </section>`;
+}
+
+function _toggleDdSection(head) {
+  const section = head.closest(".dd-section");
+  if (!section) return;
+  const collapsed = section.classList.toggle("collapsed");
+  head.setAttribute("aria-expanded", collapsed ? "false" : "true");
+}
+
+function renderCostEstimateSection(r) {
+  if (!snapshotHasCoresRequirements(STATE.snapshot)) return "";
+  const badge = `<span class="badge-est" title="${escapeHtml(PRICING_DISCLAIMER)}">Estimate</span>`;
+  return _ddSection("Cost estimate", `<div id="dd-cost-wrap">${_costBodyInner(r)}</div>`, { badge });
+}
+
+function _refreshDrilldownCost(short) {
+  const wrap = document.getElementById("dd-cost-wrap");
+  if (!wrap) return;
+  const r = _findRegionByShort(short);
+  if (r) { wrap.innerHTML = _costBodyInner(r); _validateAltsForRegion(r); }
+}
+
+// ── Zone-redundancy (ZRS/HA) readiness ──────────────────────────────────────
+// Zone-redundant storage / zone-redundant HA (e.g. Azure SQL Business Critical
+// or General Purpose with ZR, Premium Redis, Flexible-Server GP/MO HA) require
+// the target region to expose Availability Zones. This surfaces, per region,
+// whether each ZRS-capable tier the user selected in their BOM can actually be
+// deployed zone-redundant there — a region with no AZs can't host it.
+
+// Return the BOM services whose selected tier is zone-redundant-capable:
+//   [{ name, tierId, tierLabel }]
+function _zrsCapableSelections() {
+  const svcs = _currentBomServices(STATE.snapshot);
+  const out = [];
+  for (const s of svcs) {
+    if (!s || !s.name || !s.tier) continue;
+    const tiers = _catalogTiersFor(s.name);
+    const hit = tiers.find(t => t.id === s.tier);
+    if (hit && hit.zone_redundant) {
+      out.push({ name: s.name, tierId: s.tier, tierLabel: _tierLabel(s.name, s.tier) });
+    }
+  }
+  return out;
+}
+
+// Region-level AZ support: true / false from the region catalog, or null when
+// unknown (catalog not loaded / region absent) so we can show an honest
+// "unverified" state rather than a false negative.
+function _regionSupportsAz(r) {
+  const map = STATE.regionAzMap || null;
+  if (!map) return null;
+  const key = String(r.short || "").toLowerCase();
+  if (!(key in map)) return null;
+  return !!map[key];
+}
+
+// Overall ZRS pill for the region drilldown header, or null when the BOM has no
+// ZRS-capable tier selections (nothing to check).
+// Services for which we have an authoritative, per-subscription live check
+// (must stay in sync with api/_shared/zonal_capability.py). Selections for
+// these get a real ARM verdict; everything else falls back to region-AZ.
+const _ZRS_LIVE_CHECKABLE = new Set([
+  "Azure Blob Storage",
+  "Azure Data Lake Storage Gen2",
+  "Azure Files",
+  "Managed Disks (Premium SSD)",
+  "Azure SQL Database",
+  "Azure SQL Managed Instance",
+  "Azure Database for PostgreSQL",
+  "Azure Database for MySQL",
+  "Azure Elastic SAN",
+]);
+
+// Services with no read-only capability API, but which can be verified by an
+// opt-in, non-destructive ARM pre-flight *validation* (creates nothing). These
+// are surfaced with a "Run deep check" button rather than checked automatically.
+// Must stay in sync with _VALIDATE_SERVICES + _ADVISORY_SERVICES in
+// api/_shared/deploy_validation.py.
+const _ZRS_DEEP_CHECKABLE = new Set([
+  "Azure App Service",
+  "App Service Environment",
+  "Azure Logic Apps",
+  "Azure Cache for Redis",
+  "Azure Service Bus",
+  "Azure Event Hubs",
+  "Azure Container Registry",
+  "Azure SignalR Service",
+  "Azure Spring Apps",
+  "Public IP Addresses",
+  "Azure Load Balancer (Standard)",
+  "Application Gateway (WAF v2)",
+  "Azure VPN Gateway",
+  "Azure ExpressRoute",
+  "Azure AI Search",
+  "Azure API Management",
+  "Azure Cosmos DB",
+]);
+
+function _zrsKey(name, tier) { return `${name}||${tier}`; }
+
+// Baseline (documented) mark from region-level AZ support — used for services
+// with no authoritative API, and as the fallback before the live check returns.
+function _zrsBaselineMark(az) {
+  if (az === false) return `<span class="zrs-mark danger">⛔ Not supported (no AZs)</span>`;
+  if (az === null) return `<span class="zrs-mark warn">⚠️ Unverified (region AZ unknown)</span>`;
+  return `<span class="zrs-mark ok" title="Region exposes Availability Zones (documented, not live-verified for this service)">✓ Zone-redundant capable <span class="zrs-src">· region AZ</span></span>`;
+}
+
+// Live per-service verdict → mark HTML.
+function _zrsLiveMark(v, az) {
+  if (!v) return _zrsBaselineMark(az);
+  const src = v.source ? ` <span class="zrs-src" title="Verified live via ${escapeHtml(v.source)}">· ${escapeHtml(v.source)}</span>` : "";
+  switch (v.verdict) {
+    case "available":
+      return `<span class="zrs-mark ok" title="${escapeHtml(v.message || "")}">✓ Verified deployable${src}</span>`;
+    case "blocked":
+      return `<span class="zrs-mark danger" title="${escapeHtml(v.message || "")}">⛔ Restricted for this subscription${src}</span>`;
+    case "unavailable":
+      return `<span class="zrs-mark danger" title="${escapeHtml(v.message || "")}">⛔ Not available in region${src}</span>`;
+    case "no_subscription":
+      return `<span class="zrs-mark warn" title="${escapeHtml(v.message || "")}">⚠️ Select a subscription to verify</span>`;
+    case "unverifiable":
+      return `<span class="zrs-mark warn" title="${escapeHtml(v.message || "")} This provider's capabilities API returned no readable answer for your subscription — commonly a 403 on restricted (sponsored/MCAPS) subscriptions or throttling — so zone redundancy can't be confirmed either way. Use the deep check to validate by deployment pre-flight.">⚠️ Capability not readable for this subscription</span>`;
+    default: // not_verifiable → documented region-AZ fallback
+      return _zrsBaselineMark(az);
+  }
+}
+
+// Deep (validate-based) per-service verdict → mark HTML. Blocked results carry a
+// block_type + ticket hint so we can offer a one-click support-ticket path.
+function _zrsDeepMark(v, az) {
+  if (!v) return _zrsBaselineMark(az);
+  const msg = escapeHtml(v.message || "");
+  switch (v.verdict) {
+    case "available":
+      return `<span class="zrs-mark ok" title="${msg}">✓ Verified deployable <span class="zrs-src">· pre-flight</span></span>`;
+    case "blocked": {
+      const bt = v.block_type === "quota" ? "quota" : (v.block_type === "sku_restriction" ? "SKU/zone restriction" : "region restriction");
+      const btn = `<button type="button" class="btn btn--xs zrs-ticket-btn" data-zrs-ticket="${escapeHtml(v.block_type || "")}" data-zrs-svc="${escapeHtml(v.name || "")}" title="Open a pre-filled Azure support ticket for this blocker">🎫 Create ticket</button>`;
+      const help = v.help_url ? ` <a href="${escapeHtml(v.help_url)}" target="_blank" rel="noopener" class="zrs-src">learn more</a>` : "";
+      return `<span class="zrs-mark danger" title="${msg}">⛔ Blocked (${escapeHtml(bt)}) <span class="zrs-src">· pre-flight</span></span> ${btn}${help}`;
+    }
+    case "advisory": {
+      const help = v.help_url ? ` <a href="${escapeHtml(v.help_url)}" target="_blank" rel="noopener" class="zrs-src">region access</a>` : "";
+      return `<span class="zrs-mark warn" title="${msg}">ℹ️ Not provable pre-deploy${help}</span>`;
+    }
+    case "no_resource_group": {
+      const notFound = /not found/i.test(v.message || "");
+      const label = notFound
+        ? "✓ Read-only check · validation RG not found in this subscription"
+        : "✓ Read-only check · deployment validation off";
+      const enable = `<button type="button" class="btn btn--xs" onclick="openValidationRgSettings()" title="Optionally enable ARM deployment-level pre-flight for this subscription">⚙️ Enable</button>`;
+      return `<span class="zrs-mark ok" title="${msg}">${label}</span> ${enable}`;
+    }
+    case "no_subscription":
+      return `<span class="zrs-mark warn" title="${msg}">⚠️ Select a subscription to verify</span>`;
+    case "unverifiable":
+      return `<span class="zrs-mark warn" title="${msg}">⚠️ Pre-flight inconclusive</span>`;
+    default:
+      return _zrsBaselineMark(az);
+  }
+}
+
+// Overall pill. `entry` (if present) carries live results so the header pill can
+// reflect a real blocked/verified state rather than only region-AZ.
+function _zrsReadinessPill(r, entry) {
+  const sels = _zrsCapableSelections();
+  if (!sels.length) return null;
+  const az = _regionSupportsAz(r);
+  if (entry && entry.status === "loading") {
+    return { cls: "pill-warn", text: "ZRS: checking…", title: "Verifying zone-redundant deployability live against your subscription." };
+  }
+  const results = (entry && entry.status === "done") ? (entry.map || {}) : null;
+  const needsZr = _bomNeedsZoneRedundancy();
+  if (results) {
+    const vals = Object.values(results);
+    if (vals.some(v => v.verdict === "blocked" || v.verdict === "unavailable")) {
+      return needsZr
+        ? { cls: "pill-fail", text: "ZRS: blocked", title: "One or more zone-redundant tiers can't be deployed here for this subscription — see details." }
+        : { cls: "pill-warn", text: "ZRS: advisory", title: "A zone-redundant tier is restricted here, but this workload is regional (single-zone tolerant), so it doesn't block deployment." };
+    }
+    const anyVerified = vals.some(v => v.verdict === "available");
+    // If nothing was blocked and at least one was live-verified (and region AZ isn't a hard no), we're good.
+    if (az !== false && anyVerified) {
+      return { cls: "pill-ok", text: "ZRS: verified", title: "Zone-redundant tiers verified deployable against your subscription." };
+    }
+  }
+  if (az === false) {
+    return needsZr
+      ? { cls: "pill-fail", text: "ZRS: no AZs", title: "This region has no Availability Zones — zone-redundant tiers can't be deployed here." }
+      : { cls: "pill-warn", text: "ZRS: n/a", title: "This region has no Availability Zones, but this workload is regional (single-zone tolerant), so that's not a blocker." };
+  }
+  if (az === null) return { cls: "pill-warn", text: "ZRS: unverified", title: "Availability-Zone support for this region could not be confirmed." };
+  return { cls: "pill-ok", text: "ZRS: ready", title: "This region supports Availability Zones — zone-redundant tiers can be deployed." };
+}
+
+function renderZrsReadinessSection(r) {
+  const sels = _zrsCapableSelections();
+  if (!sels.length) return "";
+  const az = _regionSupportsAz(r);
+  const sub = focusedSubscriptionId() || "";
+  const needsZr = _bomNeedsZoneRedundancy();
+  let intro;
+  if (!needsZr) {
+    // Regional (single-zone tolerant) workload: the whole section is advisory.
+    intro = `<div class="note">This BOM's availability target is <strong>Regional (single-zone)</strong>, so zone-redundancy findings below are <strong>advisory only</strong> — they won't block a region. Switch the BOM to <em>Zone-redundant</em> if this workload needs multi-AZ HA.</div>`;
+  } else if (az === false) {
+    intro = `<div class="note danger">${escapeHtml(r.name)} has <strong>no Availability Zones</strong>. Zone-redundant (ZRS/HA) deployments aren't supported here — choose an AZ-enabled region for these tiers, or set this BOM's availability target to <em>Regional</em> if single-zone resilience is acceptable.</div>`;
+  } else if (az === null) {
+    intro = `<div class="note">Availability-Zone support for this region couldn't be confirmed from the catalog. Verify AZ availability before committing to zone-redundant tiers.</div>`;
+  } else {
+    intro = `<div class="note ok">${escapeHtml(r.name)} supports <strong>Availability Zones</strong>. Services below are verified live against your subscription where an authoritative API exists.</div>`;
+  }
+  const rows = sels.map(s => {
+    const live = _ZRS_LIVE_CHECKABLE.has(s.name);
+    const deep = _ZRS_DEEP_CHECKABLE.has(s.name);
+    // Checkable services start in a "checking" state (filled by the live call);
+    // documented ones show the region-AZ baseline immediately.
+    const initial = live
+      ? (sub ? `<span class="zrs-mark checking">⏳ Verifying live…</span>` : _zrsLiveMark({ verdict: "no_subscription" }, az))
+      : (deep ? `<span class="zrs-mark">${_zrsBaselineMark(az)}<span class="zrs-src"> · deep check available</span></span>` : _zrsBaselineMark(az));
+    return `<div class="key">${escapeHtml(s.name)} <span class="svc-tier-chip">${escapeHtml(s.tierLabel)}</span></div>` +
+      `<div class="zrs-svc-slot" data-zrs-key="${escapeHtml(_zrsKey(s.name, s.tierId))}" data-zrs-svc-name="${escapeHtml(s.name)}" data-zrs-tier="${escapeHtml(s.tierId)}" data-zrs-live="${live ? "1" : "0"}" data-zrs-deep="${deep ? "1" : "0"}">${initial}</div>`;
+  }).join("");
+  const legend = `<div class="note muted zrs-legend">✓ Verified deployable = confirmed live via an authoritative ARM capability/SKU API for your subscription. ✓ Verified deployable · pre-flight = confirmed by the deep check (a non-destructive ARM deployment validation — creates nothing, no cost); ⛔ Blocked · pre-flight flags a quota, SKU/zone or region restriction. “region AZ” = documented Availability-Zone support only — run the deep check below to verify.</div>`;
+  const hasDeep = sels.some(s => _ZRS_DEEP_CHECKABLE.has(s.name));
+  let deepBar = "";
+  if (hasDeep && az !== false) {
+    deepBar = `<div class="zrs-deepbar note">
+      <div><strong>Deep deployability check</strong> — for services with no read-only capability API (App Service, Logic Apps, Container Registry, SignalR, API Management, AI Search, Public IP, Load Balancer, Application Gateway, VPN Gateway, ExpressRoute, Redis, Service Bus, Event Hubs, Cosmos DB, and more) run a <strong>non-destructive</strong> ARM pre-flight validation (creates nothing, no cost) to confirm the zone-redundant tier actually deploys for your subscription here — catching quota, SKU/zone and region restrictions before you commit.</div>
+      <button type="button" class="btn btn--accent btn--sm" id="zrs-deepcheck-btn" data-region-short="${escapeHtml(r.short)}">🔬 Run deep check</button>
+    </div>`;
+  }
+  return `${intro}<div class="kv">${rows}</div>${deepBar}${legend}`;
+}
+
+// Patch the per-service slots + header pill once the live check resolves.
+function _patchZonalCapability(regionShort, entry) {
+  const az = STATE._zrsAzForActive;
+  document.querySelectorAll(".zrs-svc-slot[data-zrs-live='1']").forEach((slot) => {
+    const key = slot.getAttribute("data-zrs-key");
+    if (!entry || entry.status === "loading") {
+      slot.innerHTML = `<span class="zrs-mark checking">⏳ Verifying live…</span>`;
+    } else if (entry.status === "error") {
+      slot.innerHTML = _zrsLiveMark({ verdict: "unverifiable", message: "Live check unavailable — verify manually." }, az);
+    } else {
+      slot.innerHTML = _zrsLiveMark((entry.map || {})[key], az);
+    }
+  });
+  const pillEl = document.getElementById("zrs-pill");
+  if (pillEl) {
+    const region = _findRegionByShort(regionShort);
+    const pill = region ? _zrsReadinessPill(region, entry) : null;
+    if (pill) {
+      pillEl.className = `pill ${pill.cls}`;
+      pillEl.title = pill.title;
+      pillEl.textContent = pill.text;
+    }
+  }
+  // Once live ZRS/HA results resolve, a restricted required tier must be
+  // reflected in the headline Deployment Readiness verdict (not just its own
+  // pill). Re-render the deployment section + pill for the active region.
+  if (String(STATE.activeDrilldownRegion || "").toLowerCase() === String(regionShort || "").toLowerCase()) {
+    const region = _findRegionByShort(regionShort);
+    if (region) {
+      const dep = getDeploymentVerdictInfo(region);
+      const secEl = document.getElementById("dd-deploy-section");
+      if (secEl) secEl.innerHTML = renderDeploymentReadinessSection(region, dep);
+      const depPill = document.getElementById("dd-deploy-pill");
+      if (depPill) {
+        depPill.className = `pill ${dep.cls}`;
+        depPill.title = dep.title;
+        depPill.textContent = dep.text;
+      }
+    }
+  }
+}
+
+// Kick off (or reuse cached) live zone-redundancy verification for the current
+// BOM's zone-redundant selections in this region, then paint the result.
+async function _verifyZonalForRegion(r) {
+  if (!r) return;
+  const sels = _zrsCapableSelections();
+  const sub = focusedSubscriptionId() || "";
+  STATE._zrsAzForActive = _regionSupportsAz(r);
+  // Only the authoritatively-checkable selections need a round-trip.
+  const checkable = sels.filter(s => _ZRS_LIVE_CHECKABLE.has(s.name));
+  if (!checkable.length || !sub) return;
+  const key = `${String(r.short).toLowerCase()}|${sub}`;
+
+  const cached = PRICING.zonalCap[key];
+  if (cached && (cached.status === "done" || cached.status === "error" || cached.status === "loading")) {
+    _patchZonalCapability(r.short, cached);
+    if (cached.status !== "loading") return;
+    return;
+  }
+
+  const entry = { status: "loading", map: {} };
+  PRICING.zonalCap[key] = entry;
+  _patchZonalCapability(r.short, entry);
+
+  try {
+    const resp = await apiJson("/api/bom/zonal-capability", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        subscription_id: sub,
+        region: r.short,
+        services: checkable.map(s => ({ name: s.name, tier: s.tierId })),
+      }),
+    });
+    entry.status = "done";
+    entry.map = {};
+    (resp.results || []).forEach(v => { entry.map[_zrsKey(v.name, v.tier)] = v; });
+    entry.ts = new Date().toISOString().replace("T", " ").slice(0, 16) + " UTC";
+  } catch (e) {
+    entry.status = "error";
+    entry.error = e;
+  }
+  if (String(STATE.activeDrilldownRegion || "").toLowerCase() === String(r.short).toLowerCase()) {
+    _patchZonalCapability(r.short, entry);
+  }
+}
+
+// ------------------------------------------------------ Verify-all scan
+// A read-only, throttle-aware batch that runs the live zone-redundancy probe
+// across every region to raise verdict confidence. Creates nothing (calls the
+// same /api/bom/zonal-capability endpoint used by a single drilldown).
+const _verifyAll = { running: false, cancel: false };
+
+function _sleep(ms) { return new Promise(res => setTimeout(res, ms)); }
+
+// Resolve one region's live entry in place, with bounded 429/5xx backoff.
+async function _fetchZonalEntryInto(entry, r, sub, checkable) {
+  const maxAttempts = 4;
+  const body = JSON.stringify({
+    subscription_id: sub,
+    region: r.short,
+    services: checkable.map(s => ({ name: s.name, tier: s.tierId })),
+  });
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const resp = await apiJson("/api/bom/zonal-capability", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+      });
+      entry.status = "done";
+      entry.map = {};
+      (resp.results || []).forEach(v => { entry.map[_zrsKey(v.name, v.tier)] = v; });
+      entry.ts = new Date().toISOString().replace("T", " ").slice(0, 16) + " UTC";
+      return entry;
+    } catch (e) {
+      const code = e && e.status;
+      if ((code === 429 || code === 502 || code === 503 || code === 504) && attempt < maxAttempts) {
+        await _sleep(600 * Math.pow(2, attempt - 1) + Math.random() * 300);
+        continue;
+      }
+      entry.status = "error";
+      entry.error = e;
+      return entry;
+    }
+  }
+  return entry;
+}
+
+function _setVerifyAllUI(running) {
+  const btn = document.getElementById("btn-verify-all");
+  const cancel = document.getElementById("btn-verify-cancel");
+  const prog = document.getElementById("verify-progress");
+  if (btn) btn.classList.toggle("hidden", running);
+  if (cancel) cancel.classList.toggle("hidden", !running);
+  if (prog) prog.classList.toggle("hidden", !running);
+}
+
+function _updateVerifyProgress(done, total) {
+  const fill = document.getElementById("verify-progress-fill");
+  const label = document.getElementById("verify-progress-label");
+  const pct = total ? Math.round((done / total) * 100) : 0;
+  if (fill) fill.style.width = `${pct}%`;
+  if (label) label.textContent = `${done}/${total} regions`;
+}
+
+async function verifyAllRegions({ force = false } = {}) {
+  if (_verifyAll.running) return;
+  const noteEl = document.getElementById("verify-all-note");
+  const sub = focusedSubscriptionId() || "";
+  const sels = _zrsCapableSelections();
+  const checkable = sels.filter(s => _ZRS_LIVE_CHECKABLE.has(s.name));
+  const regions = (STATE.snapshot && STATE.snapshot.regions) || [];
+  if (!sub) { if (noteEl) noteEl.textContent = "Select a subscription first to run live verification."; return; }
+  if (!checkable.length) { if (noteEl) noteEl.textContent = "This BOM has no live-verifiable zone-redundant services."; return; }
+  if (!regions.length) return;
+
+  const _rkey = r => `${String(r.short).toLowerCase()}|${sub}`;
+  // Resumable: skip regions already verified for this subscription.
+  let todo = regions.filter(r => {
+    const c = PRICING.zonalCap[_rkey(r)];
+    return !(c && c.status === "done");
+  });
+  // If a force re-run was requested, OR everything is already verified (so a
+  // plain click would be a silent no-op), clear the cache for this sub and
+  // re-probe every region. This guarantees the button always does something
+  // visible and refreshes the live results.
+  if (force || todo.length === 0) {
+    regions.forEach(r => { delete PRICING.zonalCap[_rkey(r)]; });
+    todo = regions.slice();
+  }
+
+  _verifyAll.running = true;
+  _verifyAll.cancel = false;
+  _setVerifyAllUI(true);
+  if (noteEl) noteEl.textContent = "";
+  const total = regions.length;
+  let done = total - todo.length;
+  _updateVerifyProgress(done, total);
+
+  const CONC = 4;
+  let idx = 0;
+  const worker = async () => {
+    while (idx < todo.length && !_verifyAll.cancel) {
+      const r = todo[idx++];
+      const key = `${String(r.short).toLowerCase()}|${sub}`;
+      const entry = { status: "loading", map: {} };
+      PRICING.zonalCap[key] = entry;
+      await _fetchZonalEntryInto(entry, r, sub, checkable);
+      done++;
+      _updateVerifyProgress(done, total);
+      if (String(STATE.activeDrilldownRegion || "").toLowerCase() === String(r.short).toLowerCase()) {
+        _patchZonalCapability(r.short, entry);
+      }
+    }
+  };
+  const pool = [];
+  for (let i = 0; i < Math.min(CONC, todo.length); i++) pool.push(worker());
+  await Promise.all(pool);
+
+  const cancelled = _verifyAll.cancel;
+  _verifyAll.running = false;
+  _setVerifyAllUI(false);
+  applyFilters();
+  _persistVerifyAll(sub).catch(() => {});
+  if (noteEl) {
+    // Report conclusiveness, not just completion: a "done" probe on a
+    // restricted subscription can come back with no definitive answer, so
+    // "Verified 38/38" would be misleading.
+    let checked = 0, conclusive = 0, inconclusive = 0, errored = 0;
+    regions.forEach(r => {
+      const c = PRICING.zonalCap[`${String(r.short).toLowerCase()}|${sub}`];
+      if (!c) return;
+      if (c.status === "error") { errored++; return; }
+      if (c.status !== "done") return;
+      checked++;
+      if (_zonalEntryConclusive(c)) conclusive++; else inconclusive++;
+    });
+    const ts = new Date().toLocaleTimeString();
+    const parts = [`${conclusive} conclusive`];
+    if (inconclusive) parts.push(`${inconclusive} inconclusive`);
+    if (errored) parts.push(`${errored} errored`);
+    let msg = cancelled
+      ? `Stopped — live-checked ${checked}/${total} regions · ${parts.join(", ")}.`
+      : `Live-checked ${checked}/${total} regions · ${parts.join(", ")} · ${ts}`;
+    if (!cancelled && conclusive === 0 && (inconclusive + errored) > 0) {
+      msg += " — no region could be conclusively verified for this subscription "
+        + "(restricted access, throttling, or no authoritative API). Confidence stays at ARM metadata.";
+    } else if (!cancelled && conclusive === total && total > 0) {
+      msg += " — every region is at the highest confidence (Verified live). Re-running won't raise it further.";
+    }
+    noteEl.textContent = msg;
+  }
+}
+
+function cancelVerifyAll() {
+  if (_verifyAll.running) _verifyAll.cancel = true;
+}
+
+// Persist verified live results so a page reload / snapshot re-open keeps the
+// raised confidence. Keyed by run_id + subscription; best-effort (ignored if
+// the backend store is unavailable).
+async function _persistVerifyAll(sub) {
+  const runId = (STATE.snapshot && STATE.snapshot.meta && STATE.snapshot.meta.run_id)
+    || (STATE.snapshot && STATE.snapshot.run_id) || "";
+  if (!runId || !sub) return;
+  const results = {};
+  Object.keys(PRICING.zonalCap).forEach(k => {
+    const [regionKey, keySub] = k.split("|");
+    const entry = PRICING.zonalCap[k];
+    if (keySub === sub && entry && entry.status === "done") {
+      results[regionKey] = { map: entry.map, ts: entry.ts };
+    }
+  });
+  if (!Object.keys(results).length) return;
+  try {
+    await apiJson("/api/bom/zonal-verifications", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ run_id: runId, subscription_id: sub, results }),
+    });
+  } catch (e) { /* best-effort */ }
+}
+
+// Rehydrate previously-persisted live results into PRICING.zonalCap when a
+// snapshot loads, so confidence survives reloads.
+async function _hydrateVerifyAll() {
+  const runId = (STATE.snapshot && STATE.snapshot.meta && STATE.snapshot.meta.run_id)
+    || (STATE.snapshot && STATE.snapshot.run_id) || "";
+  const sub = focusedSubscriptionId() || "";
+  if (!runId || !sub) return;
+  try {
+    const data = await apiJson(`/api/bom/zonal-verifications?run_id=${encodeURIComponent(runId)}&subscription_id=${encodeURIComponent(sub)}`);
+    const results = (data && data.results) || {};
+    Object.keys(results).forEach(regionKey => {
+      const rec = results[regionKey] || {};
+      PRICING.zonalCap[`${regionKey}|${sub}`] = { status: "done", map: rec.map || {}, ts: rec.ts, hydrated: true };
+    });
+    if (Object.keys(results).length) applyFilters();
+  } catch (e) { /* no persisted results yet */ }
+}
+
+// Opt-in, non-destructive deep deployability check (ARM validate — creates
+// nothing). Runs only on explicit user action + confirmation, for the
+// zone-redundant selections that have no read-only capability API (see
+// _ZRS_DEEP_CHECKABLE) plus advisory-only Cosmos DB.
+async function _runZrsDeepCheck(regionShort) {
+  const r = _findRegionByShort(regionShort);
+  if (!r) return;
+  const sub = focusedSubscriptionId() || "";
+  if (!sub) { showToast("Select a subscription first to run the deep check.", "warn"); return; }
+  const deepSels = _zrsCapableSelections().filter(s => _ZRS_DEEP_CHECKABLE.has(s.name));
+  if (!deepSels.length) return;
+
+  try { await ensureSupportSettings(); } catch (_e) {}
+  const valRg = _valRgForSub(sub);
+  const rgNote = valRg
+    ? `Deployment-level validation ON — using resource group "${valRg}" in ${focusedSubscriptionName() || "the selected subscription"}.`
+    : `Read-only checks only (quota, SKU & zonal availability). Deployment-level validation is optional — enable it later per subscription in Settings → Ticket owner.`;
+  const ok = window.confirm(
+    `Run a NON-DESTRUCTIVE deep deployability check in ${r.name}?\n\n` +
+    `This calls Azure Resource Manager pre-flight validation for your ${deepSels.length} zone-redundant selection(s). ` +
+    `It creates NO resources and incurs NO cost.\n\n${rgNote}`
+  );
+  if (!ok) return;
+
+  const btn = document.getElementById("zrs-deepcheck-btn");
+  if (btn) { btn.disabled = true; btn.textContent = "⏳ Validating…"; }
+  document.querySelectorAll(".zrs-svc-slot[data-zrs-deep='1']").forEach((slot) => {
+    slot.innerHTML = `<span class="zrs-mark checking">⏳ Pre-flight validating…</span>`;
+  });
+
+  try {
+    const resp = await apiJson("/api/bom/deep-check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        subscription_id: sub,
+        region: r.short,
+        resource_group: valRg,
+        services: deepSels.map(s => ({ name: s.name, tier: s.tierId })),
+      }),
+    });
+    const az = _regionSupportsAz(r);
+    const map = {};
+    (resp.results || []).forEach(v => { map[_zrsKey(v.name, v.tier)] = v; });
+    // Merge deep-check verdicts into the live cache so verdict confidence and
+    // the verify-all scan consider them (keys never collide: a service is
+    // live-checkable XOR deep-checkable).
+    const cacheKey = `${String(r.short).toLowerCase()}|${sub}`;
+    const prev = PRICING.zonalCap[cacheKey];
+    const mergedMap = Object.assign({}, (prev && prev.map) || {}, map);
+    PRICING.zonalCap[cacheKey] = {
+      status: "done",
+      map: mergedMap,
+      ts: new Date().toISOString().replace("T", " ").slice(0, 16) + " UTC",
+    };
+    document.querySelectorAll(".zrs-svc-slot[data-zrs-deep='1']").forEach((slot) => {
+      const key = slot.getAttribute("data-zrs-key");
+      const v = map[key];
+      slot.innerHTML = v ? _zrsDeepMark(v, az) : _zrsBaselineMark(az);
+    });
+    const blocked = (resp.results || []).filter(v => v.verdict === "blocked").length;
+    if (blocked) showToast(`Deep check complete — ${blocked} tier(s) blocked. Use “Create ticket” to request access.`, "warn");
+    else showToast("Deep check complete — no blockers found.", "success");
+    // Reflect merged verdicts in the headline verdict + region table.
+    _patchZonalCapability(r.short, PRICING.zonalCap[cacheKey]);
+    applyFilters();
+  } catch (e) {
+    document.querySelectorAll(".zrs-svc-slot[data-zrs-deep='1']").forEach((slot) => {
+      slot.innerHTML = `<span class="zrs-mark warn">⚠️ Deep check failed</span>`;
+    });
+    showToast(e.message || "Deep check failed.", "error");
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "🔬 Run deep check"; }
+  }
+}
+
+// -------- Cost & pricing settings (gear → Settings → Cost & pricing) --------
+
+async function loadPricingSettings() {
+  if (!PRICING.settings) {
+    try { const s = await apiJson("/api/pricing/settings"); PRICING.settings = s.settings || {}; }
+    catch (e) { PRICING.settings = {}; }
+  }
+  const s = PRICING.settings || {};
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+  set("pricing-acd", s.acd_discount_pct != null ? s.acd_discount_pct : 0);
+  set("pricing-os", s.pricing_os || "linux");
+  set("pricing-hours", s.hours_per_month != null ? s.hours_per_month : 730);
+  set("pricing-currency", (s.currency || "USD").toUpperCase());
+  set("pricing-uplift", s.noncompute_uplift_pct != null ? s.noncompute_uplift_pct : 35);
+  set("pricing-alt-min", s.alt_min_savings_pct != null ? s.alt_min_savings_pct : 5);
+  const altToggle = document.getElementById("pricing-suggest-alts");
+  if (altToggle) altToggle.checked = s.suggest_alternatives !== false;
+  const genToggle = document.getElementById("pricing-allow-older-gen");
+  if (genToggle) genToggle.checked = s.allow_older_generation === true;
+  _renderServiceEstimateInputs(s.service_estimates || {});
+  const msg = document.getElementById("pricing-save-msg");
+  if (msg) msg.textContent = "";
+}
+
+function _renderServiceEstimateInputs(estimates) {
+  const wrap = document.getElementById("pricing-services");
+  if (!wrap) return;
+  const names = _bomServiceNames(STATE.snapshot);
+  const tiers = _bomServiceTiers(STATE.snapshot);
+  if (!names.length) {
+    wrap.innerHTML = `<p class="muted">No non-compute services in the current BOM.</p>`;
+    return;
+  }
+  wrap.innerHTML = names.map(n => {
+    const v = (estimates && estimates[n] != null) ? estimates[n] : "";
+    const tierId = tiers[n];
+    const tierChip = tierId
+      ? ` <span class="svc-tier-chip">${escapeHtml(_tierLabel(n, tierId))}</span>`
+      : "";
+    return `<label class="pricing-svc-row"><span>${escapeHtml(n)}${tierChip}</span>
+      <input type="number" min="0" step="1" data-service="${escapeHtml(n)}" value="${escapeHtml(String(v))}" placeholder="0" /><small class="muted">$/mo</small></label>`;
+  }).join("");
+}
+
+async function savePricingSettings() {
+  const num = (id, d) => { const el = document.getElementById(id); const n = el ? parseFloat(el.value) : NaN; return Number.isFinite(n) ? n : d; };
+  const svc = {};
+  document.querySelectorAll("#pricing-services [data-service]").forEach(inp => {
+    const name = inp.getAttribute("data-service");
+    const n = parseFloat(inp.value);
+    if (Number.isFinite(n) && n > 0) svc[name] = n;
+  });
+  const patch = {
+    acd_discount_pct: num("pricing-acd", 0),
+    pricing_os: (document.getElementById("pricing-os") || {}).value || "linux",
+    hours_per_month: num("pricing-hours", 730),
+    currency: (((document.getElementById("pricing-currency") || {}).value) || "USD").toUpperCase(),
+    noncompute_uplift_pct: num("pricing-uplift", 35),
+    suggest_alternatives: !!(document.getElementById("pricing-suggest-alts") || {}).checked,
+    alt_min_savings_pct: num("pricing-alt-min", 5),
+    allow_older_generation: !!(document.getElementById("pricing-allow-older-gen") || {}).checked,
+    service_estimates: svc,
+  };
+  const msg = document.getElementById("pricing-save-msg");
+  const btn = document.getElementById("pricing-save");
+  if (btn) btn.disabled = true;
+  if (msg) msg.textContent = "Saving…";
+  try {
+    const res = await apiJson("/api/pricing/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    PRICING.settings = res.settings || patch;
+    if (msg) msg.textContent = "Saved — recalculating estimate…";
+    await fetchPricingEstimate(true);
+    if (msg) msg.textContent = "Saved.";
+    showToast("Pricing settings saved.", "success");
+  } catch (e) {
+    if (msg) msg.textContent = "";
+    showToast(e.message || "Could not save pricing settings.", "error");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 function initContinentFilter() {
@@ -732,14 +2095,20 @@ function renderTable() {
   if (headerCell) {
     headerCell.classList.toggle("hidden", !showQuotaCol);
   }
+  const costHeader = document.querySelector("#regions-table thead .cost-col");
+  if (costHeader) {
+    costHeader.classList.toggle("hidden", !showQuotaCol);
+  }
   for (const r of STATE.filtered) {
     const tr = document.createElement("tr");
     tr.dataset.region = r.name;
     const deployment = getDeploymentVerdictInfo(r);
 
-    const zoneHtml = r.zone_health.map((z, i) =>
-      `<span class="zone-cell ${z}" title="AZ${i + 1}: ${z === "green" ? "OK" : "Blocked"}">${i + 1}</span>`
-    ).join("");
+    const zoneHtml = _regionSupportsAz(r) === false
+      ? `<span class="zone-noaz" title="This region has no Availability Zones — resources are regional (single-zone) only.">Regional only</span>`
+      : r.zone_health.map((z, i) =>
+          `<span class="zone-cell ${z}" title="AZ${i + 1}: ${z === "green" ? "OK" : "Blocked"}">${i + 1}</span>`
+        ).join("");
 
     let quotaCellHtml = "";
     if (showQuotaCol) {
@@ -754,13 +2123,15 @@ function renderTable() {
       <td class="region-cell">${escapeHtml(r.name)}
         <div class="country">${escapeHtml(r.country || "")}</div>
       </td>
-      <td><span class="pill ${deployment.cls}" title="${escapeHtml(deployment.title)}">${escapeHtml(deployment.text)}</span></td>
+      <td><span class="pill ${deployment.cls}" title="${escapeHtml(deployment.title)}">${escapeHtml(deployment.text)}</span><span class="conf-dot ${_confidenceBadge(deployment).cls}" title="${escapeHtml(_confidenceBadge(deployment).text + " — " + _confidenceBadge(deployment).title)}"></span></td>
       <td>${escapeHtml(r.geo || "")}</td>
       <td><span class="zone-cells">${zoneHtml}</span></td>
       ${quotaCellHtml}
       <td class="rec-cell">${escapeHtml(r.recommendation || "—")}</td>
+      ${_costCellHtml(r)}
       <td class="alt-cell">${escapeHtml((r.alt_regions || []).map(a =>
-        a.latency_ms != null ? `${a.region} (${a.latency_ms}ms)` : a.region
+        a.latency_ms != null ? `${a.region} (${a.latency_ms}ms)`
+          : (a.source === "least_bad" && a.caveat ? `${a.region} (${a.caveat})` : a.region)
       ).join(", "))}</td>
     `;
     tr.addEventListener("click", () => openDrilldown(r));
@@ -788,26 +2159,44 @@ function openDrilldown(r) {
   const body = document.getElementById("dd-body");
   let html = "";
   const deployment = getDeploymentVerdictInfo(r);
-  html += renderDeploymentReadinessSection(r, deployment);
+  const deploymentPill = `<span id="dd-deploy-pill" class="pill ${deployment.cls}" title="${escapeHtml(deployment.title)}">${escapeHtml(deployment.text)}</span>`;
+  // All drilldown sections start collapsed so the panel opens compact.
+  html += _ddSection("Deployment Readiness",
+    `<div id="dd-deploy-section">${renderDeploymentReadinessSection(r, deployment)}</div>`,
+    { badge: deploymentPill });
 
   const ddVerdict = getRegionQuotaVerdictForSubscription(STATE.snapshot, r.short, focusedSubscriptionId());
   const ddVerdictPill = _regionQuotaVerdictLabel(ddVerdict);
   const ddVerdictHtml = `<span class="pill ${ddVerdictPill.cls}" title="${escapeHtml(ddVerdictPill.title)}">${escapeHtml(ddVerdictPill.text)}</span>`;
-  html += `<h4>Summary</h4>
-    <div class="kv">
-      <div class="key">Status</div><div><span class="status-pill ${statusClass(r.status)}">${escapeHtml(r.status)}</span></div>
+  const statusPill = `<span class="status-pill ${statusClass(r.status)}">${escapeHtml(r.status)}</span>`;
+  html += _ddSection("Summary", `<div class="kv">
+      <div class="key">Status</div><div>${statusPill}</div>
       <div class="key">Region (short)</div><div>${escapeHtml(r.short)}</div>
-      <div class="key">Coordinates</div><div>${r.coords[0] != null ? r.coords.join(", ") : "—"}</div>
       <div class="key">Quota</div><div>${ddVerdictHtml}</div>
-    </div>`;
+    </div>`, { badge: statusPill });
 
-  if (r.sku_zone_detail && Object.keys(r.sku_zone_detail).length) {
+  html += renderCostEstimateSection(r);
+
+  const zrsSection = renderZrsReadinessSection(r);
+  if (zrsSection) {
+    const zrsPill = _zrsReadinessPill(r);
+    const zrsBadge = zrsPill
+      ? `<span id="zrs-pill" class="pill ${zrsPill.cls}" title="${escapeHtml(zrsPill.title)}">${escapeHtml(zrsPill.text)}</span>`
+      : "";
+    html += _ddSection("Zone-redundancy (ZRS/HA) readiness", zrsSection, { badge: zrsBadge });
+  }
+
+  const _noAz = _regionSupportsAz(r) === false;
+  if (_noAz) {
+    // Region has no Availability Zones — per-AZ red/green grids are
+    // meaningless here, so replace them with an explicit regional-only note.
+    const zhHtml = `<div class="note danger"><strong>Regional only — no Availability Zones.</strong> ${escapeHtml(r.name)} does not offer Availability Zones, so zone-redundant (ZRS/HA, multi-AZ) deployments aren't possible here. Resources are single-zone (locally redundant) only. Choose an AZ-enabled region if your BOM requires zone redundancy.</div>`;
+    html += _ddSection("Zone Availability", zhHtml);
+  } else if (r.sku_zone_detail && Object.keys(r.sku_zone_detail).length) {
     // Determine which SKU families are BOM primary vs fallback
     const reqs = _getCoresRequirements(STATE.snapshot || {});
     const primaryLabels = new Set(reqs.map(rq => (rq.primary_label || "").toLowerCase()));
-    // Unified zone + SKU availability section
-    html += `<h4>Zone &amp; SKU Availability</h4>
-      <div class="kv">`;
+    let zoneHtml = `<div class="kv">`;
     for (const [sku, zones] of Object.entries(r.sku_zone_detail)) {
       const cells = zones.map((z, i) =>
         `<span class="zone-cell ${z ? "green" : "red"}" style="margin-right:2px">${i + 1}</span>`
@@ -820,71 +2209,157 @@ function openDrilldown(r) {
         tag = ` <span class="sku-tag sku-tag--fallback">Fallback</span>`;
       }
       const label = isPrimary ? `<strong>${escapeHtml(sku)}</strong>${tag}` : `${escapeHtml(sku)}${tag}`;
-      html += `<div class="key">${label}</div><div>${cells}</div>`;
+      zoneHtml += `<div class="key">${label}</div><div>${cells}</div>`;
     }
-    html += `</div>`;
+    zoneHtml += `</div>`;
     // Show SKU blockers summary (zone grid already shows per-AZ red/green)
     const skuBlockers = r.sku_blockers || [];
     if (skuBlockers.length) {
-      html += `<div class="drilldown-zone-restrictions">`;
+      zoneHtml += `<div class="drilldown-zone-restrictions">`;
       for (const issue of skuBlockers) {
-        html += `<div class="note danger">${escapeHtml(issue)}</div>`;
+        zoneHtml += `<div class="note danger">${escapeHtml(issue)}</div>`;
       }
-      html += `</div>`;
+      zoneHtml += `</div>`;
     }
+    html += _ddSection("Zone &amp; SKU Availability", zoneHtml);
   } else {
     // Fallback: just show zone health if no SKU detail available
-    html += `<h4>Zone Health</h4>
-      <div class="kv">`;
+    let zhHtml = `<div class="kv">`;
     for (let i = 0; i < 3; i++) {
       const z = r.zone_health[i];
       const restriction = r.zone_restrictions[i] || "(none reported)";
-      html += `<div class="key">AZ ${i + 1}</div>
+      zhHtml += `<div class="key">AZ ${i + 1}</div>
         <div><span class="zone-cell ${z}" style="margin-right:6px">${i + 1}</span> ${escapeHtml(restriction)}</div>`;
     }
-    html += `</div>`;
+    zhHtml += `</div>`;
+    html += _ddSection("Zone Health", zhHtml);
   }
 
   if (r.chosen_skus && r.chosen_skus.length && !(r.sku_zone_detail && Object.keys(r.sku_zone_detail).length)) {
-    html += `<h4>Recommended SKUs</h4>`;
-    for (const sku of r.chosen_skus) {
-      html += `<div class="note">${escapeHtml(sku)}</div>`;
-    }
+    html += _ddSection("Recommended SKUs",
+      r.chosen_skus.map(sku => `<div class="note">${escapeHtml(sku)}</div>`).join(""));
   }
 
   if (r.sku_fallbacks && r.sku_fallbacks.length) {
-    html += `<h4>v5 Fallbacks</h4>`;
-    for (const f of r.sku_fallbacks) {
-      html += `<div class="note warn">${escapeHtml(f)}</div>`;
-    }
+    html += _ddSection("v5 Fallbacks",
+      r.sku_fallbacks.map(f => `<div class="note warn">${escapeHtml(f)}</div>`).join(""));
   }
 
   if (r.missing_services && r.missing_services.length) {
-    html += `<h4>Missing BOM Services</h4>`;
-    for (const ms of r.missing_services) {
-      html += `<div class="note danger"><strong>${escapeHtml(ms.service)}</strong>: ${escapeHtml(ms.detail)}</div>`;
-    }
+    html += _ddSection("Missing BOM Services",
+      r.missing_services.map(ms => `<div class="note danger"><strong>${escapeHtml(ms.service)}</strong>: ${escapeHtml(ms.detail)}</div>`).join(""));
+  }
+
+  if (r.registration_required && r.registration_required.length) {
+    html += _ddSection("Registration Required", _registrationRequiredHtml(r.registration_required));
   }
 
   if (r.alt_regions && r.alt_regions.length) {
-    html += `<h4>Alternative Regions</h4>`;
-    for (const a of r.alt_regions) {
-      const ms = a.latency_ms != null ? `${a.latency_ms} ms` : "geo proximity";
-      html += `<div class="alt-row"><span>${escapeHtml(a.region)}</span><span class="ms">${ms}</span></div>`;
-    }
+    const isLeastBad = r.alt_regions.some(a => a.source === "least_bad");
+    const altHtml = r.alt_regions.map(a => {
+      const prox = a.latency_ms != null
+        ? `${a.latency_ms} ms`
+        : (a.distance_km != null ? `~${a.distance_km} km` : "geo proximity");
+      const caveat = a.source === "least_bad" && a.caveat
+        ? `<span class="alt-caveat" title="Residual gaps in this region">${escapeHtml(a.caveat)}</span>`
+        : "";
+      return `<div class="alt-row"><span>${escapeHtml(a.region)}${caveat}</span><span class="ms">${prox}</span></div>`;
+    }).join("");
+    const title = isLeastBad
+      ? "Closest-to-deployable regions (no region is fully healthy)"
+      : "Alternative regions based on health and latency";
+    const intro = isLeastBad
+      ? `<div class="note warn">No region in this snapshot is fully deployment-ready for your BOM. These are the <strong>least-bad</strong> options — ranked by fewest remaining gaps — but each still has caveats to resolve.</div>`
+      : "";
+    html += _ddSection(title, intro + altHtml);
   }
 
   const quotaResult = buildQuotaGroupRowsForRegion(STATE.snapshot, r.short);
   const quotaPill = _quotaGroupStatusLabel(_deriveQuotaRegionStatus(quotaResult.rows, r.quota_status || "unknown"));
   if (quotaResult.rows.length) {
-    html += renderDrilldownQuotaSection(r, quotaResult, quotaPill);
+    const subName = focusedSubscriptionName();
+    const quotaBadge = `<span class="pill ${quotaPill.cls}">${escapeHtml(quotaPill.text)}</span>${subName ? `<span class="dd-sub-context">Focused sub: ${escapeHtml(subName)}</span>` : ""}`;
+    html += _ddSection("Quota", renderDrilldownQuotaSection(r, quotaResult, quotaPill), { badge: quotaBadge });
   }
 
   body.innerHTML = html;
   renderSubscriptionSwitcher();
+  _scanRegistrationCards(body);
+  _validateAltsForRegion(r);
+  _verifyZonalForRegion(r);
+  if (!body._ddSectionBound) {
+    body.addEventListener("click", (ev) => {
+      const head = ev.target.closest(".dd-section-head");
+      if (!head || !body.contains(head)) return;
+      if (ev.target.closest("a, button, [data-rec-ticket], [data-alt-ticket]")) return;
+      _toggleDdSection(head);
+    });
+    body.addEventListener("keydown", (ev) => {
+      if (ev.key !== "Enter" && ev.key !== " ") return;
+      const head = ev.target.closest(".dd-section-head");
+      if (!head || !body.contains(head)) return;
+      ev.preventDefault();
+      _toggleDdSection(head);
+    });
+    body._ddSectionBound = true;
+  }
   if (!body._quotaRequestBound) {
     body.addEventListener("click", _handleQuotaRequestInteraction);
     body._quotaRequestBound = true;
+  }
+  if (!body._recTicketBound) {
+    body.addEventListener("click", (ev) => {
+      const link = ev.target.closest("[data-rec-ticket]");
+      if (!link) return;
+      ev.preventDefault();
+      const kind = link.getAttribute("data-rec-ticket");
+      const regionShort = STATE.activeDrilldownRegion || "";
+      closeDrilldown();
+      _supportPrefill(kind, regionShort);
+    });
+    body._recTicketBound = true;
+  }
+  if (!body._altTicketBound) {
+    body.addEventListener("click", (ev) => {
+      const link = ev.target.closest("[data-alt-ticket]");
+      if (!link) return;
+      ev.preventDefault();
+      const kind = link.getAttribute("data-alt-ticket");
+      const regionShort = link.getAttribute("data-alt-region") || STATE.activeDrilldownRegion || "";
+      const family = link.getAttribute("data-alt-family") || "";
+      const label = link.getAttribute("data-alt-label") || "";
+      const cores = Number(link.getAttribute("data-alt-cores") || 0);
+      const limitRaw = link.getAttribute("data-alt-limit");
+      const currentLimit = limitRaw !== "" && limitRaw != null ? Number(limitRaw) : null;
+      closeDrilldown();
+      _supportPrefill(kind, regionShort, {
+        family,
+        label,
+        cores: cores > 0 ? cores : undefined,
+        currentLimit: Number.isFinite(currentLimit) ? currentLimit : undefined,
+      });
+    });
+    body._altTicketBound = true;
+  }
+  if (!body._zrsDeepBound) {
+    body.addEventListener("click", (ev) => {
+      const runBtn = ev.target.closest("#zrs-deepcheck-btn");
+      if (runBtn) {
+        ev.preventDefault();
+        _runZrsDeepCheck(runBtn.getAttribute("data-region-short") || STATE.activeDrilldownRegion || "");
+        return;
+      }
+      const tkBtn = ev.target.closest(".zrs-ticket-btn");
+      if (tkBtn) {
+        ev.preventDefault();
+        const blockType = tkBtn.getAttribute("data-zrs-ticket") || "";
+        const regionShort = STATE.activeDrilldownRegion || "";
+        const kind = blockType === "sku_restriction" ? "technical" : "quota";
+        closeDrilldown();
+        _supportPrefill(kind, regionShort);
+      }
+    });
+    body._zrsDeepBound = true;
   }
   document.getElementById("drilldown").classList.remove("hidden");
   document.getElementById("drilldown-overlay").classList.add("open");
@@ -904,9 +2379,10 @@ function getDeploymentVerdictInfo(region) {
   const reasons = Array.isArray(raw.reasons) ? raw.reasons : [];
   const constraints = Array.isArray(raw.constraints) ? raw.constraints : [];
   const blockers = Array.isArray(raw.blockers) ? raw.blockers : [];
+  let info;
   switch (verdict) {
     case "ready":
-      return {
+      info = {
         verdict,
         text: "Ready",
         cls: "pill-ok",
@@ -915,8 +2391,9 @@ function getDeploymentVerdictInfo(region) {
         constraints,
         blockers,
       };
+      break;
     case "ready_with_constraints":
-      return {
+      info = {
         verdict,
         text: "Ready with constraints",
         cls: "pill-warn",
@@ -925,8 +2402,9 @@ function getDeploymentVerdictInfo(region) {
         constraints,
         blockers,
       };
+      break;
     case "not_recommended":
-      return {
+      info = {
         verdict,
         text: "Not recommended",
         cls: "pill-fail",
@@ -935,9 +2413,10 @@ function getDeploymentVerdictInfo(region) {
         constraints,
         blockers,
       };
+      break;
     case "needs_validation":
     default:
-      return {
+      info = {
         verdict: "needs_validation",
         text: "Needs validation",
         cls: "pill-muted",
@@ -946,7 +2425,129 @@ function getDeploymentVerdictInfo(region) {
         constraints,
         blockers,
       };
+      break;
   }
+  return _augmentVerdictWithZrs(region, info);
+}
+
+// Confidence tier + provenance for a region's verdict. The compile-time verdict
+// is "capability" (ARM metadata-backed). A live ZRS/HA check promotes it to
+// "validated" when we got a definitive answer, or notes "unverifiable" when a
+// live probe was attempted but inconclusive (403 / throttle / no API).
+function _regionConfidence(region) {
+  const raw = (region && region.deployment_verdict) || {};
+  let tier = raw.confidence || ((region && region.deployment_verdict) ? "capability" : "metadata");
+  const provenance = Array.isArray(raw.provenance) ? raw.provenance.slice() : [];
+  let liveNote = null;
+  const sub = focusedSubscriptionId() || "";
+  const key = sub ? `${String((region && region.short) || "").toLowerCase()}|${sub}` : "";
+  const entry = key ? (PRICING.zonalCap || {})[key] : null;
+  if (entry) {
+    if (entry.status === "error") {
+      liveNote = "unverifiable";
+    } else if (entry.status === "done" && entry.map) {
+      const vals = Object.values(entry.map);
+      const definitive = vals.some(v => v && ["available", "blocked", "unavailable"].includes(v.verdict));
+      const inconclusive = vals.some(v => v && ["unverifiable", "not_verifiable", "no_resource_group", "no_subscription", "advisory"].includes(v.verdict));
+      if (definitive) {
+        tier = "validated";
+        provenance.push({
+          signal: "Live ZRS/HA deployability",
+          source: `verified against subscription${entry.ts ? ` · ${entry.ts}` : ""}`,
+        });
+        if (inconclusive) liveNote = "partial";
+      } else {
+        // A live probe ran but returned no definitive per-subscription answer
+        // (restricted sub, no authoritative API, or an empty result). Flag it
+        // honestly as unverifiable rather than silently leaving it at the
+        // metadata tier, which reads as "nothing happened".
+        liveNote = "unverifiable";
+      }
+    }
+  }
+  return { tier, provenance, liveNote };
+}
+
+// Classify a completed zonal-capability entry: true only when it carries at
+// least one *definitive* per-subscription verdict (available/blocked/
+// unavailable). A "done" probe that returned only inconclusive results (403 /
+// restricted / no API / empty) is NOT a conclusive live verification.
+function _zonalEntryConclusive(entry) {
+  if (!entry || entry.status !== "done" || !entry.map) return false;
+  return Object.values(entry.map).some(
+    v => v && ["available", "blocked", "unavailable"].includes(v.verdict),
+  );
+}
+
+// Presentation for a confidence tier → pill.
+function _confidenceBadge(info) {
+  const tier = (info && info.confidence) || "capability";
+  const map = {
+    validated: { cls: "conf-validated", text: "Verified live", title: "A live per-subscription check confirmed the constrained tiers — highest confidence." },
+    capability: { cls: "conf-capability", text: "ARM metadata", title: "Backed by ARM SKU / provider / quota metadata from the last snapshot. Run Verify all for a live per-subscription confirmation." },
+    metadata: { cls: "conf-metadata", text: "Baseline", title: "Region/BOM baseline only — no ARM capability data. Re-run analysis for full signals." },
+  };
+  const base = map[tier] || map.capability;
+  if (info && info.liveNote === "unverifiable") {
+    return { cls: "conf-unverifiable", text: "Unverifiable", title: "A live check was attempted but couldn't determine deployability (restricted subscription, throttling, or no authoritative API). Treat with caution." };
+  }
+  return base;
+}
+
+// Read cached live zone-redundancy (ZRS/HA) results for the focused
+// subscription and return the selections that came back blocked/unavailable.
+// Returns [] when no live check has run yet (e.g. at table render time), so the
+// headline verdict is only downgraded once we actually have authoritative data.
+function _zrsBlockedForRegion(region) {
+  const sub = focusedSubscriptionId() || "";
+  if (!region || !sub) return [];
+  const key = `${String(region.short || "").toLowerCase()}|${sub}`;
+  const entry = (PRICING.zonalCap || {})[key];
+  if (!entry || entry.status !== "done" || !entry.map) return [];
+  const out = [];
+  for (const v of Object.values(entry.map)) {
+    if (v && (v.verdict === "blocked" || v.verdict === "unavailable")) out.push(v);
+  }
+  return out;
+}
+
+// A required zone-redundant / HA tier that is restricted for this subscription
+// is a genuine caveat: the region can still host non-HA tiers, but it is not
+// unconditionally "Ready". Downgrade Ready → Ready with constraints and surface
+// each restricted tier as a zone-gap blocker so it shows in the readiness list.
+function _augmentVerdictWithZrs(region, info) {
+  const conf = _regionConfidence(region);
+  info.confidence = conf.tier;
+  info.provenance = conf.provenance;
+  info.liveNote = conf.liveNote;
+  const blocks = _zrsBlockedForRegion(region);
+  if (!blocks.length) return info;
+  const needsZr = _bomNeedsZoneRedundancy();
+  const blockers = Array.isArray(info.blockers) ? info.blockers.slice() : [];
+  for (const v of blocks) {
+    const tierTxt = v.tier ? ` (${v.tier})` : "";
+    const detail = v.message || "zone-redundant / HA tier is restricted for this subscription in this region.";
+    blockers.push({
+      type: "zone_gap",
+      severity: needsZr ? "critical" : "info",
+      message: `${v.name}${tierTxt}: ${detail}` +
+        (needsZr ? "" : " — advisory only (this workload is regional / single-zone tolerant)."),
+    });
+  }
+  const next = { ...info, blockers };
+  // Regional workloads don't need Availability Zones, so a zone-redundancy
+  // restriction is informational and must not downgrade the region verdict.
+  if (!needsZr) return next;
+  // Zone-redundant workloads DO need AZs: a tier that is restricted/unavailable
+  // for this subscription is a hard blocker. Escalate the headline to red so it
+  // matches the "ZRS: blocked" panel instead of a soft "Ready with constraints".
+  if (next.verdict !== "not_recommended") {
+    next.verdict = "not_recommended";
+    next.text = "Not recommended";
+    next.cls = "pill-fail";
+    next.title = "One or more zone-redundant (ZRS/HA) tiers your BOM requires are restricted or unavailable for this subscription in this region.";
+  }
+  return next;
 }
 
 function inferDeploymentVerdict(region) {
@@ -990,12 +2591,22 @@ function renderDeploymentReadinessSection(region, deployment) {
     needs_validation: "Automated checks could not fully validate this region.",
   };
 
-  let html = `<h4>Deployment Readiness</h4>
-    <div class="deployment-readiness">
+  const conf = _confidenceBadge(deployment);
+  const provenance = Array.isArray(deployment.provenance) ? deployment.provenance : [];
+  const provHtml = provenance.length
+    ? `<details class="dd-provenance"><summary>How do we know? (${provenance.length})</summary>
+        <ul class="dd-prov-list">${provenance.map(p =>
+          `<li><strong>${escapeHtml(p.signal || "")}</strong> — <span class="muted">${escapeHtml(p.source || "")}</span></li>`
+        ).join("")}</ul></details>`
+    : "";
+
+  let html = `<div class="deployment-readiness">
       <div class="deployment-readiness-header">
         <span class="pill pill-lg ${deployment.cls}" title="${escapeHtml(deployment.title)}">${escapeHtml(deployment.text)}</span>
+        <span class="conf-badge ${conf.cls}" title="${escapeHtml(conf.title)}">${escapeHtml(conf.text)}</span>
         <span class="dd-verdict-desc">${escapeHtml(verdictDesc[deployment.verdict] || "")}</span>
-      </div>`;
+      </div>
+      ${provHtml}`;
 
   // Show blockers FIRST for not_recommended / needs_validation
   if (blockerGroups.size > 0) {
@@ -1013,6 +2624,48 @@ function renderDeploymentReadinessSection(region, deployment) {
     html += `<div class="dd-readiness-subtitle">⚙️ Constraints</div>${renderList(constraints)}`;
   }
 
+  // Recommendations — actionable mitigations (ODCR, tickets, fallback, etc.)
+  const recommendations = Array.isArray(region && region.deployment_verdict && region.deployment_verdict.recommendations)
+    ? region.deployment_verdict.recommendations
+    : [];
+  if (recommendations.length) {
+    const prioRank = { high: 0, medium: 1, low: 2 };
+    const prioMeta = {
+      high: { cls: "is-high", label: "High" },
+      medium: { cls: "is-medium", label: "Medium" },
+      low: { cls: "is-low", label: "Low" },
+    };
+    const sorted = recommendations.slice().sort(
+      (a, b) => (prioRank[a && a.priority] ?? 1) - (prioRank[b && b.priority] ?? 1)
+    );
+    html += `<div class="dd-readiness-subtitle">💡 Recommendations</div>`;
+    html += `<ul class="dd-recs-list">`;
+    for (const rec of sorted) {
+      if (!rec) continue;
+      const prio = prioMeta[rec.priority] || prioMeta.medium;
+      const links = [];
+      if (rec.ticket_kind === "quota" || rec.ticket_kind === "technical") {
+        links.push(
+          `<a href="#" class="dd-rec-link" data-rec-ticket="${escapeHtml(rec.ticket_kind)}">Open a ticket →</a>`
+        );
+      }
+      if (rec.doc_url) {
+        links.push(
+          `<a href="${escapeHtml(rec.doc_url)}" target="_blank" rel="noopener noreferrer" class="dd-rec-link">Learn more →</a>`
+        );
+      }
+      html += `<li class="dd-rec ${prio.cls}">
+        <div class="dd-rec-head">
+          <span class="dd-rec-prio">${escapeHtml(prio.label)}</span>
+          <span class="dd-rec-title">${escapeHtml(rec.title || "")}</span>
+        </div>
+        <div class="dd-rec-detail">${escapeHtml(rec.detail || "")}</div>
+        ${links.length ? `<div class="dd-rec-links">${links.join("")}</div>` : ""}
+      </li>`;
+    }
+    html += `</ul>`;
+  }
+
   // Only show positive reasons for "ready" verdict
   if (deployment.verdict === "ready" && reasons.length) {
     html += `<div class="dd-readiness-subtitle">✓ Checks passed</div>${renderList(reasons.filter(r => !r.includes("baseline")))}`;
@@ -1027,22 +2680,74 @@ function renderDeploymentReadinessSection(region, deployment) {
 
 // ---------------------------------------------------------------- Tabs / views
 
+// Region sub-views are grouped under the single "Regions" primary tab.
+const REGION_SUBVIEWS = ["table", "map", "latency", "compare"];
+
 function switchView(view) {
+  // Legacy/direct calls to a sub-view name are routed into the Regions group.
+  if (REGION_SUBVIEWS.includes(view)) {
+    STATE.regionsSub = view;
+    view = "regions";
+  }
   STATE.view = view;
   document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.view === view));
-  for (const v of ["overview", "table", "map", "latency", "compare", "quota", "settings"]) {
+
+  // The Filters & Search rail only applies to region views (table/map/compare)
+  // and the overview; hide it where it's meaningless (quota/tickets/settings).
+  const filtersRail = document.getElementById("filters-rail");
+  if (filtersRail) {
+    const showFilters = (view === "regions" || view === "overview");
+    filtersRail.classList.toggle("hidden", !showFilters);
+  }
+
+  const subbar = document.getElementById("region-subtabs");
+  if (view === "regions") {
+    const sub = REGION_SUBVIEWS.includes(STATE.regionsSub) ? STATE.regionsSub : "table";
+    STATE.regionsSub = sub;
+    if (subbar) subbar.classList.remove("hidden");
+    document.querySelectorAll(".region-subtab").forEach(t =>
+      t.classList.toggle("active", t.dataset.sub === sub));
+    // Hide the non-region primary views; show only the active sub-view.
+    for (const v of ["overview", "quota", "support", "settings"]) {
+      const el = document.getElementById("view-" + v);
+      if (el) el.classList.add("hidden");
+    }
+    for (const v of REGION_SUBVIEWS) {
+      const el = document.getElementById("view-" + v);
+      if (el) el.classList.toggle("hidden", v !== sub);
+    }
+    if (sub === "map") setTimeout(refreshMap, 100);
+    if (sub === "latency") refreshLatencyChart();
+    return;
+  }
+
+  if (subbar) subbar.classList.add("hidden");
+  for (const v of ["overview", "table", "map", "latency", "compare", "quota", "support", "settings"]) {
     const el = document.getElementById("view-" + v);
     if (el) el.classList.toggle("hidden", v !== view);
   }
-  if (view === "map") setTimeout(refreshMap, 100);
-  if (view === "latency") refreshLatencyChart();
   if (view === "overview") setTimeout(() => {
     Object.values(STATE.overviewCharts).forEach(c => c && c.resize());
   }, 50);
   if (view === "quota") renderQuotaTab();
+  if (view === "support") renderSupportTab();
   if (view === "settings") {
-    loadActivityLog();
+    switchSettingsTab(STATE.settingsTab || "owner");
   }
+}
+
+// Switch the active sub-view within the Regions tab.
+function switchRegionsSub(sub) {
+  if (!REGION_SUBVIEWS.includes(sub)) return;
+  STATE.regionsSub = sub;
+  switchView("regions");
+}
+
+// True when the Regions tab is active AND showing the given sub-view. After the
+// Phase 3 consolidation STATE.view is always "regions" for map/latency/table/
+// compare; the specific pane lives in STATE.regionsSub.
+function _isRegionsSub(sub) {
+  return STATE.view === "regions" && STATE.regionsSub === sub;
 }
 
 // ---------------------------------------------------------------- Shared quota helpers
@@ -2173,29 +3878,276 @@ function _renderQuotaRequestAction(row) {
   return `<div class="quota-card-action">${buttonHtml}${statusText ? `<div class="quota-request-status ${statusCls}">${escapeHtml(statusText)}</div>` : ""}</div>`;
 }
 
+function _quotaTicketRequestButton(row, useAlt, tag) {
+  // All quota increases are created and tracked on the Tickets tab. This button
+  // simply routes the user there with the ticket pre-filled (region, SKU family,
+  // suggested new limit) — it does not perform any inline request itself.
+  const family = useAlt ? row.alt_family : row.family;
+  if (!family) return "";
+  const label = useAlt ? (row.alt_label || row.alt_family) : (row.family_label || row.family);
+  const suggested = _quotaRequestLimitForRow(row);
+  const tagHtml = tag
+    ? `<span class="sku-tag sku-tag--${tag === "Primary" ? "primary" : "fallback"}">${escapeHtml(tag)}</span> `
+    : "";
+  return `<button type="button" class="btn-secondary quota-ticket-btn"
+    data-open-ticket="quota"
+    data-region="${escapeHtml(row.region_short || "")}"
+    data-family="${escapeHtml(family)}"
+    data-limit="${escapeHtml(String(suggested || ""))}"
+    title="Create and track a quota-increase support ticket for ${escapeHtml(label)}">${tagHtml}Request increase (${escapeHtml(label)}) ↗</button>`;
+}
+
+function _renderQuotaTicketActions(row) {
+  const primary = _quotaTicketRequestButton(row, false, row.alt_family ? "Primary" : "");
+  const fallback = row.alt_family ? _quotaTicketRequestButton(row, true, "Fallback") : "";
+  if (!primary && !fallback) return `<span class="muted">—</span>`;
+  return `<div class="quota-ticket-actions">${primary}${fallback}</div>`;
+}
+
 function _renderQuotaActionCell(row) {
-  const state = _getQuotaRequestState(row.region_short, row.family);
-  if (!row.subscription_id && !state) return `<span class="muted">—</span>`;
-  if (row.alt_family) {
-    const altRow = { ...row, family: row.alt_family, family_label: row.alt_label || row.alt_family };
-    const altState = _getQuotaRequestState(row.region_short, row.alt_family);
-    if (row.subscription_id || altState) {
-      return `<div class="quota-card-actions-row">
-        <div class="quota-card-action-col">
-          ${_renderQuotaRequestAction(row)}
-          <div class="sku-tag sku-tag--primary" style="margin-top:4px;">Primary</div>
-        </div>
-        <div class="quota-card-action-col">
-          ${_renderQuotaRequestAction(altRow)}
-          <div class="sku-tag sku-tag--fallback" style="margin-top:4px;">Fallback</div>
-        </div>
-      </div>`;
-    }
+  return _renderQuotaTicketActions(row);
+}
+
+function _registrationRequiredHtml(list, opts = {}) {
+  // Dedupe by provider namespace — one card per provider. Each card resolves
+  // its true state (registerable / registering / not available on this
+  // subscription) via a live status check, so we never show a "Register"
+  // action that can't actually work.
+  const byProvider = new Map();
+  for (const item of list) {
+    const prov = item.provider || "";
+    if (!byProvider.has(prov)) byProvider.set(prov, []);
+    byProvider.get(prov).push(item.service);
   }
-  return _renderQuotaRequestAction(row);
+  let html = "";
+  for (const [prov, services] of byProvider.entries()) {
+    const svcList = services.map(escapeHtml).join(", ");
+    const provLabel = prov ? escapeHtml(prov) : "provider";
+    html +=
+      `<div class="reg-provider-block" data-reg-provider="${escapeHtml(prov)}" ` +
+      `style="font-size:12px;padding:6px 8px;margin:3px 0;background:rgba(244,167,38,0.10);` +
+      `border-left:3px solid #f4a726;color:#f4a726;border-radius:4px">` +
+      `<div><strong>${svcList}</strong></div>` +
+      `<div style="font-size:11px;opacity:0.9;margin-top:2px">Provider <code>${provLabel}</code> ` +
+      `isn't registered on this subscription, so its availability can't be confirmed.</div>` +
+      `<div class="reg-status" data-reg-status style="margin-top:6px;font-size:11px;color:#f4a726">` +
+      `Checking availability on this subscription…</div>` +
+      `<div class="reg-cli" data-reg-cli style="margin-top:6px;font-size:11px;display:none">` +
+      `<div style="opacity:0.9;margin-bottom:3px">Ask a subscription Owner/Contributor to run:</div>` +
+      `<code class="reg-cli-text" data-reg-cli-text style="display:block;padding:6px 8px;background:rgba(0,0,0,0.35);` +
+      `border-radius:4px;white-space:pre-wrap;word-break:break-all;cursor:pointer" ` +
+      `title="Click to copy"></code></div>` +
+      `<div class="reg-actions" data-reg-actions style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap"></div>` +
+      `</div>`;
+  }
+  return html;
+}
+
+function _regBlockFor(el) {
+  return el ? el.closest(".reg-provider-block") : null;
+}
+
+function _regSetStatus(block, text, color) {
+  if (!block) return;
+  const el = block.querySelector("[data-reg-status]");
+  if (!el) return;
+  el.textContent = text;
+  el.style.color = color || "#f4a726";
+  el.style.display = text ? "block" : "none";
+}
+
+function _regShowCli(block, cliCmd) {
+  if (!block) return;
+  const wrap = block.querySelector("[data-reg-cli]");
+  const code = block.querySelector("[data-reg-cli-text]");
+  if (!wrap || !code) return;
+  code.textContent = cliCmd;
+  wrap.style.display = "block";
+}
+
+function _regHideCli(block) {
+  if (!block) return;
+  const wrap = block.querySelector("[data-reg-cli]");
+  if (wrap) wrap.style.display = "none";
+}
+
+const _REG_BTN_STYLE =
+  "font-size:11px;padding:3px 10px;border:1px solid #f4a726;" +
+  "background:rgba(244,167,38,0.15);color:#f4a726;border-radius:4px;cursor:pointer";
+
+function _regRenderActions(block, provider, kinds) {
+  if (!block) return;
+  const host = block.querySelector("[data-reg-actions]");
+  if (!host) return;
+  const p = escapeHtml(provider);
+  const labels = {
+    register: `Register ${p}`,
+    recheck: "Recheck",
+    status: "Check status",
+  };
+  host.innerHTML = kinds.map(k =>
+    `<button data-reg-action="${k}" data-provider="${p}" style="${_REG_BTN_STYLE}${k === "register" ? "" : ";opacity:0.85"}">${labels[k] || k}</button>`
+  ).join("");
+}
+
+// Resolve one card's true state via a live status check and render the
+// appropriate message + actions.
+async function _resolveRegistrationCard(provider, block) {
+  if (!provider || !block) return;
+  const subscriptionId = focusedSubscriptionId() || "";
+  const subName = _subNameById ? _subNameById(subscriptionId) : subscriptionId;
+  if (!subscriptionId) {
+    _regSetStatus(block, "⛔ No subscription selected — pick one to check availability.", "#e57373");
+    _regRenderActions(block, provider, ["recheck"]);
+    return;
+  }
+  _regSetStatus(block, `Checking availability on ${subName}…`, "#f4a726");
+  _regRenderActions(block, provider, []);
+  try {
+    const params = new URLSearchParams({ subscription_id: subscriptionId, provider });
+    const data = await apiJson(`/api/providers/status?${params.toString()}`);
+    const state = String((data && data.registration_state) || "Unknown");
+    if (data && data.registered) {
+      _regHideCli(block);
+      _regSetStatus(block,
+        `✅ Registered on ${subName}. Re-run the analysis to see this service's regional availability.`,
+        "#81c784");
+      _regRenderActions(block, provider, ["recheck"]);
+    } else if (data && data.absent) {
+      // Namespace not known to this subscription — cannot be self-registered.
+      _regHideCli(block);
+      _regSetStatus(block,
+        `⛔ Not available on ${subName}. Azure doesn't recognise “${provider}” on this ` +
+        `subscription, so it can't be registered here — the service may not be offered ` +
+        `for this subscription's tenant/offer. Try a different subscription, or open an ` +
+        `Azure support request to have it enabled.`,
+        "#e57373");
+      _regRenderActions(block, provider, ["recheck"]);
+    } else if (state.toLowerCase() === "registering") {
+      _regHideCli(block);
+      _regSetStatus(block, `⏳ Registering on ${subName}… click Recheck in a moment.`, "#f4a726");
+      _regRenderActions(block, provider, ["recheck"]);
+    } else {
+      // Present but NotRegistered → genuinely registerable.
+      _regHideCli(block);
+      _regSetStatus(block,
+        `Not registered yet on ${subName}. Registering is free and self-service.`,
+        "#f4a726");
+      _regRenderActions(block, provider, ["register", "recheck"]);
+    }
+  } catch (err) {
+    _regSetStatus(block, `Couldn't check availability — ${(err && err.message) || String(err)}`, "#e57373");
+    _regRenderActions(block, provider, ["recheck"]);
+  }
+}
+
+// Auto-resolve any registration cards that haven't been resolved yet.
+function _scanRegistrationCards(root) {
+  const scope = root && root.querySelectorAll ? root : document;
+  const blocks = scope.querySelectorAll(".reg-provider-block[data-reg-provider]:not([data-reg-resolved])");
+  blocks.forEach(block => {
+    const provider = block.getAttribute("data-reg-provider");
+    if (!provider) return;
+    block.setAttribute("data-reg-resolved", "1");
+    _resolveRegistrationCard(provider, block);
+  });
+}
+
+async function registerBomProvider(provider, block) {
+  if (!provider) return;
+  const subscriptionId = focusedSubscriptionId() || "";
+  const subName = _subNameById ? _subNameById(subscriptionId) : subscriptionId;
+  const cli = `az provider register --namespace ${provider}` +
+    (subscriptionId ? ` --subscription ${subscriptionId}` : "");
+  if (!subscriptionId) {
+    _regSetStatus(block, "⛔ No subscription selected to register against.", "#e57373");
+    return;
+  }
+  const regBtn = block && block.querySelector('[data-reg-action="register"]');
+  if (regBtn) { regBtn.disabled = true; regBtn.textContent = "Registering…"; }
+  _regSetStatus(block, `Submitting registration on ${subName}…`, "#f4a726");
+  try {
+    const data = await apiJson("/api/providers/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subscription_id: subscriptionId, provider }),
+    });
+    const state = (data && data.registration_state) || "Registering";
+    _regHideCli(block);
+    _regSetStatus(block,
+      `✅ Registration started on ${subName} (state: ${state}). Azure usually finishes in 1–5 minutes — ` +
+      `click Recheck, then re-run the analysis once it shows Registered.`,
+      "#81c784");
+    _regRenderActions(block, provider, ["recheck"]);
+    showToast(`✓ Registering ${provider} on ${subName}…`, "success");
+  } catch (err) {
+    const body = err && err.body;
+    const code = body && body.error;
+    if (code === "not_available" || err.status === 404) {
+      // Provider isn't available on this subscription — a register command
+      // would just fail again, so don't offer one.
+      _regHideCli(block);
+      _regSetStatus(block,
+        (body && body.message) ||
+        `⛔ Not available on ${subName}. Azure doesn't recognise “${provider}” on this subscription.`,
+        "#e57373");
+      _regRenderActions(block, provider, ["recheck"]);
+      showToast(`✗ ${provider} isn't available on ${subName}.`, "error");
+      return;
+    }
+    const forbidden = code === "forbidden" || err.status === 403;
+    const cliCmd = (body && body.cli_command) || cli;
+    if (forbidden) {
+      _regSetStatus(block,
+        `⛔ Not registered. Your account can't register providers on ${subName} ` +
+        `(missing “${provider}/register/action” permission).`,
+        "#e57373");
+      _regShowCli(block, cliCmd);
+    } else {
+      _regSetStatus(block, `⛔ Not registered — ${(err && err.message) || String(err)}`, "#e57373");
+      _regShowCli(block, cliCmd);
+    }
+    _regRenderActions(block, provider, ["register", "recheck"]);
+    showToast(`✗ Couldn't auto-register ${provider}. See the card for details.`, "error");
+  }
+}
+
+function _handleRegisterProviderInteraction(ev) {
+  const cliText = ev.target.closest("[data-reg-cli-text]");
+  if (cliText && cliText.textContent) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    navigator.clipboard.writeText(cliText.textContent).then(
+      () => showToast("Register command copied to clipboard.", "info"),
+      () => {},
+    );
+    return;
+  }
+  const btn = ev.target.closest("[data-reg-action]");
+  if (!btn) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  const block = _regBlockFor(btn);
+  const provider = btn.dataset.provider;
+  if (btn.dataset.regAction === "register") {
+    registerBomProvider(provider, block);
+  } else {
+    // recheck / status
+    _resolveRegistrationCard(provider, block);
+  }
 }
 
 function _handleQuotaRequestInteraction(ev) {
+  const openTicketBtn = ev.target.closest("[data-open-ticket]");
+  if (openTicketBtn) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    _supportPrefill(openTicketBtn.dataset.openTicket || "quota", openTicketBtn.dataset.region, {
+      family: openTicketBtn.dataset.family || "",
+      newLimit: openTicketBtn.dataset.limit || null,
+    });
+    return;
+  }
   const btn = ev.target.closest("[data-quota-request]");
   const submitBtn = ev.target.closest("[data-quota-submit]");
   const cancelBtn = ev.target.closest("[data-quota-cancel]");
@@ -2252,24 +4204,13 @@ function _renderDrilldownQuotaCard(row) {
     </div>
     <div class="quota-card-divider"></div>
     <div class="quota-card-summary ${statusCls}">${escapeHtml(statusText)}</div>
-    ${(isSufficient || row.overall_status === "insufficient") ? `<div class="quota-card-actions-row">
-      <div class="quota-card-action-col">
-        ${_renderQuotaRequestAction(row)}
-        <div class="sku-tag sku-tag--primary" style="margin-top:4px;text-align:center;">Primary</div>
-      </div>
-      ${row.alt_family ? `<div class="quota-card-action-col">
-        ${_renderQuotaRequestAction({ ...row, family: row.alt_family, family_label: row.alt_label || row.alt_family })}
-        <div class="sku-tag sku-tag--fallback" style="margin-top:4px;text-align:center;">Fallback</div>
-      </div>` : ""}
-    </div>` : ""}
+    ${(isSufficient || row.overall_status === "insufficient") ? _renderQuotaTicketActions(row) : ""}
   </div>`;
 }
 
 function renderDrilldownQuotaSection(region, quotaResult, quotaPill) {
-  const subName = focusedSubscriptionName();
   const cards = quotaResult.rows.map((row) => _renderDrilldownQuotaCard(row)).join("");
-  return `<h4>Quota <span class="pill ${quotaPill.cls}" style="margin-left:.5rem;font-size:.7rem;vertical-align:middle;">${escapeHtml(quotaPill.text)}</span>${subName ? `<span class="dd-sub-context">Focused sub: ${escapeHtml(subName)}</span>` : ""}</h4>
-    <div class="quota-cards" data-region="${escapeHtml(region.short || "")}">${cards}</div>`;
+  return `<div class="quota-cards" data-region="${escapeHtml(region.short || "")}">${cards}</div>`;
 }
 
 function _deriveQuotaRegionStatus(rows, fallbackStatus = "unknown") {
@@ -2769,194 +4710,177 @@ function _renderQuotaHierarchy(result) {
     }
   }
 
-  function _quotaBadge(usage, limit, headroom, required) {
-    if (limit == null && usage == null) return `<span class="qh-quota qh-quota--na">N/A</span>`;
-    const u = _formatQuotaNumber(usage);
-    const l = _formatQuotaNumber(limit);
-    const h = headroom != null ? _formatQuotaNumber(headroom) : "?";
-    let cls = "qh-quota--ok";
-    if (headroom != null && required != null && headroom < required) cls = "qh-quota--fail";
-    else if (headroom != null && headroom === 0) cls = "qh-quota--warn";
-    return `<span class="qh-quota ${cls}">${escapeHtml(u)}/${escapeHtml(l)} (${escapeHtml(h)} free)</span>`;
-  }
-
-  // Group rows by quota group name
-  const groupMap = new Map();
-  for (const row of result.rows) {
-    const qg = row.quota_group || {};
-    const groupName = qg.group || "(No Quota Group)";
-    if (!groupMap.has(groupName)) groupMap.set(groupName, []);
-    groupMap.get(groupName).push(row);
-  }
-
-  // Build tree: Quota Group → SKU Family → Subscription → SKU
-  const groupNodes = [];
-  for (const [groupName, rows] of groupMap) {
-    const familyNodes = rows.map(row => {
-      const sub = row.subscription || {};
-      const qg = row.quota_group || {};
-      const altSub = row.alt_subscription || {};
-
-      // Subscription children with primary SKU
-      const skuChildren = [];
-      skuChildren.push(`<li class="qh-node">
-        <div class="qh-label">
-          <span class="qh-icon qh-icon--family">P</span>
-          <span>${escapeHtml(row.family_label || row.family || "—")}</span>
-          <span class="qh-tag qh-tag--primary">Primary</span>
-          ${_quotaBadge(sub.limit != null ? sub.usage : null, sub.limit, sub.headroom, row.required)}
-        </div>
-      </li>`);
-
-      // Fallback SKU under subscription
-      if (row.alt_label) {
-        skuChildren.push(`<li class="qh-node">
-          <div class="qh-label">
-            <span class="qh-icon qh-icon--fallback">F</span>
-            <span>${escapeHtml(row.alt_label)}</span>
-            <span class="qh-tag qh-tag--fallback">Fallback</span>
-            ${altSub.headroom != null
-              ? _quotaBadge(altSub.usage, altSub.limit, altSub.headroom, row.required)
-              : `<span class="qh-quota qh-quota--na">N/A</span>`}
-          </div>
-        </li>`);
-      }
-
-      // Subscription node wrapping the SKUs
-      const subscriptionNode = `<li class="qh-node">
-        <div class="qh-label">
-          <span class="qh-icon qh-icon--sub">S</span>
-          <span>${escapeHtml(subName || subId || "Subscription")}</span>
-        </div>
-        <ul class="qh-tree">${skuChildren.join("")}</ul>
-      </li>`;
-
-      // SKU Family node (quota group level) wrapping the subscription
-      return `<li class="qh-node">
-        <div class="qh-label">
-          <span class="qh-icon qh-icon--family">⬡</span>
-          <span>${escapeHtml(row.family_label || row.family || "—")}</span>
-          <span class="qh-tag qh-tag--required">Req: ${escapeHtml(_formatQuotaNumber(row.required))} cores</span>
-          ${_quotaBadge(qg.limit != null ? qg.usage : null, qg.limit, qg.headroom, qg.shortfall)}
-        </div>
-        <ul class="qh-tree">${subscriptionNode}</ul>
-      </li>`;
-    }).join("");
-
-    groupNodes.push(`<li class="qh-node qh-root">
-      <div class="qh-label">
-        <span class="qh-icon qh-icon--group">G</span>
-        <span>${escapeHtml(groupName)}</span>
-      </div>
-      <ul class="qh-tree">${familyNodes}</ul>
-    </li>`);
-  }
-
   const isCollapsed = !!STATE.quotaHierarchyCollapsed;
   const bodyClass = isCollapsed ? "quota-hierarchy__body hidden" : "quota-hierarchy__body";
 
-  // --- Right panel: non-BOM donor subscriptions ---
+  const regionDisplay =
+    (result.region && (result.region.name || result.region.display_name)) ||
+    (result.rows[0].region_short || "");
+  const regionShort = result.rows[0].region_short || "";
+
+  // ── Block 1: existing quota on THIS subscription for the BOM ──────────────
+  // Render one box per SKU family (primary + secondary/fallback shown separately
+  // rather than combined) so the customer can see each SKU's headroom on its own.
+  const skuBox = (label, tag, free, required) => {
+    const meetsReq = free != null && free >= required;
+    const short = required - (free || 0);
+    const pill = meetsReq
+      ? `<span class="qd-pill qd-pill--ok">Sufficient</span>`
+      : `<span class="qd-pill qd-pill--fail">Short ${_formatQuotaNumber(Math.max(0, short))}</span>`;
+    const tagHtml = tag
+      ? ` <span class="sku-tag sku-tag--${tag === "Primary" ? "primary" : "fallback"}">${escapeHtml(tag)}</span>`
+      : "";
+    return `<div class="qd-fam">
+      <div class="qd-fam-main">
+        <span class="qd-fam-name">${escapeHtml(label)}${tagHtml}</span>
+        ${pill}
+      </div>
+      <div class="qd-fam-meta">${free != null ? _formatQuotaNumber(free) : "?"} free of ${_formatQuotaNumber(required)} required</div>
+    </div>`;
+  };
+  const famSummary = result.rows.map(row => {
+    const required = Number(row.required) || 0;
+    const hasAlt = !!row.alt_family;
+    const primFree = row.subscription && row.subscription.headroom != null ? row.subscription.headroom : null;
+    const boxes = [skuBox(row.family_label || row.family || "—", hasAlt ? "Primary" : "", primFree, required)];
+    if (hasAlt) {
+      const altFree = row.alt_subscription && row.alt_subscription.headroom != null ? row.alt_subscription.headroom : null;
+      boxes.push(skuBox(row.alt_label || row.alt_family, "Fallback", altFree, required));
+    }
+    return boxes.join("");
+  }).join("");
+
+  const failingRows = result.rows.filter(r => r.overall_status === "insufficient");
+  const hasShortfall = failingRows.length > 0;
+
+  // ── Block 2: donor subscriptions (only meaningful when there's a shortfall) ─
   const snap = STATE.snapshot || {};
   const perSubResults = snap.per_sub_results || {};
-  // Gather all BOM subscription IDs from metadata + per_sub_results + focused sub
   const bomSubIds = new Set(Object.keys(perSubResults).map(id => id.toLowerCase()));
   if (subId) bomSubIds.add(subId.toLowerCase());
   const bomMeta = activeBomMeta();
-  for (const id of subscriptionList(bomMeta)) {
-    bomSubIds.add(id.toLowerCase());
-  }
+  for (const id of subscriptionList(bomMeta)) bomSubIds.add(id.toLowerCase());
   const allSubs = Array.isArray(window._loadedSubscriptions) ? window._loadedSubscriptions : [];
-  const regionShort = result.rows[0].region_short || "";
-
-  // Non-BOM subscriptions the user has access to
   const nonBomSubs = allSubs.filter(s => s && s.id && !bomSubIds.has(s.id.toLowerCase()));
 
-  // Needed family IDs for the scan
+  // case-insensitive family lookup within a donor's scanned families map
+  const famInfo = (fams, famId) => {
+    if (!fams || !famId) return null;
+    if (fams[famId]) return fams[famId];
+    const hit = Object.entries(fams).find(([k]) => k.toLowerCase() === famId.toLowerCase());
+    return hit ? hit[1] : null;
+  };
+
+  // We only scan for the families of the FAILING rows — that's all a donor can help with.
   const neededFamilies = [];
-  for (const row of result.rows) {
+  for (const row of failingRows) {
     if (row.family) neededFamilies.push(row.family);
     if (row.alt_family) neededFamilies.push(row.alt_family);
   }
+  const neededLabels = [...new Set(neededFamilies.map(f => _donorFamilyLabel(f, result.rows)))].join(", ");
 
-  // Build donor panel (scanned results stored in STATE.donorQuotaCache)
   const cacheKey = `${regionShort}::${subId}`;
   const cachedDonors = (STATE.donorQuotaCache || {})[cacheKey] || null;
 
   let donorHtml = "";
-  if (nonBomSubs.length > 0) {
-    if (cachedDonors && cachedDonors.status === "loaded") {
-      // Render scanned results
-      const donorCards = nonBomSubs.map(s => {
-        const scanResult = cachedDonors.results[s.id] || null;
-        if (!scanResult || scanResult.status !== "ok") {
-          return `<div class="qh-donor-card qh-donor-card--unscanned">
-            <div class="qh-donor-name"><span class="qh-icon qh-icon--sub" style="opacity:.5">S</span> <span class="qh-muted">${escapeHtml(s.name || s.id)}</span></div>
-            <div class="qh-muted" style="font-size:11px">${scanResult ? escapeHtml(scanResult.status) : "No data"}</div>
-          </div>`;
-        }
-        const familyEntries = Object.entries(scanResult.families || {});
-        if (!familyEntries.length) {
-          return `<div class="qh-donor-card qh-donor-card--unscanned">
-            <div class="qh-donor-name"><span class="qh-icon qh-icon--sub" style="opacity:.5">S</span> <span class="qh-muted">${escapeHtml(s.name || s.id)}</span></div>
-            <div class="qh-muted" style="font-size:11px">No matching families found</div>
-          </div>`;
-        }
-        const familyList = familyEntries.map(([fam, info]) => {
-          const headroom = info.headroom != null ? info.headroom : 0;
-          const cls = headroom > 0 ? "qh-quota--ok" : "qh-quota--warn";
-          // Show friendly family name if possible
-          const famLabel = _donorFamilyLabel(fam, result.rows);
-          return `<div class="qh-donor-family">
-            <span>${escapeHtml(famLabel)}</span>
-            <span class="qh-quota ${cls}">${escapeHtml(_formatQuotaNumber(info.usage))}/${escapeHtml(_formatQuotaNumber(info.limit))} (${escapeHtml(_formatQuotaNumber(headroom))} free)</span>
-          </div>`;
-        }).join("");
-        return `<div class="qh-donor-card">
-          <div class="qh-donor-name"><span class="qh-icon qh-icon--sub">S</span> ${escapeHtml(s.name || s.id)}</div>
-          ${familyList}
+  if (!hasShortfall) {
+    donorHtml = `<div class="qd-donor-note qd-donor-note--ok">✓ ${escapeHtml(subName)} already has enough quota for this BOM in ${escapeHtml(regionDisplay)} — no donor subscription needed.</div>`;
+  } else if (nonBomSubs.length === 0) {
+    donorHtml = `<div class="qd-donor-note">No other (non-BOM) subscriptions are available to pull quota from. Request an increase on this subscription instead.</div>`;
+  } else if (cachedDonors && cachedDonors.status === "loaded") {
+    const relevant = new Set();
+    const primaryFams = new Set();
+    const fallbackFams = new Set();
+    failingRows.forEach(r => {
+      if (r.family) { relevant.add(r.family.toLowerCase()); primaryFams.add(r.family.toLowerCase()); }
+      if (r.alt_family) { relevant.add(r.alt_family.toLowerCase()); fallbackFams.add(r.alt_family.toLowerCase()); }
+    });
+    const famRole = (famLower) => primaryFams.has(famLower) ? "primary" : (fallbackFams.has(famLower) ? "fallback" : "");
+    const evaluated = nonBomSubs.map(s => {
+      const scan = cachedDonors.results[s.id] || null;
+      if (!scan || scan.status !== "ok") return null;
+      const fams = scan.families || {};
+      let bestFree = 0;
+      const chips = [];
+      for (const [fam, info] of Object.entries(fams)) {
+        if (!relevant.has(fam.toLowerCase())) continue;
+        const fr = info && info.headroom != null ? info.headroom : 0;
+        if (fr > 0) { bestFree = Math.max(bestFree, fr); chips.push({ label: _donorFamilyLabel(fam, result.rows), free: fr, role: famRole(fam.toLowerCase()) }); }
+      }
+      if (bestFree <= 0) return null;
+      const coversAll = failingRows.every(r => {
+        const cands = [r.family, r.alt_family].filter(Boolean);
+        return cands.some(f => {
+          const info = famInfo(fams, f);
+          const fr = info && info.headroom != null ? info.headroom : 0;
+          return fr >= (Number(r.deficit) || 0);
+        });
+      });
+      chips.sort((a, b) => b.free - a.free);
+      return { s, chips, bestFree, coversAll };
+    }).filter(Boolean);
+
+    evaluated.sort((a, b) => (Number(b.coversAll) - Number(a.coversAll)) || (b.bestFree - a.bestFree));
+
+    if (!evaluated.length) {
+      donorHtml = `<div class="qd-donor-note">Scanned ${nonBomSubs.length} subscription${nonBomSubs.length === 1 ? "" : "s"} — none currently have free quota for ${escapeHtml(neededLabels)}.</div>`;
+    } else {
+      const totalFree = evaluated.reduce((sum, e) => sum + (Number(e.bestFree) || 0), 0);
+      const perSkuTotals = new Map();
+      const perSkuRole = new Map();
+      evaluated.forEach(e => (e.chips || []).forEach(c => {
+        perSkuTotals.set(c.label, (perSkuTotals.get(c.label) || 0) + (Number(c.free) || 0));
+        if (c.role && !perSkuRole.has(c.label)) perSkuRole.set(c.label, c.role);
+      }));
+      const skuTotalChips = [...perSkuTotals.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([label, free]) => `<span class="qd-chip qd-chip--total${perSkuRole.get(label) ? ` qd-chip--${perSkuRole.get(label)}` : ""}">${escapeHtml(label)} · ${_formatQuotaNumber(free)} free</span>`)
+        .join("");
+      const totalSummary = `<div class="qd-donor-total">
+        <div class="qd-donor-total-head">Total free to pull across ${evaluated.length} donor subscription${evaluated.length === 1 ? "" : "s"}</div>
+        <div class="qd-donor-total-chips">${skuTotalChips || `<span class="qd-chip qd-chip--total">${_formatQuotaNumber(totalFree)} vCPU</span>`}</div>
+      </div>`;
+      const cards = evaluated.map(({ s, chips, bestFree, coversAll }) => {
+        const badge = coversAll
+          ? `<span class="qd-donor-badge qd-donor-badge--ok">Can cover shortfall</span>`
+          : "";
+        const chipHtml = chips.map(c => `<span class="qd-chip${c.role ? ` qd-chip--${c.role}` : ""}">${escapeHtml(c.label)} · ${_formatQuotaNumber(c.free)} free</span>`).join("");
+        return `<div class="qd-donor">
+          <div class="qd-donor-head">
+            <span class="qd-donor-name">${escapeHtml(s.name || s.id)}</span>
+            ${badge}
+          </div>
+          <div class="qd-donor-chips">${chipHtml}</div>
         </div>`;
       }).join("");
-
-      donorHtml = `<div class="qh-donors">
-        <div class="qh-donors-title">Available Donor Subscriptions</div>
-        <div class="qh-donors-desc">Non-BOM subscriptions with quota for the required SKU families that could contribute via quota groups.</div>
-        ${donorCards}
-      </div>`;
-    } else if (cachedDonors && cachedDonors.status === "scanning") {
-      donorHtml = `<div class="qh-donors">
-        <div class="qh-donors-title">Available Donor Subscriptions</div>
-        <div class="qh-donors-desc">Scanning ${nonBomSubs.length} non-BOM subscription${nonBomSubs.length === 1 ? "" : "s"} for available quota…</div>
-        <div class="qh-donor-card qh-donor-card--unscanned" style="text-align:center;padding:20px">
-          <span class="quota-request-spinner" aria-hidden="true"></span> Scanning…
-        </div>
-      </div>`;
-    } else {
-      // Trigger scan
-      _scanDonorSubscriptions(nonBomSubs, regionShort, neededFamilies, cacheKey);
-      donorHtml = `<div class="qh-donors">
-        <div class="qh-donors-title">Available Donor Subscriptions</div>
-        <div class="qh-donors-desc">Scanning ${nonBomSubs.length} non-BOM subscription${nonBomSubs.length === 1 ? "" : "s"} for available quota…</div>
-        <div class="qh-donor-card qh-donor-card--unscanned" style="text-align:center;padding:20px">
-          <span class="quota-request-spinner" aria-hidden="true"></span> Scanning…
-        </div>
-      </div>`;
+      donorHtml = `${totalSummary}<div class="qd-donor-list">${cards}</div>
+        <div class="qd-donor-foot">Quota is moved between subscriptions with an Azure <strong>quota group</strong>. Confirm the donor and BOM subscriptions share (or can join) the same quota group, then rebalance in the Azure portal.</div>`;
     }
+  } else if (cachedDonors && cachedDonors.status === "scanning") {
+    donorHtml = `<div class="qd-donor-note"><span class="quota-request-spinner" aria-hidden="true"></span> Scanning ${nonBomSubs.length} subscription${nonBomSubs.length === 1 ? "" : "s"} for available quota…</div>`;
+  } else {
+    _scanDonorSubscriptions(nonBomSubs, regionShort, neededFamilies, cacheKey);
+    donorHtml = `<div class="qd-donor-note"><span class="quota-request-spinner" aria-hidden="true"></span> Scanning ${nonBomSubs.length} subscription${nonBomSubs.length === 1 ? "" : "s"} for available quota…</div>`;
   }
-
-  const hasDonors = nonBomSubs.length > 0;
 
   panel.classList.remove("hidden");
   panel.innerHTML = `<div class="quota-hierarchy__card">
     <button type="button" class="quota-hierarchy__toggle" data-quota-hierarchy-toggle="1" aria-expanded="${isCollapsed ? "false" : "true"}">
-      <span>Quota Hierarchy</span>
+      <span>Quota &amp; donor options</span>
       <span aria-hidden="true">${isCollapsed ? "▸" : "▾"}</span>
     </button>
     <div class="${bodyClass}">
-      <div class="qh-split${hasDonors ? "" : " qh-split--single"}">
-        <div class="qh-split-left">
-          <ul class="qh-tree">${groupNodes.join("")}</ul>
-        </div>
-        ${hasDonors ? `<div class="qh-split-divider"></div><div class="qh-split-right">${donorHtml}</div>` : ""}
+      <div class="qd-grid">
+        <section class="qd-block">
+          <div class="qd-block-title">Your subscription quota for this BOM</div>
+          <div class="qd-block-sub">${escapeHtml(subName)} &middot; ${escapeHtml(regionDisplay)}</div>
+          <div class="qd-fam-list">${famSummary}</div>
+        </section>
+        <section class="qd-block">
+          <div class="qd-block-title">Pull quota from a donor subscription</div>
+          <div class="qd-block-sub">Cover the shortfall by rebalancing quota from another subscription you own.</div>
+          ${donorHtml}
+        </section>
       </div>
     </div>
   </div>`;
@@ -3043,17 +4967,22 @@ function _renderQuotaForSelectedRegion() {
 // ---------------------------------------------------------------- Map
 
 function refreshMap() {
-  if (STATE.view !== "map" || !STATE.snapshot) return;
+  if (!_isRegionsSub("map") || !STATE.snapshot) return;
   if (!STATE.map) {
     STATE.map = L.map("map", { worldCopyJump: true }).setView([20, 10], 2);
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       attribution: '&copy; OpenStreetMap',
       maxZoom: 8,
     }).addTo(STATE.map);
+    _ensureLatencyPairControl();
   }
   if (STATE.mapLayer) {
     STATE.map.removeLayer(STATE.mapLayer);
   }
+  // Markers get rebuilt on every refresh, so drop any stale latency selection
+  // (its marker references would otherwise dangle).
+  clearLatencyPair();
+  STATE.mapMarkersByRegion = {};
   const layer = L.layerGroup();
   for (const r of STATE.filtered) {
     if (r.coords[0] == null) continue;
@@ -3061,15 +4990,20 @@ function refreshMap() {
     const marker = L.circleMarker(r.coords, {
       radius: 8, color: "#fff", weight: 2, fillColor: color, fillOpacity: 0.9,
     });
+    marker._regionName = r.name;
+    marker._baseColor = color;
+    STATE.mapMarkersByRegion[r.name] = marker;
     marker.bindPopup(`
       <div><strong>${escapeHtml(r.name)}</strong></div>
       <div style="font-size:11px;color:#6b7280">${escapeHtml(r.geo)}</div>
       <div style="margin:4px 0">Health: <strong>${r.deployment_health}</strong> &middot; ${escapeHtml(r.status)}</div>
       ${r.recommendation ? `<div style="font-size:12px">${escapeHtml(r.recommendation)}</div>` : ""}
-      <div style="margin-top:6px"><a href="#" class="map-details-link" data-region="${escapeHtml(r.name)}">Details &rarr;</a></div>
+      <div style="margin-top:6px"><a href="#" class="map-latency-link" data-region="${escapeHtml(r.name)}">Measure latency &harr;</a></div>
+      <div style="margin-top:4px"><a href="#" class="map-details-link" data-region="${escapeHtml(r.name)}">Details &rarr;</a></div>
     `);
     marker.on("popupopen", function () {
-      const link = marker.getPopup().getElement().querySelector(".map-details-link");
+      const el = marker.getPopup().getElement();
+      const link = el.querySelector(".map-details-link");
       if (link) {
         link.addEventListener("click", function (e) {
           e.preventDefault();
@@ -3078,11 +5012,163 @@ function refreshMap() {
           if (region) openDrilldown(region);
         });
       }
+      const latLink = el.querySelector(".map-latency-link");
+      if (latLink) {
+        latLink.addEventListener("click", function (e) {
+          e.preventDefault();
+          selectRegionForLatency(this.getAttribute("data-region"));
+          marker.closePopup();
+        });
+      }
     });
     layer.addLayer(marker);
   }
   layer.addTo(STATE.map);
   STATE.mapLayer = layer;
+}
+
+// ── Map latency measurement (pick two regions → draw a line labelled with the
+// published round-trip latency between them) ────────────────────────────────
+
+function latencyBetween(nameA, nameB) {
+  const matrix = (STATE.snapshot && STATE.snapshot.latency_matrix) || {};
+  const map = buildDisplayToLatency();
+  const a = map[String(nameA).toLowerCase()];
+  const b = map[String(nameB).toLowerCase()];
+  if (!a || !b) return null;
+  let ms = matrix[a] && matrix[a][b];
+  if (ms == null) ms = matrix[b] && matrix[b][a];
+  return ms == null ? null : ms;
+}
+
+function _regionByName(name) {
+  return (STATE.snapshot && STATE.snapshot.regions || []).find(x => x.name === name);
+}
+
+function _setMarkerSelected(name, selected) {
+  const m = STATE.mapMarkersByRegion && STATE.mapMarkersByRegion[name];
+  if (!m) return;
+  m.setStyle(selected
+    ? { color: "#0F6CBD", weight: 4, radius: 10, fillColor: m._baseColor }
+    : { color: "#fff", weight: 2, radius: 8, fillColor: m._baseColor });
+}
+
+function selectRegionForLatency(name) {
+  if (!name) return;
+  STATE.latencyPair = STATE.latencyPair || { a: null, b: null };
+  const p = STATE.latencyPair;
+  if (!p.a) {
+    p.a = name;
+    _setMarkerSelected(name, true);
+    _updateLatencyPairControl();
+    return;
+  }
+  if (p.a === name) {
+    // Re-clicking the source clears the whole selection.
+    clearLatencyPair();
+    return;
+  }
+  // A already chosen — this becomes B (or replaces a completed pair's B).
+  if (p.b) _setMarkerSelected(p.b, false);
+  p.b = name;
+  _setMarkerSelected(name, true);
+  _drawLatencyPair();
+  _updateLatencyPairControl();
+}
+
+function _clearLatencyLine() {
+  if (STATE.latencyLineLayer) {
+    STATE.map.removeLayer(STATE.latencyLineLayer);
+    STATE.latencyLineLayer = null;
+  }
+}
+
+function clearLatencyPair() {
+  const p = STATE.latencyPair;
+  if (p) {
+    if (p.a) _setMarkerSelected(p.a, false);
+    if (p.b) _setMarkerSelected(p.b, false);
+  }
+  STATE.latencyPair = { a: null, b: null };
+  _clearLatencyLine();
+  _updateLatencyPairControl();
+}
+
+function _drawLatencyPair() {
+  const p = STATE.latencyPair;
+  if (!p || !p.a || !p.b) return;
+  const ra = _regionByName(p.a);
+  const rb = _regionByName(p.b);
+  if (!ra || !rb || ra.coords[0] == null || rb.coords[0] == null) return;
+  _clearLatencyLine();
+  const ms = latencyBetween(p.a, p.b);
+  const color = ms == null ? "#8A8886" : ms < 50 ? "#107C10" : ms < 120 ? "#D29200" : "#DA291C";
+  const line = L.polyline([ra.coords, rb.coords], {
+    color, weight: 3, opacity: 0.85,
+    dashArray: ms == null ? "6 6" : null,
+  });
+  const label = ms == null
+    ? "latency not published"
+    : `${ms} ms round-trip`;
+  const mid = [(ra.coords[0] + rb.coords[0]) / 2, (ra.coords[1] + rb.coords[1]) / 2];
+  const badge = L.marker(mid, {
+    interactive: false,
+    icon: L.divIcon({
+      className: "latency-pair-badge",
+      html: `<span style="background:${color};color:#fff;padding:2px 8px;border-radius:10px;` +
+            `font-size:11px;font-weight:600;white-space:nowrap;box-shadow:0 1px 3px rgba(0,0,0,0.4)">` +
+            `${escapeHtml(label)}</span>`,
+      iconSize: null,
+    }),
+  });
+  const grp = L.layerGroup([line, badge]);
+  grp.addTo(STATE.map);
+  STATE.latencyLineLayer = grp;
+}
+
+function _ensureLatencyPairControl() {
+  if (STATE.latencyPairControl || !STATE.map) return;
+  const ctl = L.control({ position: "topright" });
+  ctl.onAdd = function () {
+    const div = L.DomUtil.create("div", "latency-pair-control");
+    div.style.cssText =
+      "background:rgba(255,255,255,0.95);color:#201f1e;padding:8px 10px;border-radius:6px;" +
+      "font-size:12px;box-shadow:0 1px 4px rgba(0,0,0,0.3);max-width:230px;line-height:1.35";
+    L.DomEvent.disableClickPropagation(div);
+    div.innerHTML = `<div id="latency-pair-body"></div>`;
+    return div;
+  };
+  ctl.addTo(STATE.map);
+  STATE.latencyPairControl = ctl;
+  _updateLatencyPairControl();
+}
+
+function _updateLatencyPairControl() {
+  const body = document.getElementById("latency-pair-body");
+  if (!body) return;
+  const p = STATE.latencyPair || { a: null, b: null };
+  if (!p.a && !p.b) {
+    body.innerHTML =
+      `<strong>Measure latency</strong><br>` +
+      `<span style="color:#605e5c">Click a region's <em>Measure latency &harr;</em> ` +
+      `link, then pick a second region to draw the line.</span>`;
+    return;
+  }
+  const ms = p.a && p.b ? latencyBetween(p.a, p.b) : null;
+  const msHtml = p.a && p.b
+    ? (ms == null
+        ? `<span style="color:#a4262c">latency not published</span>`
+        : `<strong>${ms} ms</strong> round-trip`)
+    : `<span style="color:#605e5c">pick a second region…</span>`;
+  body.innerHTML =
+    `<div><strong>A:</strong> ${escapeHtml(p.a || "—")}</div>` +
+    `<div><strong>B:</strong> ${escapeHtml(p.b || "—")}</div>` +
+    `<div style="margin-top:3px">${msHtml}</div>` +
+    `<div style="margin-top:6px"><a href="#" id="latency-pair-clear" style="color:#0F6CBD">Clear</a></div>`;
+  const clear = document.getElementById("latency-pair-clear");
+  if (clear) {
+    clear.addEventListener("click", function (e) { e.preventDefault(); clearLatencyPair(); });
+  }
 }
 
 window.openDrilldownByName = function (name) {
@@ -3105,7 +5191,7 @@ function initSourceRegionDropdown() {
 }
 
 function refreshLatencyChart() {
-  if (STATE.view !== "latency" || !STATE.snapshot) return;
+  if (!_isRegionsSub("latency") || !STATE.snapshot) return;
   const sel = document.getElementById("latency-source");
   if (!sel.value) return;
 
@@ -3282,7 +5368,7 @@ function renderCompareSlot(slot) {
   // Alternatives
   let altHtml = "";
   if (r.alt_regions && r.alt_regions.length) {
-    altHtml += `<div style="margin-top:10px"><strong>Alternative Regions:</strong></div>`;
+    altHtml += `<div style="margin-top:10px"><strong>Alternative regions based on health and latency:</strong></div>`;
     for (const a of r.alt_regions) {
       altHtml += `<div style="font-size:11px;padding-left:8px;color:var(--text-secondary)">${escapeHtml(a.region)}${a.latency_ms != null ? ` (${a.latency_ms}ms)` : ""}</div>`;
     }
@@ -3295,6 +5381,10 @@ function renderCompareSlot(slot) {
     for (const ms of r.missing_services) {
       bomHtml += `<div style="font-size:12px;padding:4px 8px;margin:2px 0;background:rgba(255,183,77,0.12);border-left:3px solid #f4a726;color:#f4a726;border-radius:4px">${escapeHtml(ms.service)}: ${escapeHtml(ms.detail || "not available")}</div>`;
     }
+  }
+  if (r.registration_required && r.registration_required.length) {
+    bomHtml += `<div style="margin-top:10px"><strong>Registration Required:</strong></div>`;
+    bomHtml += _registrationRequiredHtml(r.registration_required);
   }
 
   content.innerHTML = `
@@ -3312,18 +5402,22 @@ function renderCompareSlot(slot) {
     ${issuesHtml}
     ${altHtml}
   `;
+  _scanRegistrationCards(content);
 }
 
 // ---------------------------------------------------------------- Export
 
 function buildExportRows() {
-  return STATE.filtered.map(r => ({
+  return STATE.filtered.map(r => {
+    const noAz = _regionSupportsAz(r) === false;
+    return {
     Region: r.name,
     Country: r.country,
     Geo: r.geo,
-    "AZ1 Health": r.zone_health[0],
-    "AZ2 Health": r.zone_health[1],
-    "AZ3 Health": r.zone_health[2],
+    "AZ Support": noAz ? "Regional only (no AZs)" : "AZ-enabled",
+    "AZ1 Health": noAz ? "n/a" : r.zone_health[0],
+    "AZ2 Health": noAz ? "n/a" : r.zone_health[1],
+    "AZ3 Health": noAz ? "n/a" : r.zone_health[2],
     Status: r.status,
     "SKU Recommendation": r.recommendation,
     "Chosen SKUs": (r.chosen_skus || []).join("; "),
@@ -3331,8 +5425,9 @@ function buildExportRows() {
     "Fallbacks Used": (r.sku_fallbacks || []).join(" | "),
     "Missing Services": (r.missing_services || []).map(m => `${m.service}: ${m.detail}`).join(" | "),
     "Zone Restrictions": (r.zone_restrictions || []).map((rest, i) => rest ? `AZ${i + 1}: ${rest}` : "").filter(Boolean).join(" | "),
-    "Alternative Regions": (r.alt_regions || []).map(a => a.latency_ms != null ? `${a.region} (${a.latency_ms}ms)` : a.region).join("; "),
-  }));
+    "Alternative Regions": (r.alt_regions || []).map(a => a.latency_ms != null ? `${a.region} (${a.latency_ms}ms)` : (a.source === "least_bad" && a.caveat ? `${a.region} (least-bad: ${a.caveat})` : a.region)).join("; "),
+  };
+  });
 }
 
 function exportCsv() {
@@ -3393,21 +5488,44 @@ function toggleSidebar() {
 
   // Leaflet needs a kick to recalc tiles after the grid resize animation
   setTimeout(() => {
-    if (STATE.map && STATE.view === "map") STATE.map.invalidateSize();
-    if (STATE.latencyChart && STATE.view === "latency") STATE.latencyChart.resize();
+    if (STATE.map && _isRegionsSub("map")) STATE.map.invalidateSize();
+    if (STATE.latencyChart && _isRegionsSub("latency")) STATE.latencyChart.resize();
+    Object.values(STATE.overviewCharts).forEach(c => c && c.resize());
+  }, 280);
+}
+
+function applyBomnavStateFromStorage() {
+  let collapsed = false;
+  try { collapsed = localStorage.getItem("bomnavCollapsed") === "true"; } catch (e) {}
+  // Move the marker class from <html> (set inline pre-paint) to .layout
+  document.documentElement.classList.remove("bomnav-collapsed-init");
+  document.getElementById("layout").classList.toggle("bomnav-collapsed", collapsed);
+}
+
+function toggleBomnav() {
+  const layout = document.getElementById("layout");
+  const collapsed = !layout.classList.contains("bomnav-collapsed");
+  layout.classList.toggle("bomnav-collapsed", collapsed);
+  try { localStorage.setItem("bomnavCollapsed", collapsed ? "true" : "false"); } catch (e) {}
+
+  // Leaflet needs a kick to recalc tiles after the grid resize animation
+  setTimeout(() => {
+    if (STATE.map && _isRegionsSub("map")) STATE.map.invalidateSize();
+    if (STATE.latencyChart && _isRegionsSub("latency")) STATE.latencyChart.resize();
     Object.values(STATE.overviewCharts).forEach(c => c && c.resize());
   }, 280);
 }
 
 function clearAllFilters() {
   document.getElementById("filter-search").value = "";
-  STATE.activeSubscription = null;
-  syncActiveSubscription();
-  renderSubscriptionFilter();
-  renderSubscriptionSwitcher();
+  // Subscription is deployment CONTEXT (drives quota verdicts), not a region
+  // filter — keep the user's selection so "clear" doesn't silently change the
+  // quota picture. It only resets the region-list filters below.
   document.querySelectorAll('[data-filter="verdict"]').forEach(el => { el.checked = true; });
   document.querySelectorAll('[data-filter="continent"]').forEach(el => { el.checked = true; });
-  document.getElementById("filter-v6-only").checked = false;
+  document.querySelectorAll('[data-filter="quota"]').forEach(el => { el.checked = true; });
+  document.querySelectorAll('[data-filter="az"]').forEach(el => { el.checked = true; });
+  document.getElementById("filter-missing-services").checked = false;
   document.getElementById("filter-v5-fallback").checked = false;
   document.getElementById("filter-restricted-only").checked = false;
   applyFilters();
@@ -3629,6 +5747,22 @@ function getBomMeta(bomId) {
   return BOM_META.index[bomId] || null;
 }
 
+// Availability target of a BOM. "zone_redundant" (default) means the workload
+// needs Availability Zones, so a ZRS/HA restriction is a hard blocker.
+// "regional" means single-zone tolerant, so ZRS restrictions are advisory only.
+function _normalizeResilience(value) {
+  return String(value || "").trim().toLowerCase() === "regional" ? "regional" : "zone_redundant";
+}
+
+function _bomResilience() {
+  const meta = STATE.activeBomId ? getBomMeta(STATE.activeBomId) : null;
+  return _normalizeResilience(meta && meta.resilience);
+}
+
+function _bomNeedsZoneRedundancy() {
+  return _bomResilience() === "zone_redundant";
+}
+
 // Canonical BOM display name. Precedence: BOM Name (tag) → Customer name →
 // Subscription ID. Used everywhere a BOM is identified so naming is consistent.
 function bomDisplayName(meta) {
@@ -3658,6 +5792,7 @@ const BOM_EDIT = {
   skuFamiliesSource: "",   // "arm+builtin" | "builtin"
   skuFamiliesLoaded: false,
   current: null,           // { subscription_id, tag, ... } from API, or null when new
+  serviceTiers: {},        // { "Azure SQL Database": "business_critical", ... }
 };
 
 async function ensureBomCatalog(force = false) {
@@ -3754,6 +5889,8 @@ function setBomStatus(html, kind = "info") {
 async function openBomModal(bomId, opts = {}) {
   document.getElementById("bom-overlay").classList.remove("hidden");
   document.getElementById("bom-modal").classList.remove("hidden");
+  BOM_WIZARD.editing = !(opts.create);
+  bomWizardGoTo(1);
   const titleEl = document.getElementById("bom-modal-title");
   if (titleEl) titleEl.textContent = opts.create ? "Create BOM" : "Edit BOM";
   setBomStatus("Loading…");
@@ -3761,12 +5898,18 @@ async function openBomModal(bomId, opts = {}) {
   subEl.innerHTML = '<option disabled>Loading subscriptions…</option>';
   document.getElementById("bom-tag").value = "";
   document.getElementById("bom-customer").value = "";
+  { const rEl = document.getElementById("bom-resilience"); if (rEl) rEl.value = "zone_redundant"; }
   document.getElementById("bom-services-filter").value = "";
   document.getElementById("bom-regions-search").value = "";
   document.getElementById("bom-regions-filter").value = "all";
   document.getElementById("bom-skus-tbody").innerHTML = "";
-  document.getElementById("bom-import-file").value = "";
   BOM_EDIT.current = null;
+  BOM_EDIT.serviceTiers = {};
+
+  // Prefill the ticket owner independently of the catalog loads below: those
+  // can reject in a signed-out/empty environment, and owner prefill must not
+  // depend on them.
+  ensureSupportSettings().then(_prefillBomOwnerFields).catch(() => {});
 
   // Load catalogs + the SKU family list in parallel — none blocks the others.
   await Promise.all([ensureBomCatalog(), ensureBomRegionsCatalog(), ensureBomSkuFamilies(), loadSubscriptionsDropdown()]);
@@ -3791,6 +5934,71 @@ async function openBomModal(bomId, opts = {}) {
 function closeBomModal() {
   document.getElementById("bom-overlay").classList.add("hidden");
   document.getElementById("bom-modal").classList.add("hidden");
+}
+
+// ---------------------------------------------------------------- BOM wizard
+// The editor modal is a 3-step wizard (Basics → Services & Regions → SKUs).
+// These helpers only toggle which step is visible and drive the footer nav;
+// the underlying inputs, catalogs and save logic are unchanged.
+const BOM_WIZARD = { step: 1, total: 3, editing: false };
+
+function bomWizardGoTo(step) {
+  step = Math.max(1, Math.min(BOM_WIZARD.total, step));
+  BOM_WIZARD.step = step;
+  document.querySelectorAll("#bom-modal .bom-wizard-step").forEach(el => {
+    el.classList.toggle("is-current", el.getAttribute("data-wstep") === String(step));
+  });
+  document.querySelectorAll("#bom-wizard-nav .bom-wizard-tab").forEach(tab => {
+    const n = parseInt(tab.getAttribute("data-wstep"), 10);
+    tab.classList.toggle("is-current", n === step);
+    tab.classList.toggle("is-done", n < step);
+  });
+  const back = document.getElementById("bom-wizard-back");
+  const next = document.getElementById("bom-wizard-next");
+  const save = document.getElementById("bom-save");
+  if (back) back.hidden = step === 1;
+  const last = step === BOM_WIZARD.total;
+  // Keep Next visible on the final step but grayed out/disabled, so it's clear
+  // there's nothing further to advance to (Save takes over there).
+  if (next) {
+    next.hidden = false;
+    next.disabled = last;
+  }
+  // When editing an existing BOM, Save is always available (users often tweak a
+  // single field). When creating, Save appears only on the final step.
+  if (save) save.hidden = BOM_WIZARD.editing ? false : !last;
+  if (step === 3) renderBomServiceTiers();
+}
+
+// Validate the given step before advancing. Only step 1 (Basics) has required
+// fields: a BOM name and at least one subscription.
+function bomWizardValidateStep(step) {
+  if (step === 1) {
+    const tag = (document.getElementById("bom-tag").value || "").trim();
+    const subSel = document.getElementById("bom-sub");
+    const anySub = subSel && Array.from(subSel.selectedOptions || []).some(o => o.value);
+    if (!tag) {
+      setBomStatus('Enter a <strong>BOM name</strong> to continue.', "error");
+      document.getElementById("bom-tag").focus();
+      return false;
+    }
+    if (!anySub) {
+      setBomStatus('Select at least one <strong>subscription</strong> to continue.', "error");
+      subSel && subSel.focus();
+      return false;
+    }
+    setBomStatus("");
+  }
+  return true;
+}
+
+function bomWizardNext() {
+  if (!bomWizardValidateStep(BOM_WIZARD.step)) return;
+  bomWizardGoTo(BOM_WIZARD.step + 1);
+}
+
+function bomWizardBack() {
+  bomWizardGoTo(BOM_WIZARD.step - 1);
 }
 
 // ---------------------------------------------------------------- BOM navigator
@@ -3920,26 +6128,89 @@ function renderBomServiceList() {
   const list = document.getElementById("bom-services-list");
   list.innerHTML = "";
   const cat = BOM_EDIT.catalog || [];
+
+  const ORDER = [
+    "Compute", "Containers", "Web", "Databases", "Storage", "Networking",
+    "AI + Machine Learning", "Analytics", "Integration", "Internet of Things",
+    "Security & Identity", "Management & Governance", "Developer Tools",
+    "Migration", "Mixed Reality", "Media & Other",
+  ];
+  const groups = new Map();
   for (const svc of cat) {
-    const id = "bom-svc-" + svc.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
-    const lbl = document.createElement("label");
-    lbl.dataset.name = svc.name.toLowerCase();
-    const zone = svc.zone_check
-      ? '<span class="svc-zone" title="Live zone availability via Microsoft.Compute/skus">(zones)</span>'
-      : "";
-    const delBtn = svc.is_custom
-      ? `<button type="button" class="bom-custom-del" data-del-svc="${escapeHtml(svc.name)}" title="Remove this custom service">&times;</button>`
-      : "";
-    lbl.innerHTML = `<input type="checkbox" id="${id}" value="${escapeHtml(svc.name)}" data-bom-svc /> <span>${escapeHtml(svc.name)} ${zone}</span>${delBtn}`;
-    list.appendChild(lbl);
+    const c = (svc.category || "Other").trim() || "Other";
+    if (!groups.has(c)) groups.set(c, []);
+    groups.get(c).push(svc);
   }
+  const cats = Array.from(groups.keys()).sort((a, b) => {
+    // "Other" always sinks to the bottom (long tail of niche providers).
+    if (a === "Other") return 1;
+    if (b === "Other") return -1;
+    const ia = ORDER.indexOf(a), ib = ORDER.indexOf(b);
+    if (ia !== -1 || ib !== -1) return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+    return a.localeCompare(b);
+  });
+
+  for (const c of cats) {
+    const items = groups.get(c);
+    const group = document.createElement("div");
+    group.className = "svc-group";
+    group.dataset.cat = c.toLowerCase();
+
+    const header = document.createElement("button");
+    header.type = "button";
+    header.className = "svc-cat-header";
+    header.setAttribute("aria-expanded", "false");
+    header.innerHTML =
+      `<span class="svc-cat-chevron" aria-hidden="true">&#9656;</span>` +
+      `<span class="svc-cat-name">${escapeHtml(c)}</span>` +
+      `<span class="svc-cat-count">${items.length}</span>` +
+      `<span class="svc-cat-selected" hidden></span>`;
+    header.addEventListener("click", () => {
+      const open = group.classList.toggle("open");
+      header.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+
+    const body = document.createElement("div");
+    body.className = "svc-group-items";
+    for (const svc of items) {
+      const id = "bom-svc-" + svc.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+      const lbl = document.createElement("label");
+      // Searchable across friendly name, provider namespace and category.
+      lbl.dataset.name = `${svc.name} ${svc.provider || ""} ${c}`.toLowerCase();
+      if (svc.provider) lbl.title = svc.provider;   // namespace on hover, not inline
+      const zone = svc.zone_check
+        ? '<span class="svc-zone" title="Live zone availability via Microsoft.Compute/skus">zones</span>'
+        : "";
+      const delBtn = svc.is_custom
+        ? `<button type="button" class="bom-custom-del" data-del-svc="${escapeHtml(svc.name)}" title="Remove this custom service">&times;</button>`
+        : "";
+      lbl.innerHTML = `<input type="checkbox" id="${id}" value="${escapeHtml(svc.name)}" data-bom-svc /> <span class="svc-name">${escapeHtml(svc.name)} ${zone}</span>${delBtn}`;
+      body.appendChild(lbl);
+    }
+
+    group.appendChild(header);
+    group.appendChild(body);
+    list.appendChild(group);
+  }
+  updateSvcGroupBadges();
   // Re-apply the active filter (if any) so newly-added customs respect it.
   filterBomServices(document.getElementById("bom-services-filter").value);
+}
+
+function updateSvcGroupBadges() {
+  document.querySelectorAll('#bom-services-list .svc-group').forEach(g => {
+    const sel = g.querySelectorAll('input[data-bom-svc]:checked').length;
+    const badge = g.querySelector('.svc-cat-selected');
+    if (!badge) return;
+    if (sel) { badge.textContent = `${sel} selected`; badge.hidden = false; g.classList.add("has-selected"); }
+    else { badge.hidden = true; g.classList.remove("has-selected"); }
+  });
 }
 
 function updateBomServiceCount() {
   const n = document.querySelectorAll('#bom-services-list input[data-bom-svc]:checked').length;
   document.getElementById("bom-edit-services-count").textContent = `${n} selected`;
+  updateSvcGroupBadges();
 }
 
 function setBomSelectedServices(names) {
@@ -3952,45 +6223,189 @@ function setBomSelectedServices(names) {
 
 function getBomSelectedServices() {
   return Array.from(document.querySelectorAll('#bom-services-list input[data-bom-svc]:checked'))
-    .map(cb => ({ name: cb.value }));
+    .map(cb => {
+      const rec = { name: cb.value };
+      const tiers = _catalogTiersFor(cb.value);
+      if (tiers.length) {
+        const chosen = BOM_EDIT.serviceTiers[cb.value];
+        if (chosen && tiers.some(t => t.id === chosen)) rec.tier = chosen;
+      }
+      return rec;
+    });
+}
+
+// Return the catalog tier list ([{id,label,zone_redundant}]) for a service
+// name, or [] when the service has no tiers.
+function _catalogTiersFor(name) {
+  const entry = (BOM_EDIT.catalog || []).find(s => s.name === name);
+  return (entry && Array.isArray(entry.tiers)) ? entry.tiers : [];
+}
+
+// Render the step-3 "Service tiers" section: one dropdown per selected
+// service that has catalog tiers. Selections persist in BOM_EDIT.serviceTiers
+// so they survive step navigation and feed the save payload.
+function renderBomServiceTiers() {
+  const step = document.getElementById("bom-service-tiers-step");
+  const list = document.getElementById("bom-service-tiers-list");
+  if (!step || !list) return;
+  const selected = getBomSelectedServices();
+  const tiered = selected.filter(s => _catalogTiersFor(s.name).length);
+  if (!tiered.length) {
+    step.hidden = true;
+    list.innerHTML = "";
+    return;
+  }
+  step.hidden = false;
+  list.innerHTML = "";
+  for (const svc of tiered) {
+    const tiers = _catalogTiersFor(svc.name);
+    const cur = BOM_EDIT.serviceTiers[svc.name] || "";
+    const row = document.createElement("div");
+    row.className = "bom-tier-row";
+    const opts = ['<option value="">— not specified —</option>']
+      .concat(tiers.map(t => {
+        const zr = t.zone_redundant ? " · zone-redundant capable" : "";
+        return `<option value="${escapeHtml(t.id)}"${t.id === cur ? " selected" : ""}>${escapeHtml(t.label)}${zr}</option>`;
+      }))
+      .join("");
+    row.innerHTML = `
+      <span class="bom-tier-name">${escapeHtml(svc.name)}</span>
+      <select data-tier-svc="${escapeHtml(svc.name)}">${opts}</select>`;
+    const sel = row.querySelector("select");
+    sel.addEventListener("change", () => {
+      if (sel.value) BOM_EDIT.serviceTiers[svc.name] = sel.value;
+      else delete BOM_EDIT.serviceTiers[svc.name];
+    });
+    list.appendChild(row);
+  }
 }
 
 function filterBomServices(query) {
   const q = (query || "").trim().toLowerCase();
-  document.querySelectorAll('#bom-services-list label').forEach(lbl => {
-    const hit = !q || lbl.dataset.name.includes(q);
-    lbl.classList.toggle("hidden", !hit);
+  const list = document.getElementById("bom-services-list");
+  list.querySelectorAll('.svc-group').forEach(group => {
+    let anyVisible = false;
+    group.querySelectorAll('label').forEach(lbl => {
+      const hit = !q || (lbl.dataset.name || "").includes(q);
+      lbl.classList.toggle("hidden", !hit);
+      if (hit) anyVisible = true;
+    });
+    // Hide whole category when nothing matches; auto-expand when searching,
+    // collapse back to the tidy default when the filter is cleared.
+    group.classList.toggle("hidden", !anyVisible);
+    if (q) {
+      group.classList.toggle("open", anyVisible);
+    } else {
+      group.classList.remove("open");
+    }
+    const header = group.querySelector('.svc-cat-header');
+    if (header) header.setAttribute("aria-expanded", group.classList.contains("open") ? "true" : "false");
   });
 }
 
 // ---- Regions picker (parallel structure to services) ----
 
+// Classify an Azure region into a geography/continent bucket for grouping.
+// Uses specific location-name tokens (canonical name) so "eastus" ≠ "australia".
+function regionGeo(name) {
+  const n = (name || "").toLowerCase();
+  const MAP = [
+    ["United States", ["centralus", "eastus", "westus", "southcentralus", "northcentralus", "westcentralus", "unitedstates", "usgov", "usdod", "ussec", "usnat"]],
+    ["Canada", ["canada"]],
+    ["South America", ["brazil", "chile"]],
+    ["Mexico", ["mexico"]],
+    ["Europe", ["europe", "uksouth", "ukwest", "france", "germany", "norway", "switzerland", "sweden", "italy", "poland", "spain", "belgium", "austria", "denmark", "ireland", "netherlands", "finland", "greece"]],
+    ["Asia Pacific", ["asia", "india", "japan", "korea", "australia", "newzealand", "zealand", "indonesia", "malaysia", "taiwan", "china", "hongkong", "singapore"]],
+    ["Middle East", ["uae", "qatar", "israel", "saudi", "emirates"]],
+    ["Africa", ["africa"]],
+  ];
+  for (const [geo, keys] of MAP) {
+    if (keys.some(k => n.includes(k))) return geo;
+  }
+  return "Other";
+}
+
+const REGION_GEO_ORDER = [
+  "United States", "Canada", "South America", "Mexico", "Europe",
+  "Asia Pacific", "Middle East", "Africa", "Other",
+];
+
 function renderBomRegionsList() {
   const list = document.getElementById("bom-regions-list");
   list.innerHTML = "";
   const cat = BOM_EDIT.regionsCatalog || [];
+
+  const groups = new Map();
   for (const rg of cat) {
-    const id = "bom-rg-" + rg.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
-    const lbl = document.createElement("label");
-    lbl.dataset.name = rg.name.toLowerCase();
-    lbl.dataset.display = (rg.display_name || rg.name).toLowerCase();
-    lbl.dataset.az = rg.has_az ? "1" : "0";
-    const azChip = rg.has_az
-      ? '<span class="svc-zone" title="Region has Availability Zones">AZ</span>'
-      : '<span class="region-noaz" title="Region does not have AZs">no AZ</span>';
-    const delBtn = rg.is_custom
-      ? `<button type="button" class="bom-custom-del" data-del-rg="${escapeHtml(rg.name)}" title="Remove this custom region">&times;</button>`
-      : "";
-    lbl.innerHTML = `<input type="checkbox" id="${id}" value="${escapeHtml(rg.name)}" data-bom-rg /> <span>${escapeHtml(rg.display_name || rg.name)} <span class="muted">(${escapeHtml(rg.name)})</span> ${azChip}</span>${delBtn}`;
-    list.appendChild(lbl);
+    const g = regionGeo(rg.name);
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(rg);
   }
+  const geos = Array.from(groups.keys()).sort((a, b) => {
+    const ia = REGION_GEO_ORDER.indexOf(a), ib = REGION_GEO_ORDER.indexOf(b);
+    return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib) || a.localeCompare(b);
+  });
+
+  for (const g of geos) {
+    const group = document.createElement("div");
+    group.className = "svc-group";
+    group.dataset.geo = g.toLowerCase();
+
+    const header = document.createElement("button");
+    header.type = "button";
+    header.className = "svc-cat-header";
+    header.setAttribute("aria-expanded", "false");
+    header.innerHTML =
+      `<span class="svc-cat-chevron" aria-hidden="true">&#9656;</span>` +
+      `<span class="svc-cat-name">${escapeHtml(g)}</span>` +
+      `<span class="svc-cat-count">${groups.get(g).length}</span>` +
+      `<span class="svc-cat-selected" hidden></span>`;
+    header.addEventListener("click", () => {
+      const open = group.classList.toggle("open");
+      header.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+
+    const body = document.createElement("div");
+    body.className = "svc-group-items";
+    for (const rg of groups.get(g)) {
+      const id = "bom-rg-" + rg.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+      const lbl = document.createElement("label");
+      lbl.dataset.name = rg.name.toLowerCase();
+      lbl.dataset.display = (rg.display_name || rg.name).toLowerCase();
+      lbl.dataset.az = rg.has_az ? "1" : "0";
+      const azChip = rg.has_az
+        ? '<span class="svc-zone" title="Region has Availability Zones">AZ</span>'
+        : '<span class="region-noaz" title="Region does not have AZs">no AZ</span>';
+      const delBtn = rg.is_custom
+        ? `<button type="button" class="bom-custom-del" data-del-rg="${escapeHtml(rg.name)}" title="Remove this custom region">&times;</button>`
+        : "";
+      lbl.innerHTML = `<input type="checkbox" id="${id}" value="${escapeHtml(rg.name)}" data-bom-rg /> <span>${escapeHtml(rg.display_name || rg.name)} <span class="muted">(${escapeHtml(rg.name)})</span> ${azChip}</span>${delBtn}`;
+      body.appendChild(lbl);
+    }
+
+    group.appendChild(header);
+    group.appendChild(body);
+    list.appendChild(group);
+  }
+  updateRegionGroupBadges();
   filterBomRegions();
+}
+
+function updateRegionGroupBadges() {
+  document.querySelectorAll('#bom-regions-list .svc-group').forEach(g => {
+    const sel = g.querySelectorAll('input[data-bom-rg]:checked').length;
+    const badge = g.querySelector('.svc-cat-selected');
+    if (!badge) return;
+    if (sel) { badge.textContent = `${sel} selected`; badge.hidden = false; g.classList.add("has-selected"); }
+    else { badge.hidden = true; g.classList.remove("has-selected"); }
+  });
 }
 
 function updateBomRegionsCount() {
   const total = document.querySelectorAll('#bom-regions-list input[data-bom-rg]').length;
   const n = document.querySelectorAll('#bom-regions-list input[data-bom-rg]:checked').length;
   document.getElementById("bom-regions-count").textContent = `${n} of ${total} selected`;
+  updateRegionGroupBadges();
 }
 
 function setBomSelectedRegions(names) {
@@ -4012,14 +6427,26 @@ function getBomSelectedRegions() {
 function filterBomRegions() {
   const q = (document.getElementById("bom-regions-search").value || "").trim().toLowerCase();
   const filt = document.getElementById("bom-regions-filter").value || "all";
-  document.querySelectorAll('#bom-regions-list label').forEach(lbl => {
-    let show = true;
-    if (filt === "az" && lbl.dataset.az !== "1") show = false;
-    if (filt === "noaz" && lbl.dataset.az !== "0") show = false;
-    if (show && q) {
-      show = lbl.dataset.name.includes(q) || lbl.dataset.display.includes(q);
-    }
-    lbl.classList.toggle("hidden", !show);
+  const active = !!q || filt !== "all";
+  document.querySelectorAll('#bom-regions-list .svc-group').forEach(group => {
+    let anyVisible = false;
+    group.querySelectorAll('label').forEach(lbl => {
+      let show = true;
+      if (filt === "az" && lbl.dataset.az !== "1") show = false;
+      if (filt === "noaz" && lbl.dataset.az !== "0") show = false;
+      if (show && q) {
+        show = lbl.dataset.name.includes(q) || lbl.dataset.display.includes(q);
+      }
+      lbl.classList.toggle("hidden", !show);
+      if (show) anyVisible = true;
+    });
+    group.classList.toggle("hidden", !anyVisible);
+    // Auto-expand while a search/AZ filter is active; collapse to the tidy
+    // default when nothing is being filtered.
+    if (active) group.classList.toggle("open", anyVisible);
+    else group.classList.remove("open");
+    const header = group.querySelector('.svc-cat-header');
+    if (header) header.setAttribute("aria-expanded", group.classList.contains("open") ? "true" : "false");
   });
 }
 
@@ -4194,7 +6621,14 @@ function applyBomToForm(meta) {
   });
   document.getElementById("bom-tag").value = meta.tag || "";
   document.getElementById("bom-customer").value = meta.customer_name || "";
+  { const rEl = document.getElementById("bom-resilience"); if (rEl) rEl.value = _normalizeResilience(meta.resilience); }
   setBomSelectedServices((meta.services || []).map(s => s.name));
+  // Seed per-service tier selections from the saved BOM so the step-3
+  // tier pickers reflect what was chosen previously.
+  BOM_EDIT.serviceTiers = {};
+  for (const s of (meta.services || [])) {
+    if (s && s.name && s.tier) BOM_EDIT.serviceTiers[s.name] = s.tier;
+  }
   // Regions: empty saved list means "default — all known regions
   // selected" so the user sees the implicit default rather than an
   // empty grid that quietly means the same thing.
@@ -4231,6 +6665,8 @@ async function loadBomFromApi(bomId) {
     const meta = await r.json();
     BOM_EDIT.current = meta;
     applyBomToForm(meta);
+    // Layer this BOM's saved support override on top of the global prefill.
+    _overlayBomSupportOverride(meta.support_override);
     updateBomServiceCount();
     updateBomRegionsCount();
     setBomStatus(`Loaded — last updated ${escapeHtml(meta.bom_updated_at || "—")} by ${escapeHtml(meta.bom_updated_by || "—")}.`, "info");
@@ -4251,6 +6687,7 @@ async function saveBom() {
   const sub = subIds[0];
   const tag = document.getElementById("bom-tag").value.trim();
   const customer_name = document.getElementById("bom-customer").value.trim();
+  const resilience = _normalizeResilience((document.getElementById("bom-resilience") || {}).value);
   const services = getBomSelectedServices();
   const required_skus = getBomSkuRows();
   // Persist the explicit region selection so the BOM analyzes exactly what
@@ -4264,8 +6701,9 @@ async function saveBom() {
   const payload = {
     subscription_id: sub,
     subscription_ids: subIds,
-    tag, customer_name,
+    tag, customer_name, resilience,
     services, regions, required_skus,
+    support_override: _collectBomSupportOverride(),
   };
 
   // Editing an existing BOM updates it (PUT /{bom_id}); otherwise create a
@@ -4312,40 +6750,6 @@ async function saveBom() {
   }
 }
 
-async function importBomFromXlsx() {
-  const file = document.getElementById("bom-import-file").files[0];
-  if (!file) return setBomStatus("Pick an xlsx file first.", "error");
-  setBomStatus("Importing…", "info");
-  const fd = new FormData();
-  fd.append("file", file);
-  try {
-    const r = await apiFetch("/api/bom/import_xlsx", { method: "POST", body: fd });
-    const body = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      return setBomStatus(errLine(body, r.statusText), "error");
-    }
-    if (body.customer_name && !document.getElementById("bom-customer").value.trim()) {
-      document.getElementById("bom-customer").value = body.customer_name;
-    }
-    if (Array.isArray(body.services)) {
-      setBomSelectedServices(body.services.map(s => s.name || s));
-    }
-    if (Array.isArray(body.required_skus) && body.required_skus.length) {
-      document.getElementById("bom-skus-tbody").innerHTML = "";
-      body.required_skus.forEach(addBomSkuRow);
-      renderBomSkuFamilyOptions();
-    }
-    const warns = (body.warnings || []).map(w => `<li>${escapeHtml(w)}</li>`).join("");
-    const warnHtml = warns ? `<ul style="margin:.25rem 0 0 1rem;font-size:.8rem;">${warns}</ul>` : "";
-    setBomStatus(
-      `Prefilled from <code>${escapeHtml(body.source_format || "xlsx")}</code>. Review and click <strong>Save BOM</strong>.${warnHtml}`,
-      "info",
-    );
-  } catch (e) {
-    setBomStatus(netErrLine(e), "error");
-  }
-}
-
 // ---------------------------------------------------------------- Run modal
 
 const TOKEN = {
@@ -4355,6 +6759,28 @@ const TOKEN = {
 
 async function refreshAuthToken({ force = false } = {}) {
   setTokenStatus("loading", force ? "Opening browser sign-in…" : "Checking sign-in…");
+  // Delegated (multi-customer) mode: mint the ARM token in the browser first so
+  // the follow-up /api/auth/signin call carries it. Silent unless force.
+  if (APP_CONFIG && APP_CONFIG.delegated_mode) {
+    try {
+      const tok = await ensureDelegatedToken({ force });
+      if (!tok) {
+        if (force) {
+          setTokenStatus("error", "Sign-in was cancelled or blocked. Please try again.");
+        } else {
+          setTokenStatus("warn", "Not signed in. Click <strong>Sign in</strong> to connect your Azure account.");
+        }
+        TOKEN.info = null;
+        updateSigninChip();
+        return null;
+      }
+    } catch (e) {
+      setTokenStatus("error", netErrLine(e));
+      TOKEN.info = null;
+      updateSigninChip();
+      return null;
+    }
+  }
   try {
     const r = await apiFetch("/api/auth/signin", { method: force ? "POST" : "GET" });
     const body = await r.json();
@@ -4368,8 +6794,13 @@ async function refreshAuthToken({ force = false } = {}) {
         return null;
       }
       const msg = body.message || r.statusText;
-      const safe = escapeHtml(msg).replace(/\n/g, "<br>");
-      setTokenStatus("error", `<strong>${escapeHtml(err)}:</strong><br>${safe}`);
+      const ca = conditionalAccessGuidanceHtml(msg, err);
+      if (ca) {
+        setTokenStatus("error", ca);
+      } else {
+        const safe = escapeHtml(msg).replace(/\n/g, "<br>");
+        setTokenStatus("error", `<strong>${escapeHtml(err)}:</strong><br>${safe}`);
+      }
       TOKEN.info = null;
       updateSigninChip();
       return null;
@@ -4384,6 +6815,37 @@ async function refreshAuthToken({ force = false } = {}) {
     updateSigninChip();
     return null;
   }
+}
+
+// Detects a Conditional Access block of the default Azure CLI sign-in client
+// (AADSTS53003 "you don't have access to this resource"). Returns guided-fix
+// HTML for the sign-in status banner, or null if the error is unrelated.
+// The default flow needs no app registration; this guidance only appears when
+// the customer's tenant policy actually blocks the built-in client.
+function conditionalAccessGuidanceHtml(message, code) {
+  const m = String(message || "");
+  const c = String(code || "");
+  const isCaBlock =
+    c === "ca_consent_required" ||
+    /AADSTS53003/i.test(m) ||
+    /conditional access/i.test(m) ||
+    /you don'?t have access to this resource/i.test(m);
+  if (!isCaBlock) return null;
+  return (
+    `<strong>Sign-in blocked by your organization (AADSTS53003).</strong><br>` +
+    `Your tenant's Conditional Access policy is blocking the built-in ` +
+    `<em>Microsoft Azure CLI</em> sign-in app. No app registration is needed ` +
+    `normally — this only happens when a policy blocks that app.<br><br>` +
+    `<strong>To fix, an admin can either:</strong>` +
+    `<ol style="margin:6px 0 6px 18px;padding:0;">` +
+    `<li>Exclude the <em>Microsoft Azure CLI</em> app (<code>04b07795-8ddb-461a-bbee-02f9e1bf7b46</code>) from the blocking policy, <strong>or</strong></li>` +
+    `<li>Register a dedicated app and launch with these environment variables set:` +
+    `<br><code>AZURE_CLIENT_ID</code>, <code>AZURE_TENANT_ID</code>, <code>AZURE_REDIRECT_URI=http://localhost</code>` +
+    `<br>(Public client / <em>Allow public client flows</em> = Yes, redirect <code>http://localhost</code>, delegated <em>Azure Service Management → user_impersonation</em>.)</li>` +
+    `</ol>` +
+    `See the README section <em>“If sign-in is blocked by Conditional Access”</em> for full steps. ` +
+    `If the policy requires MFA or a compliant device instead, complete that in the browser prompt and try again.`
+  );
 }
 
 // ----- Header sign-in chip ---------------------------------------------------
@@ -4401,6 +6863,11 @@ function updateSigninChip() {
     chip.dataset.state = "out";
     text.textContent = "Sign in";
     chip.title = "Not signed in. Click for sign-in options.";
+  }
+  // Keep the onboarding stepper's step-1 state in sync with sign-in changes.
+  if (!STATE.activeBomId) {
+    const emptyEl = document.getElementById("bom-panel-empty");
+    if (emptyEl && !emptyEl.classList.contains("hidden")) renderOnboardingStepper(emptyEl);
   }
 }
 
@@ -4424,15 +6891,15 @@ function closeSigninModal() {
 async function doSignOut() {
   setTokenStatus("loading", "Signing out…");
   try {
-    const r = await apiFetch("/api/auth/signout", { method: "POST" });
-    if (r.ok) {
-      TOKEN.info = null;
-      updateSigninChip();
-      setTokenStatus("warn", "Signed out. Click <strong>Sign in</strong> to sign in again.");
-    } else {
-      const body = await r.json().catch(() => ({}));
-      setTokenStatus("error", escapeHtml(body.message || "Sign-out failed"));
-    }
+    // Best-effort legacy server signout (harmless no-op in delegated mode).
+    try { await apiFetch("/api/auth/signout", { method: "POST" }); } catch (_e) {}
+    // Clear the browser-held MSAL account + token so the next sign-in is fresh.
+    try { if (window.DelegatedAuth && DelegatedAuth.logout) await DelegatedAuth.logout(); } catch (_e) {}
+    TOKEN.info = null;
+    try { updateSigninChip(); } catch (_e) {}
+    closeSigninModal();
+    // Return the user to the login start page (auth gate).
+    showAuthGate();
   } catch (e) {
     setTokenStatus("error", netErrLine(e));
   }
@@ -4441,11 +6908,14 @@ async function doSignOut() {
 async function doSwitchDirectory() {
   setTokenStatus("loading", "Signing out and re-opening sign-in…");
   try {
-    await apiFetch("/api/auth/signout", { method: "POST" });
+    try { await apiFetch("/api/auth/signout", { method: "POST" }); } catch (_e) {}
+    // Clear MSAL so the interactive prompt lets the user pick a different account.
+    try { if (window.DelegatedAuth && DelegatedAuth.logout) await DelegatedAuth.logout(); } catch (_e) {}
     TOKEN.info = null;
-    updateSigninChip();
-    // Now trigger a fresh interactive sign-in
-    await refreshAuthToken({ force: true });
+    try { updateSigninChip(); } catch (_e) {}
+    closeSigninModal();
+    // Send the user back to the login start page to sign in again.
+    showAuthGate();
   } catch (e) {
     setTokenStatus("error", netErrLine(e));
   }
@@ -4482,7 +6952,7 @@ async function preloadSubscriptionNames() {
       window._loadedSubscriptions = subs;
       renderSubscriptionSwitcher();
       renderSubscriptionFilter();
-      if (STATE.view === "table") renderTable();
+      if (_isRegionsSub("table")) renderTable();
       if (STATE.view === "quota") _renderQuotaForSelectedRegion();
     }
   } catch (e) { /* silent — best effort */ }
@@ -5101,11 +7571,1874 @@ async function clearActivityLog() {
   }
 }
 
+// ---------------------------------------------------------------- Support tickets
+
+// Bootstrap config + support-feature state. APP_CONFIG is fetched once at boot
+// and tells the SPA whether demo mode is on (which forces ticket dry-run and
+// shows the demo banner).
+let APP_CONFIG = { demo_mode: false, support_configured: false, snapshot_retention: 15 };
+const SUPPORT = { settings: null, tickets: [], lastPreview: null, loaded: false };
+
+// Fetch the global support/ticket-owner settings once (cached on SUPPORT).
+// Used by the BOM wizard + gear Settings, which may run before the Tickets tab
+// has ever been opened.
+async function ensureSupportSettings() {
+  if (SUPPORT.settings) return SUPPORT.settings;
+  try {
+    const s = await apiJson("/api/support/settings");
+    SUPPORT.settings = s.settings;
+    if (typeof APP_CONFIG === "object" && APP_CONFIG) APP_CONFIG.support_configured = s.configured;
+  } catch (e) { /* non-fatal */ }
+  return SUPPORT.settings;
+}
+
+// The BOM's support contact is the profile Azure tickets for that BOM are filed
+// under. It is initialized from the global support settings but stored per-BOM
+// (support_override) so each BOM can have different owners/contacts. These
+// wizard field IDs map to the support_settings field names the backend merges.
+const BOM_SUPPORT_FIELDS = {
+  contact_first_name: "bom-owner-first",
+  contact_last_name: "bom-owner-last",
+  primary_email: "bom-owner-email",
+  phone: "bom-owner-phone",
+  country: "bom-owner-country",
+  preferred_timezone: "bom-owner-tz",
+  preferred_contact_method: "bom-owner-method",
+  default_severity: "bom-owner-sev",
+  additional_emails: "bom-owner-cc",
+};
+
+const _BOM_SUPPORT_DEFAULTS = {
+  preferred_contact_method: "email",
+  default_severity: "moderate",
+};
+
+// Prefill the wizard support fields from the GLOBAL settings (the per-BOM
+// defaults). Called for both new and existing BOMs; for existing BOMs the
+// BOM's own override is layered on top afterwards via _overlayBomSupportOverride.
+function _prefillBomOwnerFields() {
+  const s = SUPPORT.settings || {};
+  for (const [key, id] of Object.entries(BOM_SUPPORT_FIELDS)) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    const v = s[key];
+    el.value = (v !== undefined && v !== null && v !== "")
+      ? v
+      : (_BOM_SUPPORT_DEFAULTS[key] || "");
+  }
+}
+
+// Layer a BOM's saved per-BOM override on top of the global-prefilled fields:
+// only non-empty override values win, so unset fields keep inheriting global.
+function _overlayBomSupportOverride(override) {
+  if (!override || typeof override !== "object") return;
+  for (const [key, id] of Object.entries(BOM_SUPPORT_FIELDS)) {
+    const v = override[key];
+    if (v === undefined || v === null || v === "") continue;
+    const el = document.getElementById(id);
+    if (el) el.value = v;
+  }
+}
+
+// Collect the wizard support fields into a per-BOM override object. Only
+// non-empty values are sent; empty fields are omitted so the BOM inherits the
+// corresponding global default at ticket time.
+function _collectBomSupportOverride() {
+  const out = {};
+  for (const [key, id] of Object.entries(BOM_SUPPORT_FIELDS)) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    const v = (el.value || "").trim();
+    if (v) out[key] = v;
+  }
+  return out;
+}
+
+// Gear Settings → Ticket owner section.
+// Switch the active panel within the Settings view. Lazy-loads each tab's
+// data the first time (and on every re-open, so the content stays fresh).
+function switchSettingsTab(tab) {
+  const tabs = ["owner", "permissions", "datasets", "pricing", "activity", "data"];
+  if (!tabs.includes(tab)) tab = "owner";
+  STATE.settingsTab = tab;
+  document.querySelectorAll("[data-settings-tab]").forEach(btn => {
+    const active = btn.getAttribute("data-settings-tab") === tab;
+    btn.classList.toggle("is-active", active);
+    btn.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  document.querySelectorAll("[data-settings-panel]").forEach(p => {
+    p.classList.toggle("is-active", p.getAttribute("data-settings-panel") === tab);
+  });
+  if (tab === "owner") loadOwnerSettings();
+  else if (tab === "permissions") loadPermissionsSettings();
+  else if (tab === "datasets") loadDatasetsSettings();
+  else if (tab === "pricing") loadPricingSettings();
+  else if (tab === "activity") loadActivityLog();
+  else if (tab === "data") loadDataSettings();
+}
+
+// Render the "Data & storage" panel: the (mode-aware) storage-path line and
+// the open-folder button, which only works when self-hosting locally.
+function loadDataSettings() {
+  const pathEl = document.getElementById("owner-storage-path");
+  const isLocal = !!(APP_CONFIG && APP_CONFIG.local_mode);
+  const pathLine = document.getElementById("owner-storage-path-line");
+  const dir = (APP_CONFIG && (APP_CONFIG.snapshots_dir || APP_CONFIG.storage_dir)) || "";
+  const dirText = dir || "(path unavailable — run a live, non-demo analysis to persist snapshots locally)";
+  if (pathEl) pathEl.textContent = dirText;
+  if (pathLine) {
+    const lead = isLocal
+      ? "Snapshots and local data are saved on this machine under:"
+      : "Snapshots are stored in your private session for this hosted app (not a folder you can open). The server-side path is:";
+    pathLine.innerHTML = `${escapeHtml(lead)}<br><code id="owner-storage-path">${escapeHtml(dirText)}</code>`;
+  }
+  const openBtn = document.getElementById("owner-open-folder");
+  if (openBtn) openBtn.classList.toggle("hidden", !isLocal);
+}
+
+async function loadOwnerSettings() {
+  await ensureSupportSettings();
+  const s = SUPPORT.settings || {};
+  const set = (id, val) => { const el = document.getElementById(id); if (el) el.value = val; };
+  set("owner-first", s.contact_first_name || "");
+  set("owner-last", s.contact_last_name || "");
+  set("owner-email", s.primary_email || "");
+  set("owner-cc", s.additional_emails || "");
+  set("owner-phone", s.phone || "");
+  set("owner-country", s.country || "US");
+  set("owner-tz", s.preferred_timezone || "Pacific Standard Time");
+  set("owner-sev", s.default_severity || "moderate");
+  set("owner-valrg", _valRgForSub(focusedSubscriptionId()));
+  const subLabelEl = document.getElementById("owner-valrg-sub");
+  if (subLabelEl) {
+    const subName = focusedSubscriptionName();
+    subLabelEl.textContent = subName
+      ? `Applies to the selected subscription: ${subName}`
+      : "Optional — pick a subscription on the dashboard first, then set a resource group for it here.";
+  }
+  _loadValidationRgOptions();
+}
+
+// Populate the validation-RG datalist from the focused subscription so the user
+// picks an existing RG instead of typing one that may not exist (which 404s at
+// validate time and shows a misleading "not configured" state).
+async function _loadValidationRgOptions() {
+  const list = document.getElementById("owner-valrg-list");
+  const hint = document.getElementById("owner-valrg-hint");
+  // Populate the location datalist from the BOM's regions so a created RG can be
+  // homed in a familiar region (RG location is metadata only — the deep check
+  // validates resources in any region regardless of the RG's location).
+  const locList = document.getElementById("owner-valrg-loc-list");
+  if (locList) {
+    const regions = (STATE.snapshot && STATE.snapshot.regions) || [];
+    const shorts = Array.from(new Set(regions.map(r => r.short).filter(Boolean))).sort();
+    locList.innerHTML = shorts.map(s => `<option value="${escapeHtml(s)}"></option>`).join("");
+    const locInput = document.getElementById("owner-valrg-loc");
+    if (locInput && !locInput.value && shorts.length) locInput.value = shorts[0];
+  }
+  if (!list) return;
+  const sub = focusedSubscriptionId() || "";
+  const subName = focusedSubscriptionName() || sub;
+  if (!sub) {
+    if (hint) hint.textContent = "Select a subscription on the dashboard to load its resource groups.";
+    return;
+  }
+  if (hint) hint.textContent = `Loading resource groups from ${subName}…`;
+  try {
+    const resp = await apiJson(`/api/az/resource-groups?subscription_id=${encodeURIComponent(sub)}`);
+    const rgs = (resp && resp.resource_groups) || [];
+    list.innerHTML = rgs.map(g =>
+      `<option value="${escapeHtml(g.name)}">${escapeHtml(g.location || "")}</option>`).join("");
+    if (hint) hint.textContent = rgs.length
+      ? `${rgs.length} resource group(s) in ${subName}. The deep check runs against this subscription — the one selected on the dashboard.`
+      : `No resource groups in ${subName}. Create one below, or leave blank for read-only checks.`;
+  } catch (e) {
+    if (hint) hint.textContent = "Could not load resource groups (you can still type a name).";
+  }
+}
+
+// Create the validation resource group named in the field if it doesn't exist.
+// A resource group is free and empty until resources are deployed — the deep
+// check only validates against it. Gated by an explicit confirmation.
+async function _createValidationRg() {
+  const status = document.getElementById("owner-valrg-create-status");
+  const name = ((document.getElementById("owner-valrg") || {}).value || "").trim();
+  const location = ((document.getElementById("owner-valrg-loc") || {}).value || "").trim();
+  const sub = focusedSubscriptionId() || "";
+  const subName = focusedSubscriptionName() || sub;
+  if (!sub) { if (status) status.textContent = "Select a subscription first."; return; }
+  if (!name) { if (status) status.textContent = "Enter a resource group name above first."; return; }
+  if (!location) { if (status) status.textContent = "Enter a location (e.g. eastus)."; return; }
+  const ok = window.confirm(
+    `Create resource group "${name}" in ${location}\n` +
+    `in subscription: ${subName}?\n\n` +
+    `This is a free, empty resource group used only so the deep check has somewhere to run Azure ` +
+    `pre-flight validation. No resources are deployed and nothing is billed. Requires Contributor on the subscription.`
+  );
+  if (!ok) return;
+  const btn = document.getElementById("owner-valrg-create");
+  if (btn) btn.disabled = true;
+  if (status) status.textContent = "Creating…";
+  try {
+    const res = await apiJson("/api/az/resource-groups", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subscription_id: sub, name, location }),
+    });
+    if (status) status.textContent = res.created ? `✓ Created in ${res.location}` : `✓ Already exists in ${res.location}`;
+    // Persist it as the validation RG for THIS subscription so the deep check
+    // uses it immediately (an RG only exists inside one subscription).
+    try {
+      const saved = await apiJson("/api/support/settings", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ validation_resource_groups: { [sub]: res.name } }),
+      });
+      SUPPORT.settings = saved.settings;
+    } catch (_e) {}
+    await _loadValidationRgOptions();
+    showToast(res.created ? "Validation resource group created and saved." : "Resource group already existed — saved as your validation RG.", "success");
+  } catch (e) {
+    if (status) status.textContent = `❌ ${e.message}`;
+    showToast(e.message || "Could not create resource group.", "error");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function saveOwnerSettings() {
+  const status = document.getElementById("owner-status");
+  const val = (id) => ((document.getElementById(id) || {}).value || "").trim();
+  const body = {
+    contact_first_name: val("owner-first"),
+    contact_last_name: val("owner-last"),
+    primary_email: val("owner-email"),
+    additional_emails: val("owner-cc"),
+    phone: val("owner-phone"),
+    country: val("owner-country") || "US",
+    preferred_timezone: val("owner-tz"),
+    default_severity: (document.getElementById("owner-sev") || {}).value || "moderate",
+  };
+  // The validation RG is per-subscription. Only persist it when a subscription
+  // is focused; an empty value clears that subscription's entry server-side.
+  const valSub = focusedSubscriptionId();
+  if (valSub) body.validation_resource_groups = { [valSub]: val("owner-valrg") };
+  if (status) status.textContent = "Saving…";
+  try {
+    const res = await apiJson("/api/support/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    SUPPORT.settings = res.settings;
+    if (typeof APP_CONFIG === "object" && APP_CONFIG) APP_CONFIG.support_configured = res.configured;
+    if (status) status.textContent = res.configured ? "✓ Saved" : "Saved (name + email needed to submit tickets)";
+    showToast("Ticket owner saved.", "success");
+  } catch (e) {
+    if (status) status.textContent = `❌ ${e.message}`;
+  }
+}
+
+// ---------------------------------------------------------------- Permissions
+
+// Populate the subscription picker (reusing the already-loaded list) and default
+// it to whatever subscription is focused on the dashboard.
+async function loadPermissionsSettings() {
+  const sel = document.getElementById("perm-sub");
+  if (!sel) return;
+  let subs = window._loadedSubscriptions || [];
+  if (!subs.length) {
+    sel.innerHTML = '<option disabled selected>Loading subscriptions…</option>';
+    try {
+      const r = await apiJson("/api/az/subscriptions");
+      subs = r.subscriptions || [];
+      window._loadedSubscriptions = subs;
+    } catch (_e) { subs = []; }
+  }
+  if (!subs.length) {
+    sel.innerHTML = '<option disabled selected>No subscriptions found — sign in first.</option>';
+    return;
+  }
+  const focused = focusedSubscriptionId();
+  sel.innerHTML = subs.map(s =>
+    `<option value="${escapeHtml(s.id)}"${s.id === focused ? " selected" : ""}>${escapeHtml(s.name)} (${s.id.substring(0, 8)}…)</option>`
+  ).join("");
+}
+
+async function checkPermissions() {
+  const sel = document.getElementById("perm-sub");
+  const statusEl = document.getElementById("perm-status");
+  const summaryEl = document.getElementById("perm-summary");
+  const resultsEl = document.getElementById("perm-results");
+  const btn = document.getElementById("perm-check");
+  const subId = sel && sel.value;
+  if (!subId) {
+    if (statusEl) statusEl.textContent = "Pick a subscription first.";
+    return;
+  }
+  if (btn) btn.disabled = true;
+  if (statusEl) statusEl.textContent = "Checking…";
+  if (summaryEl) { summaryEl.classList.add("hidden"); summaryEl.innerHTML = ""; }
+  if (resultsEl) resultsEl.innerHTML = '<p class="muted">Reading your effective permissions…</p>';
+  try {
+    const r = await apiJson(`/api/permissions/check?subscription_id=${encodeURIComponent(subId)}`);
+    if (statusEl) statusEl.textContent = "";
+    renderPermissionResults(r);
+  } catch (e) {
+    if (statusEl) statusEl.textContent = "";
+    if (summaryEl) summaryEl.classList.add("hidden");
+    if (resultsEl) {
+      resultsEl.innerHTML =
+        `<p class="note warn">Couldn't complete the permission check: ${escapeHtml(e.message || String(e))}</p>`;
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function _permRow(cap) {
+  const granted = cap.granted;
+  const badge = granted
+    ? `<span class="perm-badge perm-verified">✓ Verified</span>`
+    : `<span class="perm-badge perm-check">✕ Check</span>`;
+  const tag = cap.required
+    ? `<span class="perm-tag perm-required">Required</span>`
+    : `<span class="perm-tag perm-optional">Optional</span>`;
+  const acts = (cap.actions || []).map(a => {
+    const isMissing = (cap.missing || []).includes(a);
+    return `<code class="perm-action${isMissing ? " perm-action-missing" : ""}">${escapeHtml(a)}</code>`;
+  }).join(" ");
+  return `<li class="perm-row${granted ? "" : " perm-row-missing"}">
+    <div class="perm-row-head">${badge}${tag}<strong class="perm-row-title">${escapeHtml(cap.title)}</strong></div>
+    <div class="perm-row-why muted">${escapeHtml(cap.why)}</div>
+    <div class="perm-row-actions">${acts}</div>
+  </li>`;
+}
+
+function renderPermissionResults(data) {
+  const summaryEl = document.getElementById("perm-summary");
+  const resultsEl = document.getElementById("perm-results");
+  const caps = (data && data.capabilities) || [];
+  const sum = (data && data.summary) || {};
+  if (summaryEl) {
+    const reqOk = sum.all_required_ok;
+    const cls = reqOk ? "perm-summary-ok" : "perm-summary-warn";
+    const icon = reqOk ? "✅" : "⚠️";
+    const headline = reqOk
+      ? "All required permissions verified"
+      : `${sum.required_total - sum.required_ok} required permission(s) missing`;
+    summaryEl.className = `perm-summary ${cls}`;
+    summaryEl.innerHTML = `<span class="perm-summary-icon">${icon}</span>
+      <div><strong>${escapeHtml(headline)}</strong>
+      <div class="muted">Required ${sum.required_ok}/${sum.required_total} · Optional ${sum.optional_ok}/${sum.optional_total} verified.
+      ${reqOk ? "Optional gaps only limit automation features, not the core analysis." : "The core analysis needs every required capability — ask an owner for the missing role (e.g. Reader)."}</div></div>`;
+    summaryEl.classList.remove("hidden");
+  }
+  if (resultsEl) {
+    const required = caps.filter(c => c.required);
+    const optional = caps.filter(c => !c.required);
+    const section = (title, rows) => rows.length
+      ? `<h3 class="perm-group-title">${title}</h3><ul class="perm-list">${rows.map(_permRow).join("")}</ul>`
+      : "";
+    resultsEl.innerHTML =
+      section("Required for core analysis", required) +
+      section("Optional — automation features", optional);
+  }
+}
+
+// ---------------------------------------------------------------- Model datasets
+
+function _fmtBytes(n) {
+  if (n === null || n === undefined) return "—";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function _fmtDatasetDate(iso) {
+  if (!iso) return "—";
+  try {
+    return new Date(iso).toLocaleString();
+  } catch (e) { return iso; }
+}
+
+async function loadDatasetsSettings() {
+  const host = document.getElementById("datasets-list");
+  if (!host) return;
+  host.innerHTML = `<p class="muted">Loading datasets…</p>`;
+  let datasets = [];
+  try {
+    const res = await apiJson("/api/datasets");
+    datasets = (res && res.datasets) || [];
+  } catch (e) {
+    host.innerHTML = `<p class="muted">❌ Could not load datasets: ${escapeHtml(e.message)}</p>`;
+    return;
+  }
+  if (!datasets.length) {
+    host.innerHTML = `<p class="muted">No managed datasets.</p>`;
+    return;
+  }
+  host.innerHTML = datasets.map(_datasetCardHtml).join("");
+  for (const ds of datasets) _wireDatasetCard(ds);
+}
+
+function _datasetSourceLine(ds) {
+  const origin = ds.origin || (ds.source === "custom" ? "upload" : "builtin");
+  let label, cls;
+  if (origin === "arm") { label = "Azure ARM"; cls = "ds-src--arm"; }
+  else if (origin === "url") { label = "Linked URL"; cls = "ds-src--url"; }
+  else if (origin === "upload") { label = "Manual upload"; cls = "ds-src--upload"; }
+  else { label = "Built-in seed"; cls = "ds-src--builtin"; }
+  const bits = [`<span class="ds-src ${cls}">${escapeHtml(label)}</span>`];
+  if (ds.fetched_at) bits.push(`<span>fetched ${_fmtDatasetDate(ds.fetched_at)}</span>`);
+  if (ds.source_url) {
+    const u = escapeHtml(ds.source_url);
+    bits.push(`<a href="${u}" target="_blank" rel="noopener" class="ds-src-url" title="${u}">${u}</a>`);
+  }
+  return `<div class="dataset-source muted">${bits.join(" · ")}</div>`;
+}
+
+function _datasetCardHtml(ds) {
+  const custom = ds.source === "custom";
+  const badge = custom
+    ? `<span class="ds-badge ds-badge--custom">Custom</span>`
+    : `<span class="ds-badge ds-badge--builtin">Built-in</span>`;
+  const summary = ds.summary ? escapeHtml(ds.summary) : "";
+  const canArm = !!ds.can_refresh_arm;
+  const hasUrl = !!ds.source_url;
+  const id = escapeHtml(ds.id);
+  // Primary "get fresh data" actions.
+  const armBtn = canArm
+    ? `<button type="button" class="btn btn--sm" data-ds-refresh="${id}" title="Regenerate this dataset live from your Azure subscription">↻ Refresh from Azure</button>`
+    : "";
+  const refetchBtn = hasUrl
+    ? `<button type="button" class="btn btn--sm" data-ds-refetch="${id}" title="Re-download from the linked URL">↻ Refresh from URL</button>`
+    : "";
+  // One-click canonical public source (e.g. latency → Microsoft Docs markdown).
+  const showPreset = ds.suggested_url && ds.source_url !== ds.suggested_url;
+  const presetBtn = showPreset
+    ? `<button type="button" class="btn btn--sm" data-ds-preset="${id}" data-ds-preset-url="${escapeHtml(ds.suggested_url)}" title="${escapeHtml(ds.suggested_url)}">↻ Refresh from ${escapeHtml(ds.suggested_label || "source")}</button>`
+    : "";
+  const downloadBtn = `<a class="btn btn--sm" href="/api/datasets/${encodeURIComponent(ds.id)}" download>Download</a>`;
+  // Secondary configuration links.
+  const linkBtn = ds.supports_url
+    ? `<button type="button" class="link-btn" data-ds-link="${id}">${hasUrl ? "Change URL…" : "Link data URL…"}</button>`
+    : "";
+  const unlinkBtn = hasUrl
+    ? `<button type="button" class="link-btn danger" data-ds-unlink="${id}">Unlink URL</button>`
+    : "";
+  const revertBtn = `<button type="button" class="link-btn danger" data-ds-reset="${id}" ${custom ? "" : "hidden"}>Revert to built-in</button>`;
+  return `
+    <div class="dataset-card" data-ds="${id}">
+      <div class="dataset-head">
+        <div class="dataset-title">
+          <strong>${escapeHtml(ds.label)}</strong> ${badge}
+          <code class="dataset-file">${escapeHtml(ds.filename)}</code>
+        </div>
+      </div>
+      <p class="muted dataset-desc">${escapeHtml(ds.description || "")}</p>
+      <div class="dataset-meta muted">
+        ${summary ? `<span>${summary}</span>` : ""}
+        <span>${_fmtBytes(ds.size)}</span>
+        <span>Updated ${_fmtDatasetDate(ds.modified)}</span>
+      </div>
+      ${_datasetSourceLine(ds)}
+      <div class="dataset-actions">
+        ${armBtn}
+        ${presetBtn}
+        ${refetchBtn}
+        ${downloadBtn}
+        ${linkBtn}
+        ${unlinkBtn}
+        ${revertBtn}
+        <span class="muted dataset-status" data-ds-status="${id}"></span>
+      </div>
+    </div>`;
+}
+
+function _wireDatasetCard(ds) {
+  const reset = document.querySelector(`[data-ds-reset="${CSS.escape(ds.id)}"]`);
+  if (reset) reset.addEventListener("click", () => _resetDataset(ds.id, ds.label));
+
+  const refresh = document.querySelector(`[data-ds-refresh="${CSS.escape(ds.id)}"]`);
+  if (refresh) refresh.addEventListener("click", () => _refreshDatasetArm(ds.id, ds.label));
+
+  const link = document.querySelector(`[data-ds-link="${CSS.escape(ds.id)}"]`);
+  if (link) link.addEventListener("click", () => _linkDatasetUrl(ds.id, ds.label, ds.source_url || ""));
+
+  const refetch = document.querySelector(`[data-ds-refetch="${CSS.escape(ds.id)}"]`);
+  if (refetch) refetch.addEventListener("click", () => _refetchDatasetUrl(ds.id));
+
+  const preset = document.querySelector(`[data-ds-preset="${CSS.escape(ds.id)}"]`);
+  if (preset) preset.addEventListener("click", () => _linkDatasetUrl(ds.id, ds.label, preset.getAttribute("data-ds-preset-url"), true));
+
+  const unlink = document.querySelector(`[data-ds-unlink="${CSS.escape(ds.id)}"]`);
+  if (unlink) unlink.addEventListener("click", () => _unlinkDatasetUrl(ds.id, ds.label));
+}
+
+function _datasetStatusEl(id) {
+  return document.querySelector(`[data-ds-status="${CSS.escape(id)}"]`);
+}
+
+async function _resetDataset(id, label) {
+  if (!confirm(`Revert “${label || id}” to the built-in dataset? Your custom file will be removed.`)) return;
+  const status = _datasetStatusEl(id);
+  if (status) status.textContent = "Reverting…";
+  try {
+    const res = await apiFetch(`/api/datasets/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (!res.ok) {
+      let body = null;
+      try { body = await res.json(); } catch (e) {}
+      throw new Error((body && (body.message || body.error)) || res.statusText);
+    }
+    showToast(`Dataset “${id}” reverted to built-in.`, "success");
+    await loadDatasetsSettings();
+  } catch (e) {
+    if (status) status.textContent = `❌ ${e.message}`;
+    showToast(`Revert failed: ${e.message}`, "error");
+  }
+}
+
+async function _refreshDatasetArm(id, label) {
+  const status = _datasetStatusEl(id);
+  if (status) status.textContent = "Refreshing from Azure…";
+  try {
+    const res = await apiFetch(`/api/datasets/${encodeURIComponent(id)}/refresh`, { method: "POST" });
+    if (!res.ok) {
+      let body = null;
+      try { body = await res.json(); } catch (e) {}
+      throw new Error((body && (body.message || body.error)) || res.statusText);
+    }
+    showToast(`“${label || id}” refreshed from Azure.`, "success");
+    await loadDatasetsSettings();
+  } catch (e) {
+    if (status) status.textContent = `❌ ${e.message}`;
+    showToast(`Refresh failed: ${e.message}`, "error");
+  }
+}
+
+async function _linkDatasetUrl(id, label, currentUrl, usePreset) {
+  let trimmed;
+  if (usePreset) {
+    // One-click canonical source — no prompt.
+    trimmed = (currentUrl || "").trim();
+    if (!trimmed) return;
+  } else {
+    const url = prompt(
+      `Link a data URL for “${label || id}”.\n\n` +
+      `Paste an https:// link to the raw file (e.g. a GitHub raw URL, or a ` +
+      `github.com …/blob/… link which is converted automatically). ` +
+      `The dashboard will fetch, validate, and use it — and you can re-fetch it later.`,
+      currentUrl || "https://raw.githubusercontent.com/");
+    if (url === null) return;
+    trimmed = url.trim();
+    if (!trimmed) return;
+  }
+  const status = _datasetStatusEl(id);
+  if (status) status.textContent = "Fetching from URL…";
+  try {
+    const res = await apiFetch(`/api/datasets/${encodeURIComponent(id)}/source`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: trimmed }),
+    });
+    if (!res.ok) {
+      let body = null;
+      try { body = await res.json(); } catch (e) {}
+      throw new Error((body && (body.message || body.error)) || res.statusText);
+    }
+    showToast(`“${label || id}” linked and fetched from URL.`, "success");
+    await loadDatasetsSettings();
+  } catch (e) {
+    if (status) status.textContent = `❌ ${e.message}`;
+    showToast(`URL fetch failed: ${e.message}`, "error");
+  }
+}
+
+async function _refetchDatasetUrl(id) {
+  const status = _datasetStatusEl(id);
+  if (status) status.textContent = "Re-fetching…";
+  try {
+    const res = await apiFetch(`/api/datasets/${encodeURIComponent(id)}/source`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    if (!res.ok) {
+      let body = null;
+      try { body = await res.json(); } catch (e) {}
+      throw new Error((body && (body.message || body.error)) || res.statusText);
+    }
+    showToast(`Dataset “${id}” re-fetched from its linked URL.`, "success");
+    await loadDatasetsSettings();
+  } catch (e) {
+    if (status) status.textContent = `❌ ${e.message}`;
+    showToast(`Re-fetch failed: ${e.message}`, "error");
+  }
+}
+
+async function _unlinkDatasetUrl(id, label) {
+  if (!confirm(`Unlink the source URL for “${label || id}”? The current file stays; it just won't be re-fetchable.`)) return;
+  const status = _datasetStatusEl(id);
+  if (status) status.textContent = "Unlinking…";
+  try {
+    const res = await apiFetch(`/api/datasets/${encodeURIComponent(id)}/source`, { method: "DELETE" });
+    if (!res.ok) {
+      let body = null;
+      try { body = await res.json(); } catch (e) {}
+      throw new Error((body && (body.message || body.error)) || res.statusText);
+    }
+    showToast(`Source URL unlinked for “${id}”.`, "success");
+    await loadDatasetsSettings();
+  } catch (e) {
+    if (status) status.textContent = `❌ ${e.message}`;
+    showToast(`Unlink failed: ${e.message}`, "error");
+  }
+}
+
+async function loadAppConfig() {
+  try {
+    APP_CONFIG = await apiJson("/api/app-config");
+  } catch (e) { /* keep defaults */ }
+  await initDelegatedAuth();
+  applyDemoBanner();
+}
+
+// Initialize browser-side (delegated) auth when the server runs in
+// multi-customer mode. Safe no-op otherwise. Never throws.
+async function initDelegatedAuth() {
+  try {
+    if (!APP_CONFIG || !APP_CONFIG.delegated_mode || !window.DelegatedAuth) return;
+    await window.DelegatedAuth.init({
+      entra_client_id: APP_CONFIG.entra_client_id,
+      entra_authority: APP_CONFIG.entra_authority,
+      arm_scope: APP_CONFIG.arm_scope,
+      login_hint: APP_CONFIG.user_name || "",
+    });
+    // Prefetch the ARM token silently (SSO via the Easy Auth session) so the
+    // first data calls (subscriptions, snapshots) carry it without a prompt.
+    try { await ensureDelegatedToken({ force: false }); } catch (e) {}
+  } catch (e) { /* delegated auth optional; ignore */ }
+}
+
+function applyDemoBanner() {
+  const el = document.getElementById("demo-banner");
+  if (!el) return;
+  if (APP_CONFIG && APP_CONFIG.demo_mode) {
+    el.innerHTML = `<strong>Demo mode</strong> — you're viewing a bundled sample BOM and analysis.
+      Support tickets are <em>preview-only</em> (no Azure calls). Sign in and create your own BOM to run a live analysis.`;
+    el.classList.remove("hidden");
+  } else {
+    el.classList.add("hidden");
+  }
+}
+
+// Friendly, non-GUID label for a subscription (Tag/Customer · short-GUID).
+function _supportSubLabel(subId) {
+  if (!subId) return "—";
+  let name = "";
+  try { name = _subNameById(subId) || ""; } catch (e) {}
+  const shortId = subId.length >= 12 ? subId.slice(0, 8) + "…" + subId.slice(-4) : subId;
+  return name && name !== subId ? `${name} · ${shortId}` : shortId;
+}
+
+// ---------------------------------------------- Best region recommendation
+// Rank every region for the current BOM on a composite of deployment verdict,
+// verdict confidence, quota, AZ support, remediation effort, latency and cost,
+// then surface the top picks with an at-a-glance trade-off explanation.
+const _VERDICT_RANK = { ready: 0, ready_with_constraints: 1, needs_validation: 2, not_recommended: 3 };
+const _CONF_RANK = { validated: 0, capability: 1, metadata: 2 };
+const _QUOTA_RANK = { sufficient: 0, unknown: 1, insufficient: 2 };
+
+function _latencyForRegion(regionName) {
+  const sel = document.getElementById("latency-source");
+  const src = sel && sel.value ? sel.value : "";
+  if (!src) return null;
+  const matrix = (STATE.snapshot && STATE.snapshot.latency_matrix) || {};
+  const map = buildDisplayToLatency();
+  const srcL = map[src.toLowerCase()];
+  const dstL = map[String(regionName).toLowerCase()];
+  if (!srcL || !dstL || !matrix[srcL]) return null;
+  const ms = matrix[srcL][dstL];
+  return (ms == null) ? null : ms;
+}
+
+function _scoreRegionForBom(r) {
+  const dep = getDeploymentVerdictInfo(r);
+  const conf = dep.confidence || (r._conf && r._conf.tier) || "metadata";
+  const verdictRank = _VERDICT_RANK[dep.verdict] != null ? _VERDICT_RANK[dep.verdict] : 3;
+  const confRank = _CONF_RANK[conf] != null ? _CONF_RANK[conf] : 2;
+  const quotaBucket = _quotaFilterBucket(r);
+  const quotaRank = _QUOTA_RANK[quotaBucket] != null ? _QUOTA_RANK[quotaBucket] : 1;
+  const azRank = (_regionSupportsAz(r) === false) ? 1 : 0;
+  const remediation = ((dep.blockers || []).length) + ((dep.constraints || []).length);
+  const unverifiablePenalty = (dep.liveNote === "unverifiable") ? 1 : 0;
+  const latency = _latencyForRegion(r.name);
+  const cost = Number(r.est_monthly) || 0;
+  // Composite: verdict dominates, then confidence, quota, remediation, AZ.
+  const score = verdictRank * 1000
+    + confRank * 120
+    + quotaRank * 80
+    + unverifiablePenalty * 60
+    + remediation * 15
+    + azRank * 8;
+  return { r, dep, conf, verdictRank, quotaBucket, azRank, remediation, latency, cost, score };
+}
+
+function _rankRegionsForBom() {
+  const regions = (STATE.snapshot && STATE.snapshot.regions) || [];
+  const scored = regions.map(_scoreRegionForBom);
+  scored.sort((a, b) => {
+    if (a.score !== b.score) return a.score - b.score;
+    // Tie-breakers: lower latency (if known), then lower cost, then name.
+    const al = a.latency == null ? Infinity : a.latency;
+    const bl = b.latency == null ? Infinity : b.latency;
+    if (al !== bl) return al - bl;
+    if (a.cost !== b.cost) return a.cost - b.cost;
+    return String(a.r.name).localeCompare(String(b.r.name));
+  });
+  return scored;
+}
+
+function _bestRegionTradeoffs(s) {
+  const bits = [];
+  const dep = s.dep;
+  bits.push({ label: dep.text, cls: `chip-verdict ${dep.cls}` });
+  const cb = _confidenceBadge(dep);
+  if (cb) bits.push({ label: cb.text + " confidence", cls: `chip-conf ${cb.cls}` });
+  const quotaTxt = { sufficient: "Quota OK", insufficient: "Quota short", unknown: "Quota unknown" }[s.quotaBucket] || "Quota unknown";
+  bits.push({ label: quotaTxt, cls: s.quotaBucket === "sufficient" ? "chip-ok" : (s.quotaBucket === "insufficient" ? "chip-bad" : "chip-warn") });
+  bits.push({ label: s.azRank ? "No AZs (regional)" : "AZ-enabled", cls: s.azRank ? "chip-warn" : "chip-ok" });
+  if (s.latency != null) bits.push({ label: `${s.latency} ms`, cls: s.latency < 50 ? "chip-ok" : (s.latency < 120 ? "chip-warn" : "chip-bad") });
+  if (s.cost) bits.push({ label: `${_fmtMoney(s.cost, (PRICING.estimate && PRICING.estimate.currency) || "USD")}/mo`, cls: "chip-neutral" });
+  return bits;
+}
+
+function renderBestRegionPanel() {
+  const el = document.getElementById("best-region-panel");
+  if (!el) return;
+  const ranked = _rankRegionsForBom();
+  if (!ranked.length) { el.classList.add("hidden"); el.innerHTML = ""; return; }
+
+  const top = ranked.slice(0, 3);
+  const best = top[0];
+  const cards = top.map((s, i) => {
+    const chips = _bestRegionTradeoffs(s).map(c => `<span class="br-chip ${c.cls}">${escapeHtml(c.label)}</span>`).join("");
+    const remedy = s.remediation
+      ? `<div class="br-remedy">${s.remediation} item${s.remediation === 1 ? "" : "s"} to address — open region for the plan</div>`
+      : `<div class="br-remedy br-remedy--ok">No blockers or constraints</div>`;
+    return `<div class="br-card${i === 0 ? " br-card--best" : ""}" data-region-short="${escapeHtml(s.r.short || "")}">
+        <div class="br-rank">${i === 0 ? "★ Best match" : "#" + (i + 1)}</div>
+        <div class="br-name">${escapeHtml(s.r.name)}</div>
+        <div class="br-geo">${escapeHtml(s.r.geo || "")}${s.r.country ? " • " + escapeHtml(s.r.country) : ""}</div>
+        <div class="br-chips">${chips}</div>
+        ${remedy}
+        <button type="button" class="btn btn--sm br-open" data-region-short="${escapeHtml(s.r.short || "")}">View details →</button>
+      </div>`;
+  }).join("");
+
+  const heading = best.verdictRank === 0
+    ? `<span class="br-good">✅ ${escapeHtml(best.r.name)} is your best fit</span>`
+    : `<span class="br-warn">⚠️ No region is fully clean — ${escapeHtml(best.r.name)} is the closest</span>`;
+
+  el.innerHTML = `
+    <div class="br-header">
+      <div class="br-header-top">
+        <div class="br-title">Best regions for your BOM
+          <button type="button" class="br-legend-btn" id="br-legend-btn" title="What do the confidence levels mean?">ⓘ What do the levels mean?</button>
+        </div>
+        <div class="br-actions">
+          <button type="button" class="btn btn--sm" id="br-verify-cta" title="Run a read-only live probe across all regions to raise confidence">⚡ Raise confidence</button>
+          <button type="button" class="btn btn--sm btn--primary" id="br-deploy-plan" title="Download a customer-ready deployment plan">📄 Deploy plan</button>
+        </div>
+      </div>
+      <div class="br-lead">${heading} <span class="br-sub">ranked by readiness, confidence, quota, latency & cost</span></div>
+    </div>
+    <div class="br-cards">${cards}</div>`;
+  el.classList.remove("hidden");
+  el.querySelectorAll(".br-open").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const short = btn.getAttribute("data-region-short");
+      const region = _findRegionByShort(short);
+      if (region) openDrilldown(region);
+    });
+  });
+  const legendBtn = document.getElementById("br-legend-btn");
+  if (legendBtn) legendBtn.addEventListener("click", _openConfidenceLegend);
+  const verifyCta = document.getElementById("br-verify-cta");
+  if (verifyCta) verifyCta.addEventListener("click", () => {
+    switchView("regions");
+    if (typeof switchRegionsSub === "function") switchRegionsSub("table");
+    verifyAllRegions();
+  });
+  const planBtn = document.getElementById("br-deploy-plan");
+  if (planBtn) planBtn.addEventListener("click", exportDeployPlan);
+}
+
+// -------------------------------------------------- Confidence legend popover
+const _CONF_LEGEND = [
+  { cls: "conf-validated", text: "Verified live", desc: "A live per-subscription check confirmed the constrained tiers can (or cannot) deploy. Highest confidence." },
+  { cls: "conf-capability", text: "ARM metadata", desc: "Backed by ARM SKU / provider / quota metadata from the last analysis. Run “Raise confidence” for a live confirmation." },
+  { cls: "conf-metadata", text: "Baseline", desc: "Region/BOM baseline only — no ARM capability data. Re-run analysis for full signals." },
+  { cls: "conf-unverifiable", text: "Unverifiable", desc: "A live check was attempted but couldn’t determine deployability (restricted subscription, throttling, or no authoritative API). Treat with caution." },
+];
+
+function _openConfidenceLegend() {
+  let overlay = document.getElementById("conf-legend-overlay");
+  if (overlay) { overlay.classList.remove("hidden"); return; }
+  overlay = document.createElement("div");
+  overlay.id = "conf-legend-overlay";
+  overlay.className = "conf-legend-overlay";
+  const rows = _CONF_LEGEND.map(t =>
+    `<li><span class="conf-legend-key"><span class="conf-dot ${t.cls}"></span><span class="conf-badge ${t.cls}">${escapeHtml(t.text)}</span></span><span class="conf-legend-desc">${escapeHtml(t.desc)}</span></li>`
+  ).join("");
+  overlay.innerHTML = `<div class="conf-legend-modal" role="dialog" aria-label="Confidence levels">
+      <div class="conf-legend-head">
+        <strong>How confident is each verdict?</strong>
+        <button type="button" class="conf-legend-close" aria-label="Close">✕</button>
+      </div>
+      <p class="muted">The colored <span class="conf-dot conf-validated" style="vertical-align:middle"></span> dot beside each region's verdict — in the <strong>Regions&nbsp;→&nbsp;Table</strong> and on each best-region card — shows how strong the evidence behind that verdict is:</p>
+      <ul class="conf-legend-list">${rows}</ul>
+      <p class="muted conf-legend-foot">Use <strong>⚡ Raise confidence</strong> to run read-only live probes across every region — it creates nothing.</p>
+    </div>`;
+  document.body.appendChild(overlay);
+  const close = () => overlay.classList.add("hidden");
+  overlay.addEventListener("click", (ev) => { if (ev.target === overlay) close(); });
+  overlay.querySelector(".conf-legend-close").addEventListener("click", close);
+}
+
+// ------------------------------------------------------ Deploy plan (export)
+// A customer-ready Markdown plan: chosen region + runner-ups, per-region
+// verdict/confidence, the consolidated remediation plan with ETAs, and any
+// filed support tickets. This is the artifact a customer hands to their cloud
+// team to actually execute the deployment.
+function _mdEscape(s) { return String(s == null ? "" : s).replace(/\|/g, "\\|"); }
+
+function exportDeployPlan() {
+  const snap = STATE.snapshot;
+  const regions = (snap && snap.regions) || [];
+  if (!regions.length) { showToast("Run an analysis first — no regions to plan.", "warning"); return; }
+  const meta = (snap && snap.meta) || {};
+  const ranked = _rankRegionsForBom();
+  const best = ranked[0];
+  const genDate = _quotaRemediationGeneratedDate(snap);
+  const bomName = (STATE.activeBomId && typeof getBomMeta === "function" && (getBomMeta(STATE.activeBomId) || {}).name)
+    || meta.customer_name || "Azure BOM";
+  const subLabel = _supportSubLabel(focusedSubscriptionId());
+  const cur = (PRICING.estimate && PRICING.estimate.currency) || "USD";
+
+  const L = [];
+  L.push(`# Azure Deployment Plan — ${bomName}`);
+  L.push("");
+  L.push(`- **Generated:** ${genDate}`);
+  L.push(`- **Subscription:** ${subLabel}`);
+  if (meta.customer_name) L.push(`- **Customer:** ${meta.customer_name}`);
+  L.push(`- **Regions analyzed:** ${regions.length}`);
+  L.push("");
+
+  // Recommendation
+  L.push(`## Recommendation`);
+  if (best) {
+    const clean = best.verdictRank === 0;
+    L.push(clean
+      ? `**Deploy to ${best.r.name}** — it meets every requirement in your BOM.`
+      : `**${best.r.name}** is the closest fit, but no region is fully clean. Address the items below or accept the noted constraints.`);
+    L.push("");
+    L.push(`| Rank | Region | Verdict | Confidence | Quota | AZs | Est. $/mo | To address |`);
+    L.push(`|------|--------|---------|-----------|-------|-----|-----------|-----------|`);
+    ranked.slice(0, 5).forEach((s, i) => {
+      const cb = _confidenceBadge(s.dep);
+      const quotaTxt = { sufficient: "OK", insufficient: "Short", unknown: "Unknown" }[s.quotaBucket] || "Unknown";
+      const az = s.azRank ? "No AZs" : "AZ-enabled";
+      const cost = s.cost ? _fmtMoney(s.cost, cur) : "—";
+      L.push(`| ${i === 0 ? "★ 1" : i + 1} | ${_mdEscape(s.r.name)} | ${_mdEscape(s.dep.text)} | ${_mdEscape(cb.text)} | ${quotaTxt} | ${az} | ${cost} | ${s.remediation} |`);
+    });
+    L.push("");
+  }
+
+  // Remediation plan
+  const plan = _buildRemediationPlan();
+  L.push(`## Remediation plan`);
+  if (!plan.length) {
+    L.push(`No blockers across the analyzed regions — the BOM can deploy as-is. 🎉`);
+  } else {
+    L.push(`| Action | Typical lead time | Affected regions |`);
+    L.push(`|--------|-------------------|------------------|`);
+    plan.forEach(g => {
+      const m = _REMEDIATION_META[g.type] || _REMEDIATION_META.other;
+      const rgs = Array.from(g.regions.values()).join(", ");
+      L.push(`| ${_mdEscape(m.label)} | ${_mdEscape(m.eta)} | ${_mdEscape(rgs)} |`);
+    });
+    L.push("");
+    L.push(`> Lead times are typical Azure turnarounds and vary by region, SKU and subscription.`);
+  }
+  L.push("");
+
+  // Filed tickets
+  const tickets = (SUPPORT.tickets || []).filter(t => {
+    const st = String(t.status || "").toLowerCase();
+    return st && st !== "preview" && st !== "draft";
+  });
+  if (tickets.length) {
+    L.push(`## Support tickets filed`);
+    L.push(`| Ticket | Type | Status | Created |`);
+    L.push(`|--------|------|--------|---------|`);
+    tickets.forEach(t => {
+      L.push(`| ${_mdEscape(t.azure_ticket_id || t.ticket_name || "—")} | ${_mdEscape(t.kind || t.type || "—")} | ${_mdEscape(t.azure_status || t.status || "—")} | ${_mdEscape((t.created_at || "").slice(0, 10))} |`);
+    });
+    L.push("");
+  }
+
+  L.push(`---`);
+  L.push(`_Generated by the Azure BOM Region Support Dashboard. Verdicts reflect ARM capability metadata plus any live per-subscription verifications; confirm with a fresh analysis before deploying._`);
+
+  const blob = new Blob([L.join("\n")], { type: "text/markdown" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `deploy-plan-${snapshotStamp()}.md`;
+  a.click();
+  URL.revokeObjectURL(url);
+  showToast("Deploy plan downloaded (Markdown).", "success");
+}
+
+// -------------------------------------------------- Overview cockpit strip
+// A compact strip above the donuts: snapshot freshness (with a stale nudge)
+// and quota headroom at a glance, so the customer sees trust + capacity
+// without leaving the Overview.
+function _snapshotAgeDays(snap) {
+  const meta = (snap && snap.meta) || {};
+  const iso = meta.compiled_at || meta.created_at || "";
+  if (!iso) return null;
+  const dt = new Date(iso);
+  if (Number.isNaN(dt.getTime())) return null;
+  return Math.floor((Date.now() - dt.getTime()) / 86400000);
+}
+
+function renderOverviewCockpit() {
+  const el = document.getElementById("overview-cockpit");
+  if (!el) return;
+  const snap = STATE.snapshot;
+  const regions = (snap && snap.regions) || [];
+  if (!regions.length) { el.classList.add("hidden"); el.innerHTML = ""; return; }
+
+  const ageDays = _snapshotAgeDays(snap);
+  const stale = ageDays != null && ageDays >= 7;
+  let freshTxt, freshCls;
+  if (ageDays == null) { freshTxt = "Freshness unknown"; freshCls = "cockpit-warn"; }
+  else if (ageDays <= 0) { freshTxt = "Analyzed today"; freshCls = "cockpit-ok"; }
+  else if (ageDays === 1) { freshTxt = "Analyzed yesterday"; freshCls = "cockpit-ok"; }
+  else { freshTxt = `Analyzed ${ageDays} days ago`; freshCls = stale ? "cockpit-warn" : "cockpit-ok"; }
+
+  let suff = 0, insuff = 0, unk = 0;
+  regions.forEach(r => {
+    const b = _quotaFilterBucket(r);
+    if (b === "sufficient") suff++;
+    else if (b === "insufficient") insuff++;
+    else unk++;
+  });
+
+  // Live-verification coverage for the focused subscription.
+  const sub = focusedSubscriptionId() || "";
+  let verified = 0, inconclusive = 0;
+  regions.forEach(r => {
+    const c = PRICING.zonalCap[`${String(r.short).toLowerCase()}|${sub}`];
+    if (!c) return;
+    if (_zonalEntryConclusive(c)) verified++;
+    else if (c.status === "done" || c.status === "error") inconclusive++;
+  });
+
+  const staleNudge = stale
+    ? `<button type="button" class="cockpit-nudge" id="cockpit-verify">Raise confidence →</button>`
+    : "";
+  const inconclNote = inconclusive
+    ? ` <span class="cockpit-sub" title="A live probe ran but returned no definitive answer for these regions (restricted subscription, throttling, or no authoritative API)">· ${inconclusive} inconclusive</span>`
+    : "";
+  el.innerHTML = `
+    <div class="cockpit-chip ${freshCls}" title="Snapshot age from the last analysis">🕒 ${escapeHtml(freshTxt)}${staleNudge}</div>
+    <div class="cockpit-chip" title="Quota verdicts across analyzed regions">📊 Quota: <strong class="cockpit-ok-text">${suff}</strong> OK · <strong class="cockpit-bad-text">${insuff}</strong> short · ${unk} unknown</div>
+    <div class="cockpit-chip" title="Regions with a conclusive live per-subscription probe (definitive available/blocked/unavailable verdict)">⚡ Live-verified: <strong>${verified}</strong>/${regions.length}${inconclNote}</div>`;
+  el.classList.remove("hidden");
+  const nudge = document.getElementById("cockpit-verify");
+  if (nudge) nudge.addEventListener("click", () => {
+    switchView("regions");
+    if (typeof switchRegionsSub === "function") switchRegionsSub("table");
+    verifyAllRegions();
+  });
+}
+
+// Plain-language recommendation banner rendered above the Overview donuts.
+function renderOverviewReco() {
+  const el = document.getElementById("overview-reco");
+  if (!el) return;
+  const snap = STATE.snapshot;
+  const regions = (snap && snap.regions) || [];
+  if (!regions.length) { el.classList.add("hidden"); el.innerHTML = ""; return; }
+
+  const ready = regions.filter(r => r.deployment_health === "Yes");
+  const blocked = regions.filter(r => r.deployment_health !== "Yes");
+  const readyNames = ready.map(r => r.name);
+  // Prefer ready regions with the lowest latency footprint if available, else
+  // just list the first few alphabetically.
+  const topReady = readyNames.slice(0, 3);
+
+  // Summarize the dominant blocker reasons across blocked regions.
+  let quotaHits = 0, skuHits = 0, zoneHits = 0, svcHits = 0;
+  for (const r of blocked) {
+    if ((r.sku_blockers || []).length) skuHits++;
+    if (r.has_zone_restriction) zoneHits++;
+    if ((r.missing_services || []).length) svcHits++;
+  }
+  const subLabel = _supportSubLabel(focusedSubscriptionId());
+
+  const parts = [];
+  if (ready.length) {
+    parts.push(`<span class="reco-good">✅ ${ready.length} region${ready.length === 1 ? "" : "s"} ready to deploy</span>${topReady.length ? ` — e.g. <strong>${escapeHtml(topReady.join(", "))}</strong>` : ""}`);
+  } else {
+    parts.push(`<span class="reco-bad">⚠️ No region is fully ready for this BOM yet</span>`);
+  }
+  const reasonBits = [];
+  if (zoneHits) reasonBits.push(`${zoneHits} with zone/SKU restrictions`);
+  if (skuHits) reasonBits.push(`${skuHits} missing required SKUs`);
+  if (svcHits) reasonBits.push(`${svcHits} missing services`);
+  if (blocked.length) {
+    parts.push(`<span class="reco-warn">${blocked.length} need attention</span>${reasonBits.length ? ` (${escapeHtml(reasonBits.join(", "))})` : ""}`);
+  }
+
+  const action = blocked.length
+    ? `<button type="button" class="btn btn--sm" id="reco-open-support">Open a support ticket for a blocker →</button>`
+    : "";
+
+  el.innerHTML = `<div class="reco-line">${parts.join(" &nbsp;·&nbsp; ")}</div>
+    <div class="reco-sub">Subscription: <strong>${escapeHtml(subLabel)}</strong>${action ? " " + action : ""}</div>`;
+  el.classList.remove("hidden");
+  const btn = document.getElementById("reco-open-support");
+  if (btn) btn.addEventListener("click", () => switchView("support"));
+}
+
+// Create the #view-support container lazily as a sibling of #view-settings so
+// we don't have to hand-edit the views markup.
+function ensureSupportView() {
+  let el = document.getElementById("view-support");
+  if (el) return el;
+  const settings = document.getElementById("view-settings");
+  el = document.createElement("div");
+  el.className = "view hidden";
+  el.id = "view-support";
+  if (settings && settings.parentNode) settings.parentNode.insertBefore(el, settings.nextSibling);
+  else document.querySelector("main").appendChild(el);
+  return el;
+}
+
+async function renderSupportTab() {
+  const view = ensureSupportView();
+  view.classList.remove("hidden");  // switchView's loop ran before this existed
+  view.innerHTML = `<div class="support-loading">Loading support…</div>`;
+  try {
+    const [s, t] = await Promise.all([
+      apiJson("/api/support/settings"),
+      apiJson("/api/support/tickets"),
+    ]);
+    SUPPORT.settings = s.settings;
+    SUPPORT.tickets = t.tickets || [];
+    SUPPORT.loaded = true;
+  } catch (e) {
+    view.innerHTML = `<div class="support-error">Could not load support data: ${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  view.innerHTML = _supportHtml();
+  _wireSupportTab(view);
+  _updateSupportBadge();
+}
+
+function _updateSupportBadge() {
+  const badge = document.getElementById("support-tab-badge");
+  if (!badge) return;
+  // Count only genuinely open Azure tickets. Exclude local-only drafts
+  // ("preview"), failed submission attempts ("failed"/"error"), and anything
+  // closed/cancelled — none of those represent a live, open support request,
+  // so they must not inflate the badge (previously any non-"closed" status,
+  // including previews and failures, was counted).
+  const NON_OPEN = new Set(["preview", "draft", "failed", "error", "closed", "cancelled", "canceled", "deleted"]);
+  const open = (SUPPORT.tickets || []).filter(t => {
+    const st = String(t.status || "").toLowerCase();
+    const az = String(t.azure_status || "").toLowerCase();
+    return !NON_OPEN.has(st) && az !== "closed" && az !== "cancelled" && az !== "canceled";
+  }).length;
+  badge.textContent = String(open);
+  badge.classList.toggle("hidden", open === 0);
+}
+
+function _supportBlockedRegions() {
+  const regions = (STATE.snapshot && STATE.snapshot.regions) || [];
+  return regions.filter(r => r.deployment_health !== "Yes");
+}
+
+function _activeBomFamilies() {
+  const meta = (typeof getBomMeta === "function") ? getBomMeta(STATE.activeBomId) : null;
+  const skus = (meta && meta.required_skus) || [];
+  const out = [];
+  for (const s of skus) {
+    if (s.primary_family) out.push({ family: s.primary_family, label: s.primary_label || s.primary_family, cores: s.required_cores || 0 });
+    if (s.alt_family) out.push({ family: s.alt_family, label: s.alt_label || s.alt_family, cores: s.required_cores || 0 });
+  }
+  return out;
+}
+
+function _activeBomSubs() {
+  const meta = (typeof getBomMeta === "function") ? getBomMeta(STATE.activeBomId) : null;
+  const ids = (meta && meta.subscription_ids) || [];
+  return ids.length ? ids : (focusedSubscriptionId() ? [focusedSubscriptionId()] : []);
+}
+
+// ---------------------------------------------- Consolidated remediation plan
+// A cross-region view of every blocker grouped by the remediation action it
+// needs, with a typical Azure lead-time ETA and the affected regions. This
+// turns the per-region blocker list into an actionable, deduplicated plan.
+const _REMEDIATION_META = {
+  quota_insufficient: {
+    icon: "📊", label: "Request a quota increase",
+    eta: "Typically 1–3 business days", ticket: "quota",
+    how: "File a Compute-VM (cores/vCPUs) quota increase for the affected family.",
+  },
+  no_access: {
+    icon: "🔒", label: "Request zonal / restricted-SKU access",
+    eta: "Typically 3–5 business days", ticket: "technical",
+    how: "File a zonal access (subscription restriction) request for the SKU in the needed zones.",
+  },
+  zone_gap: {
+    icon: "⚠️", label: "Close an availability-zone gap",
+    eta: "Typically 3–5 business days", ticket: "technical",
+    how: "Request zonal access for the SKU, or accept the fallback SKU across all zones.",
+  },
+  sku_unavailable: {
+    icon: "⛔", label: "SKU not offered in region",
+    eta: "No ticket — choose an alternate region", ticket: "",
+    how: "This SKU isn't offered here. Pick an alternate region (see the region's suggestions) or a different family.",
+  },
+  missing_service: {
+    icon: "🚫", label: "Service not available in region",
+    eta: "No ticket — choose an alternate region", ticket: "",
+    how: "A required service isn't offered in this region. Deploy it in an alternate region.",
+  },
+  other: {
+    icon: "•", label: "Other checks to review",
+    eta: "Review manually", ticket: "",
+    how: "Open the region drilldown for details.",
+  },
+};
+
+function _buildRemediationPlan() {
+  const regions = (STATE.snapshot && STATE.snapshot.regions) || [];
+  const groups = new Map();
+  for (const r of regions) {
+    const dep = getDeploymentVerdictInfo(r);
+    (dep.blockers || []).forEach(b => {
+      const type = (b && b.type) || "other";
+      if (!groups.has(type)) groups.set(type, { type, regions: new Map(), messages: new Set() });
+      const g = groups.get(type);
+      g.regions.set(r.short || r.name, r.name);
+      if (b && b.message) g.messages.add(b.message);
+    });
+  }
+  // Order by remediation severity/priority.
+  const order = ["missing_service", "sku_unavailable", "no_access", "zone_gap", "quota_insufficient", "other"];
+  return order.filter(t => groups.has(t)).map(t => groups.get(t));
+}
+
+function _renderRemediationPlanHtml() {
+  const plan = _buildRemediationPlan();
+  if (!plan.length) {
+    return `<section class="support-section remediation-plan">
+      <h3>Remediation plan</h3>
+      <p class="muted">No blockers across the analyzed regions 🎉 Everything in your BOM can deploy as-is.</p>
+    </section>`;
+  }
+  const totalRegions = new Set();
+  plan.forEach(g => g.regions.forEach((_n, k) => totalRegions.add(k)));
+  const rows = plan.map(g => {
+    const meta = _REMEDIATION_META[g.type] || _REMEDIATION_META.other;
+    const regionChips = Array.from(g.regions.entries()).map(([short, name]) =>
+      `<button type="button" class="remedy-region-chip" data-remedy-region="${escapeHtml(short)}" data-remedy-kind="${meta.ticket}" title="${meta.ticket ? "Prefill a ticket for this region" : "Open region details"}">${escapeHtml(name)}</button>`
+    ).join("");
+    const action = meta.ticket
+      ? `<button type="button" class="btn btn--sm remedy-file-all" data-remedy-kind="${meta.ticket}" data-remedy-first="${escapeHtml(Array.from(g.regions.keys())[0] || "")}">File ${meta.ticket === "quota" ? "quota" : "access"} ticket →</button>`
+      : `<span class="muted">Alternate region recommended</span>`;
+    return `<tr>
+      <td class="remedy-action"><span class="remedy-icon">${meta.icon}</span> <strong>${escapeHtml(meta.label)}</strong>
+        <div class="remedy-how muted">${escapeHtml(meta.how)}</div></td>
+      <td class="remedy-eta">${escapeHtml(meta.eta)}</td>
+      <td class="remedy-regions">${regionChips}</td>
+      <td class="remedy-do">${action}</td>
+    </tr>`;
+  }).join("");
+  return `<section class="support-section remediation-plan">
+    <div class="support-section-head">
+      <h3>Remediation plan</h3>
+      <span class="muted">${plan.length} action type${plan.length === 1 ? "" : "s"} across ${totalRegions.size} region${totalRegions.size === 1 ? "" : "s"}</span>
+    </div>
+    <p class="muted">Every blocker grouped by the action it needs, with a typical Azure lead-time. Click a region to prefill its ticket.</p>
+    <table class="support-table remedy-table"><thead><tr>
+      <th>Action</th><th>Typical lead time</th><th>Affected regions</th><th></th>
+    </tr></thead><tbody>${rows}</tbody></table>
+  </section>`;
+}
+
+function _supportHtml() {
+  const s = SUPPORT.settings || {};
+  const demo = !!(APP_CONFIG && APP_CONFIG.demo_mode);
+  const blocked = _supportBlockedRegions();
+  const families = _activeBomFamilies();
+  const subs = _activeBomSubs();
+  const sevOpts = ["minimal", "moderate", "critical"]
+    .map(v => `<option value="${v}" ${((s.default_severity || "moderate") === v) ? "selected" : ""}>${v[0].toUpperCase() + v.slice(1)}</option>`).join("");
+
+  const regionOpts = (STATE.snapshot && STATE.snapshot.regions || [])
+    .slice().sort((a, b) => a.name.localeCompare(b.name))
+    .map(r => `<option value="${escapeHtml(r.short || "")}" data-blocked="${r.deployment_health !== "Yes" ? 1 : 0}">${escapeHtml(r.name)}${r.deployment_health !== "Yes" ? " ⚠" : ""}</option>`).join("");
+  const familyOpts = families.map(f => `<option value="${escapeHtml(f.family)}" data-label="${escapeHtml(f.label)}" data-cores="${f.cores}">${escapeHtml(f.label)} (${escapeHtml(f.family)})</option>`).join("")
+    || `<option value="">— no BOM families —</option>`;
+  const subOpts = subs.map(id => `<option value="${escapeHtml(id)}">${escapeHtml(_supportSubLabel(id))}</option>`).join("")
+    || `<option value="">— sign in / select a BOM —</option>`;
+
+  const blockersHtml = blocked.length
+    ? blocked.map(r => {
+        const reasons = [];
+        if (r.has_zone_restriction) reasons.push("zone/SKU restriction");
+        if ((r.sku_blockers || []).length) reasons.push(`${r.sku_blockers.length} SKU blocker(s)`);
+        if ((r.missing_services || []).length) reasons.push(`${r.missing_services.length} missing service(s)`);
+        return `<tr data-blocker-region="${escapeHtml(r.short || "")}">
+          <td>${escapeHtml(r.name)}</td>
+          <td>${escapeHtml(reasons.join(", ") || "needs validation")}</td>
+          <td class="support-blocker-actions">
+            <button type="button" class="btn btn--sm" data-prefill="quota" data-region="${escapeHtml(r.short || "")}">Quota ticket</button>
+            <button type="button" class="btn btn--sm" data-prefill="technical" data-region="${escapeHtml(r.short || "")}">Access ticket</button>
+          </td></tr>`;
+      }).join("")
+    : `<tr><td colspan="3" class="muted">No blocked regions in the current analysis 🎉</td></tr>`;
+
+  const sortedBlocked = blocked.slice().sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  const defaultBlockerRegion = sortedBlocked.length ? (sortedBlocked[0].short || "") : "";
+  const blockerFilterOpts = blocked.length
+    ? sortedBlocked
+        .map(r => `<option value="${escapeHtml(r.short || "")}" ${(r.short || "") === defaultBlockerRegion ? "selected" : ""}>${escapeHtml(r.name || r.short || "")}</option>`).join("")
+      + `<option value="">All blocked regions (${blocked.length})</option>`
+    : "";
+
+  return `
+  <div class="support-wrap">
+    <!-- tracked tickets removed: submitted tickets surface in the live Azure list below -->
+    <div class="support-intro">
+      <h2>Support tickets</h2>
+      <p class="muted">Turn a deployment blocker into an Azure support request — a <strong>quota increase</strong>
+      or a <strong>zonal / restricted-SKU access</strong> ticket. Preview builds the exact request with no Azure call;
+      submitting files it via <code>Microsoft.Support</code>.${demo ? " <strong>Demo mode: submission is disabled.</strong>" : ""}</p>
+    </div>
+
+    ${_renderRemediationPlanHtml()}
+
+    <section class="support-section">
+      <div class="support-section-head">
+        <h3>Blockers in the current analysis</h3>
+        ${blocked.length ? `<label class="support-blocker-filter">Region
+          <select id="support-blocker-filter">${blockerFilterOpts}</select>
+        </label>` : ""}
+      </div>
+      <table class="support-table"><thead><tr><th>Region</th><th>Why it's blocked</th><th>Create ticket</th></tr></thead>
+      <tbody id="support-blockers-body">${blockersHtml}</tbody></table>
+    </section>
+
+    <section class="support-section">
+      <h3>New ticket</h3>
+      <div class="support-form-grid">
+        <label>Type
+          <select id="sup-kind">
+            <option value="quota">Quota increase</option>
+            <option value="technical">Zonal / SKU access (restriction)</option>
+          </select></label>
+        <label>Subscription <select id="sup-sub">${subOpts}</select></label>
+        <label>Region <select id="sup-region">${regionOpts}</select></label>
+        <label>SKU family <select id="sup-family">${familyOpts}</select></label>
+        <label id="sup-limit-wrap">New vCPU limit <input type="number" id="sup-limit" min="1" value="100" />
+          <small class="sup-limit-info muted" id="sup-limit-info"></small></label>
+        <label id="sup-zones-wrap" class="hidden">Zones (comma-sep) <input type="text" id="sup-zones" placeholder="1,2,3" /></label>
+        <label>Severity <select id="sup-sev">${sevOpts}</select></label>
+      </div>
+      <div class="support-form-actions">
+        <button type="button" class="btn" id="sup-preview">Preview (dry-run)</button>
+        <button type="button" class="btn btn--accent" id="sup-submit" ${demo ? "disabled title='Disabled in demo mode'" : ""}>Submit to Azure</button>
+      </div>
+      <pre class="support-preview hidden" id="sup-preview-box"></pre>
+    </section>
+
+    <section class="support-section">
+      <div class="support-section-head">
+        <h3>Active Azure tickets on this subscription</h3>
+        <div class="support-section-head-tools">
+          <label class="support-inline-filter">Show
+            <select id="sup-azure-filter">
+              <option value="open" selected>Open only</option>
+              <option value="closed">Closed only</option>
+              <option value="all">All</option>
+            </select>
+          </label>
+          <button type="button" class="btn btn--sm" id="sup-azure-refresh">↻ Refresh</button>
+        </div>
+      </div>
+      <p class="muted">Pulled live from Azure — support tickets on your BOM subscription(s), including any created from this dashboard.</p>
+      <table class="support-table"><thead><tr>
+        <th>Type</th><th>Title</th><th>Severity</th><th>Status</th><th>Created</th><th></th>
+      </tr></thead><tbody id="support-azure-tickets-body">
+        <tr><td colspan="6" class="muted">Loading live tickets from Azure…</td></tr>
+      </tbody></table>
+    </section>
+  </div>`;
+}
+
+function _supportAzureTicketRow(t) {
+  const created = (t.created_at || "").replace("T", " ").replace("Z", "").slice(0, 19);
+  const status = String(t.azure_status || "");
+  const isClosed = status.toLowerCase() === "closed";
+  const statusPill = status
+    ? `<span class="pill ${isClosed ? "pill-ok" : "pill-warn"}">${escapeHtml(status)}</span>`
+    : `<span class="pill pill-muted">—</span>`;
+  const closeBtn = isClosed
+    ? ""
+    : `<button type="button" class="btn btn--sm" data-azure-ticket-close="${escapeHtml(t.ticket_name || "")}" data-azure-ticket-sub="${escapeHtml(t.subscription_id || "")}" data-azure-ticket-title="${escapeHtml(t.title || t.ticket_name || "")}">Close</button>`;
+  return `<tr>
+    <td>${escapeHtml(t.kind || "support")}</td>
+    <td title="${escapeHtml(t.ticket_name || "")}">${escapeHtml(t.title || t.ticket_name || "")}</td>
+    <td>${escapeHtml(t.severity || "")}</td>
+    <td>${statusPill}</td>
+    <td>${escapeHtml(created)}</td>
+    <td class="support-ticket-actions">${closeBtn}</td>
+  </tr>`;
+}
+
+// Real-time pull of Azure support tickets already on the BOM subscription(s),
+// excluding the ones this dashboard created (tracked locally).
+async function _supportLoadAzureTickets() {
+  const body = document.getElementById("support-azure-tickets-body");
+  if (!body) return;
+  const filterSel = document.getElementById("sup-azure-filter");
+  const filter = (filterSel && filterSel.value) || "open";
+  const subs = _activeBomSubs().filter(Boolean);
+  if (!subs.length) {
+    body.innerHTML = `<tr><td colspan="6" class="muted">Sign in and select a BOM to see live tickets.</td></tr>`;
+    return;
+  }
+  body.innerHTML = `<tr><td colspan="6" class="muted"><span class="quota-request-spinner" aria-hidden="true"></span> Loading live tickets from Azure…</td></tr>`;
+
+  const seen = new Set();
+  const collected = [];
+  const errors = [];
+  // Always fetch every ticket (open + closed) so the client-side filter can
+  // switch between Open / Closed / All without re-hitting Azure.
+  await Promise.all(subs.map(async (subId) => {
+    try {
+      const res = await apiJson(`/api/support/azure-tickets?subscription_id=${encodeURIComponent(subId)}&open_only=false`);
+      for (const t of (res.tickets || [])) {
+        const key = String(t.ticket_name || t.azure_ticket_id || "").toLowerCase();
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        collected.push(t);
+      }
+    } catch (e) {
+      errors.push({ subId, message: e.message || String(e) });
+    }
+  }));
+
+  collected.sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+
+  const isClosed = (t) => String(t.azure_status || "").toLowerCase() === "closed";
+  const filtered = collected.filter(t => {
+    if (filter === "closed") return isClosed(t);
+    if (filter === "all") return true;
+    return !isClosed(t);
+  });
+
+  if (!filtered.length) {
+    const label = filter === "closed" ? "closed" : filter === "all" ? "" : "active";
+    const note = errors.length && !collected.length
+      ? `Could not load tickets for ${errors.length} subscription(s): ${escapeHtml(errors[0].message)}`
+      : `No other ${label ? label + " " : ""}Azure support tickets on this subscription.`;
+    body.innerHTML = `<tr><td colspan="6" class="muted">${note}</td></tr>`;
+    return;
+  }
+  let html = filtered.map(_supportAzureTicketRow).join("");
+  if (errors.length) {
+    html += `<tr><td colspan="6" class="muted">Note: ${errors.length} subscription(s) could not be read (${escapeHtml(errors[0].message)}).</td></tr>`;
+  }
+  body.innerHTML = html;
+}
+
+// Close an Azure support ticket straight from the live list.
+async function _supportCloseAzureTicket(ticketName, subId, title, btn) {
+  ticketName = (ticketName || "").trim();
+  subId = (subId || "").trim();
+  if (!ticketName || !subId) { showToast("Missing ticket details to close.", "warning"); return; }
+  const label = title || ticketName;
+  if (!confirm(`Close Azure support ticket "${label}"?\n\nAzure only allows closing tickets that aren't actively assigned to an engineer.`)) return;
+  const original = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; btn.textContent = "Closing…"; }
+  try {
+    await apiJson("/api/support/azure-tickets/close", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subscription_id: subId, ticket_name: ticketName }),
+    });
+    showToast(`✓ Ticket closed: ${label}`, "success");
+    await _supportLoadAzureTickets();
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = original || "Close"; }
+    showToast(e.message || "Could not close the ticket.", "error");
+  }
+}
+
+function _supportTicketRow(t) {
+  const statusPill = _supportStatusPill(t);
+  const created = (t.created_at || "").replace("T", " ").replace("Z", "");
+  const canRefresh = !t.dry_run && t.status === "submitted";
+  return `<tr>
+    <td>${escapeHtml(t.kind || "")}</td>
+    <td title="${escapeHtml(t.ticket_name || "")}">${escapeHtml(t.title || "")}</td>
+    <td>${escapeHtml(t.region || "")}</td>
+    <td>${escapeHtml(t.severity || "")}</td>
+    <td>${statusPill}</td>
+    <td>${escapeHtml(created)}</td>
+    <td class="support-ticket-actions">
+      <button type="button" class="btn btn--sm" data-ticket-view="${escapeHtml(t.ticket_name || "")}">Payload</button>
+      ${canRefresh ? `<button type="button" class="btn btn--sm" data-ticket-refresh="${escapeHtml(t.ticket_name || "")}">Refresh</button>` : ""}
+    </td></tr>`;
+}
+
+function _supportStatusPill(t) {
+  if (t.dry_run) return `<span class="pill pill-muted">Preview</span>`;
+  const az = (t.azure_status || "").toLowerCase();
+  if (t.status === "failed") return `<span class="pill pill-fail">Failed</span>`;
+  if (az === "closed") return `<span class="pill pill-ok">Closed</span>`;
+  if (t.status === "submitted") return `<span class="pill pill-warn">Open${t.azure_status ? " · " + escapeHtml(t.azure_status) : ""}</span>`;
+  return `<span class="pill pill-muted">${escapeHtml(t.status || "—")}</span>`;
+}
+
+function _supportSyncKindFields() {
+  const kind = (document.getElementById("sup-kind") || {}).value;
+  const limitWrap = document.getElementById("sup-limit-wrap");
+  const zonesWrap = document.getElementById("sup-zones-wrap");
+  // Both quota and zonal ("technical") tickets need a target vCPU limit; only
+  // zonal needs the availability-zone list.
+  if (limitWrap) limitWrap.classList.remove("hidden");
+  if (zonesWrap) zonesWrap.classList.toggle("hidden", kind !== "technical");
+  _supportUpdateQuotaMath();
+}
+
+// Compute current-vs-needed quota math for the selected region + SKU family,
+// prefill the "New vCPU limit" with the recommended value (still user-editable),
+// and show the math as helper text under the field.
+function _supportUpdateQuotaMath(opts) {
+  opts = opts || {};
+  const kind = (document.getElementById("sup-kind") || {}).value;
+  const info = document.getElementById("sup-limit-info");
+  const limitInput = document.getElementById("sup-limit");
+  if (!info || !limitInput) return;
+  if (kind !== "quota" && kind !== "technical") { info.textContent = ""; return; }
+
+  const region = (document.getElementById("sup-region") || {}).value || "";
+  const familySel = document.getElementById("sup-family");
+  const family = (familySel || {}).value || "";
+  if (!region || !family) { info.textContent = ""; return; }
+
+  const row = _findQuotaRow(region, family);
+  let current = null;
+  let required = null;
+  if (row) {
+    if (row.subscription && row.subscription.limit != null) current = Number(row.subscription.limit);
+    if (row.required != null) required = Number(row.required);
+  }
+  if (required == null && familySel && familySel.selectedOptions[0]) {
+    const cores = Number(familySel.selectedOptions[0].getAttribute("data-cores"));
+    if (Number.isFinite(cores) && cores > 0) required = cores;
+  }
+  // Suggested alternatives aren't in the snapshot's quota rows; fall back to the
+  // real current limit captured from the live validation (stashed on the option).
+  if (current == null && familySel && familySel.selectedOptions[0]) {
+    const optLimit = Number(familySel.selectedOptions[0].getAttribute("data-current-limit"));
+    if (Number.isFinite(optLimit)) current = optLimit;
+  }
+
+  // Recommended new limit: reuse the same logic the quota buttons use when we
+  // have a full row; otherwise fall back to current + shortfall.
+  let recommended;
+  if (row) {
+    recommended = _quotaRequestLimitForRow(row);
+  } else if (current != null && required != null) {
+    recommended = _roundUpToNearest(Math.max(current + Math.max(0, required - current), required), 50);
+  } else if (required != null) {
+    recommended = required;
+  } else {
+    recommended = Number(limitInput.value) || 100;
+  }
+
+  // Prefill unless the user has manually typed a higher value this session.
+  if (opts.force || !limitInput.dataset.userEdited) {
+    limitInput.value = String(Math.round(recommended));
+  }
+
+  if (current != null && required != null) {
+    const shortfall = Math.max(0, required - current);
+    info.innerHTML = shortfall > 0
+      ? `Current limit <strong>${_formatQuotaNumber(current)}</strong> · BOM needs <strong>${_formatQuotaNumber(required)}</strong> → shortfall <strong>${_formatQuotaNumber(shortfall)}</strong>. New limit is the target ceiling, not the increase: <strong>${_formatQuotaNumber(current)}</strong> + <strong>${_formatQuotaNumber(shortfall)}</strong> = <strong>${_formatQuotaNumber(Math.round(recommended))}</strong> (editable).`
+      : `Current limit <strong>${_formatQuotaNumber(current)}</strong> already covers the BOM need of <strong>${_formatQuotaNumber(required)}</strong>. Prefilled <strong>${_formatQuotaNumber(Math.round(recommended))}</strong> for extra headroom (editable).`;
+  } else if (required != null) {
+    info.innerHTML = `BOM needs <strong>${_formatQuotaNumber(required)}</strong> vCPU for this SKU. Prefilled new limit <strong>${_formatQuotaNumber(Math.round(recommended))}</strong> (editable).`;
+  } else {
+    info.textContent = "";
+  }
+}
+
+function _supportGatherForm() {
+  const kind = (document.getElementById("sup-kind") || {}).value || "quota";
+  const familySel = document.getElementById("sup-family");
+  const opt = familySel && familySel.selectedOptions[0];
+  const body = {
+    kind,
+    subscription_id: (document.getElementById("sup-sub") || {}).value || "",
+    region: (document.getElementById("sup-region") || {}).value || "",
+    family: (document.getElementById("sup-family") || {}).value || "",
+    family_label: opt ? opt.getAttribute("data-label") : "",
+    severity: (document.getElementById("sup-sev") || {}).value || "moderate",
+  };
+  if (kind === "quota" || kind === "technical") {
+    body.new_limit = parseInt((document.getElementById("sup-limit") || {}).value || "0", 10);
+  }
+  if (kind === "technical") {
+    const z = ((document.getElementById("sup-zones") || {}).value || "").split(",").map(x => x.trim()).filter(Boolean);
+    if (z.length) body.zones = z;
+  }
+  if (STATE.activeBomId) body.bom_id = STATE.activeBomId;
+  return body;
+}
+
+async function _supportCreate(dryRun) {
+  const body = _supportGatherForm();
+  body.dry_run = dryRun;
+  if (!body.subscription_id) { showToast("Pick a subscription first.", "warning"); return; }
+  if (!body.region) { showToast("Pick a region first.", "warning"); return; }
+  if (!body.family) { showToast("Pick a SKU family first.", "warning"); return; }
+  if (body.kind === "technical" && !(body.zones && body.zones.length)) {
+    showToast("Enter at least one availability zone (e.g. 1,2,3) for a zonal access ticket.", "warning"); return;
+  }
+  if ((body.kind === "quota" || body.kind === "technical") && !(body.new_limit > 0)) {
+    showToast("Enter a target vCPU limit.", "warning"); return;
+  }
+  if (!dryRun && !confirm(`Submit a real ${body.kind} support ticket to Azure for ${body.region}?`)) return;
+  const box = document.getElementById("sup-preview-box");
+  try {
+    const res = await apiJson("/api/support/tickets", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    const ticket = res.ticket;
+    if (dryRun) {
+      SUPPORT.lastPreview = ticket;
+      if (box) { box.textContent = JSON.stringify(ticket.payload, null, 2); box.classList.remove("hidden"); }
+      showToast("Preview built (no Azure call).", "success");
+    } else {
+      showToast(`Ticket submitted: ${ticket.azure_ticket_id || ticket.ticket_name}`, "success");
+      _autoRecheckAfterTicket(body.kind, body.region, body.subscription_id);
+    }
+    await _supportReloadTickets();
+  } catch (e) {
+    showToast(`Ticket failed: ${e.message}`, "error");
+    if (box && e.body) { box.textContent = JSON.stringify(e.body, null, 2); box.classList.remove("hidden"); }
+  }
+}
+
+async function _supportReloadTickets() {
+  try {
+    const t = await apiJson("/api/support/tickets");
+    SUPPORT.tickets = t.tickets || [];
+    _updateSupportBadge();
+    _supportLoadAzureTickets();
+  } catch (e) { /* ignore */ }
+}
+
+// After a ticket is filed, automatically re-verify the affected region so the
+// dashboard reflects the new state as soon as access is granted. Zonal/SKU
+// access tickets are re-checked live (the authoritative capability API); quota
+// tickets need a full analysis re-run, so we tell the user rather than imply a
+// live confirmation we can't make.
+async function _autoRecheckAfterTicket(kind, regionShort, sub) {
+  const region = _findRegionByShort(regionShort);
+  if (!region) return;
+  const subId = sub || focusedSubscriptionId() || "";
+  if (kind === "technical") {
+    const key = `${String(regionShort).toLowerCase()}|${subId}`;
+    delete PRICING.zonalCap[key];  // force a fresh probe (don't reuse cached "blocked")
+    showToast(`Re-checking ${region.name} live…`, "info");
+    try { await _verifyZonalForRegion(region); } catch (_e) {}
+    applyFilters();
+    _persistVerifyAll(subId).catch(() => {});
+    const entry = PRICING.zonalCap[key];
+    const stillBlocked = entry && entry.map && Object.values(entry.map)
+      .some(v => v && (v.verdict === "blocked" || v.verdict === "unavailable"));
+    if (entry && entry.status === "done") {
+      showToast(stillBlocked
+        ? `${region.name}: still restricted — access usually takes 3–5 business days to apply.`
+        : `${region.name}: access looks granted — verdict updated ✅`, stillBlocked ? "warning" : "success");
+    }
+  } else if (kind === "quota") {
+    showToast(`${region.name}: quota changes apply after approval — re-run analysis to refresh quota verdicts.`, "info");
+  }
+}
+
+async function _supportSaveSettings() {
+  const status = document.getElementById("set-status");
+  const body = {
+    contact_first_name: (document.getElementById("set-first") || {}).value || "",
+    contact_last_name: (document.getElementById("set-last") || {}).value || "",
+    primary_email: (document.getElementById("set-email") || {}).value || "",
+    additional_emails: (document.getElementById("set-cc") || {}).value || "",
+    phone: (document.getElementById("set-phone") || {}).value || "",
+    country: (document.getElementById("set-country") || {}).value || "US",
+    preferred_timezone: (document.getElementById("set-tz") || {}).value || "",
+    default_severity: (document.getElementById("set-sev") || {}).value || "moderate",
+  };
+  if (status) status.textContent = "Saving…";
+  try {
+    const res = await apiJson("/api/support/settings", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    SUPPORT.settings = res.settings;
+    APP_CONFIG.support_configured = res.configured;
+    if (status) status.textContent = res.configured ? "✓ Saved" : "Saved (email + name needed to submit)";
+    showToast("Support settings saved.", "success");
+  } catch (e) {
+    if (status) status.textContent = `❌ ${e.message}`;
+  }
+}
+
+async function _supportViewPayload(name) {
+  const box = document.getElementById("sup-preview-box");
+  try {
+    const res = await apiJson(`/api/support/tickets/${encodeURIComponent(name)}`);
+    if (box) { box.textContent = JSON.stringify(res.ticket.payload, null, 2); box.classList.remove("hidden"); box.scrollIntoView({ behavior: "smooth", block: "nearest" }); }
+  } catch (e) { showToast(e.message, "error"); }
+}
+
+async function _supportRefreshTicket(name) {
+  try {
+    await apiJson(`/api/support/tickets/${encodeURIComponent(name)}`, { method: "POST" });
+    await _supportReloadTickets();
+    showToast("Ticket status refreshed.", "success");
+  } catch (e) { showToast(e.message, "error"); }
+}
+
+async function _supportWipe() {
+  if (!confirm("Delete ALL local snapshots and analysis history? Support settings are kept. This cannot be undone.")) return;
+  try {
+    const r = await apiJson("/api/local-state/wipe", { method: "POST" });
+    showToast(`Wiped ${r.snapshots_removed} snapshot(s).`, "success");
+    location.reload();
+  } catch (e) { showToast(e.message, "error"); }
+}
+
+// Open the snapshots folder in the OS file explorer — only works when the
+// dashboard is self-hosted locally (the server shares the user's desktop).
+async function _openSnapshotsFolder() {
+  const status = document.getElementById("owner-snapshots-status");
+  if (status) status.textContent = "Opening…";
+  try {
+    const r = await apiJson("/api/local-state/open-folder", { method: "POST" });
+    if (status) status.textContent = `Opened ${r.path}`;
+  } catch (e) {
+    if (status) status.textContent = "";
+    showToast(e.message || "Could not open the folder.", "error");
+  }
+}
+
+// Download all snapshots as a zip. Works in both local and hosted mode — in the
+// hosted app this is the portable substitute for "open the folder".
+async function _downloadSnapshots() {
+  const status = document.getElementById("owner-snapshots-status");
+  if (status) status.textContent = "Preparing download…";
+  try {
+    const res = await apiFetch("/api/snapshots/export");
+    if (!res.ok) {
+      let msg = res.statusText;
+      try { const b = await res.json(); msg = (b && (b.message || b.error)) || msg; } catch (e) {}
+      throw new Error(msg);
+    }
+    const blob = await res.blob();
+    let filename = "bom-snapshots.zip";
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = /filename="?([^"]+)"?/.exec(cd);
+    if (m) filename = m[1];
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    if (status) status.textContent = "Downloaded.";
+  } catch (e) {
+    if (status) status.textContent = "";
+    showToast(e.message || "Could not download snapshots.", "error");
+  }
+}
+
+// Import a previously downloaded snapshots .zip back into your session/history.
+async function _importSnapshots(file) {
+  const status = document.getElementById("owner-snapshots-status");
+  if (!file) return;
+  if (status) status.textContent = "Importing…";
+  try {
+    const fd = new FormData();
+    fd.append("file", file, file.name || "snapshots.zip");
+    const res = await apiFetch("/api/snapshots/import", { method: "POST", body: fd });
+    if (!res.ok) {
+      let msg = res.statusText;
+      try { const b = await res.json(); msg = (b && (b.message || b.error)) || msg; } catch (e) {}
+      throw new Error(msg);
+    }
+    const r = await res.json();
+    const bomsMsg = r.boms ? `, ${r.boms} BOM(s)` : "";
+    if (status) status.textContent = `Imported ${r.imported} snapshot(s)${bomsMsg}.`;
+    showToast(`Imported ${r.imported} snapshot(s)${bomsMsg}${r.skipped ? `, ${r.skipped} skipped` : ""}.`, "success");
+    // Persist the restored state to the browser (hosted mode) before reloading
+    // so the imported history survives the refresh, then reload to show it.
+    if (typeof _stateSyncEnabled === "function" && _stateSyncEnabled()) {
+      try { await saveStateToLocal(); } catch (e) {}
+    }
+    setTimeout(() => location.reload(), 600);
+  } catch (e) {
+    if (status) status.textContent = "";
+    showToast(e.message || "Could not import snapshots.", "error");
+  }
+}
+
+function _supportPrefill(kind, regionShort, opts) {
+  opts = opts || {};
+  switchView("support");
+  setTimeout(() => {
+    const kindSel = document.getElementById("sup-kind");
+    const regionSel = document.getElementById("sup-region");
+    if (kindSel) kindSel.value = kind;
+    if (regionSel) regionSel.value = regionShort;
+    _supportSyncKindFields();
+    const familySel = document.getElementById("sup-family");
+    if (familySel && opts.family) {
+      // Drop any previously-injected alternative so they don't accumulate.
+      Array.from(familySel.querySelectorAll("option[data-alt-injected]"))
+        .forEach(o => { if (o.value !== opts.family) o.remove(); });
+      let opt = Array.from(familySel.options).find(o => o.value === opts.family);
+      if (!opt) {
+        // The suggested alternative isn't a BOM family, so it isn't in the list.
+        // Inject it (carrying the cores + real current limit) so the ticket can
+        // target the alternative SKU, then select it.
+        opt = document.createElement("option");
+        opt.value = opts.family;
+        const lbl = opts.label || opts.family;
+        opt.textContent = `${lbl} (${opts.family}) — suggested alt`;
+        opt.setAttribute("data-label", lbl);
+        opt.setAttribute("data-alt-injected", "1");
+        familySel.appendChild(opt);
+      }
+      if (opts.cores != null && Number.isFinite(Number(opts.cores))) {
+        opt.setAttribute("data-cores", String(Math.round(Number(opts.cores))));
+      }
+      if (opts.currentLimit != null && Number.isFinite(Number(opts.currentLimit))) {
+        opt.setAttribute("data-current-limit", String(Math.round(Number(opts.currentLimit))));
+      }
+      familySel.value = opts.family;
+    }
+    const limitInput = document.getElementById("sup-limit");
+    if (limitInput) {
+      delete limitInput.dataset.userEdited;
+      if (opts.newLimit != null && Number.isFinite(Number(opts.newLimit))) {
+        limitInput.value = String(Math.round(Number(opts.newLimit)));
+      }
+    }
+    _supportUpdateQuotaMath({ force: true });
+    const box = document.getElementById("sup-create") || document.querySelector(".support-form-grid");
+    if (box) box.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, 60);
+}
+
+function _applyBlockerFilter(regionShort) {
+  const body = document.getElementById("support-blockers-body");
+  if (!body) return;
+  const want = (regionShort || "").toLowerCase();
+  body.querySelectorAll("tr[data-blocker-region]").forEach(tr => {
+    const r = (tr.getAttribute("data-blocker-region") || "").toLowerCase();
+    tr.classList.toggle("hidden", !!want && r !== want);
+  });
+}
+
+function _wireSupportTab(view) {
+  _supportSyncKindFields();
+  const kindSel = view.querySelector("#sup-kind");
+  if (kindSel) kindSel.addEventListener("change", _supportSyncKindFields);
+  const regionSel = view.querySelector("#sup-region");
+  if (regionSel) regionSel.addEventListener("change", () => _supportUpdateQuotaMath({ force: true }));
+  const familySel = view.querySelector("#sup-family");
+  if (familySel) familySel.addEventListener("change", () => _supportUpdateQuotaMath({ force: true }));
+  const limitInput = view.querySelector("#sup-limit");
+  if (limitInput) limitInput.addEventListener("input", () => { limitInput.dataset.userEdited = "1"; });
+  const blockerFilter = view.querySelector("#support-blocker-filter");
+  if (blockerFilter) {
+    blockerFilter.addEventListener("change", () => _applyBlockerFilter(blockerFilter.value));
+    // Default to a single region so the list doesn't fill the screen.
+    _applyBlockerFilter(blockerFilter.value);
+  }
+  const azureRefresh = view.querySelector("#sup-azure-refresh");
+  if (azureRefresh) azureRefresh.addEventListener("click", _supportLoadAzureTickets);
+  const azureFilter = view.querySelector("#sup-azure-filter");
+  if (azureFilter) azureFilter.addEventListener("change", _supportLoadAzureTickets);
+  const azureBody = view.querySelector("#support-azure-tickets-body");
+  if (azureBody) azureBody.addEventListener("click", (ev) => {
+    const btn = ev.target.closest("[data-azure-ticket-close]");
+    if (!btn) return;
+    _supportCloseAzureTicket(
+      btn.getAttribute("data-azure-ticket-close"),
+      btn.getAttribute("data-azure-ticket-sub"),
+      btn.getAttribute("data-azure-ticket-title"),
+      btn
+    );
+  });
+  _supportLoadAzureTickets();
+  const prev = view.querySelector("#sup-preview");
+  if (prev) prev.addEventListener("click", () => _supportCreate(true));
+  const sub = view.querySelector("#sup-submit");
+  if (sub) sub.addEventListener("click", () => _supportCreate(false));
+
+  view.querySelector("#support-blockers-body").addEventListener("click", (ev) => {
+    const btn = ev.target.closest("[data-prefill]");
+    if (!btn) return;
+    _supportPrefill(btn.getAttribute("data-prefill"), btn.getAttribute("data-region"));
+  });
+
+  // Remediation plan: region chips + "File ticket" buttons prefill the form.
+  const remedy = view.querySelector(".remediation-plan");
+  if (remedy) remedy.addEventListener("click", (ev) => {
+    const chip = ev.target.closest("[data-remedy-region]");
+    if (chip) {
+      const kind = chip.getAttribute("data-remedy-kind");
+      const region = chip.getAttribute("data-remedy-region");
+      if (kind) _supportPrefill(kind, region);
+      else { const r = _findRegionByShort(region); if (r) { switchView("regions"); openDrilldown(r); } }
+      return;
+    }
+    const fileBtn = ev.target.closest(".remedy-file-all");
+    if (fileBtn) {
+      _supportPrefill(fileBtn.getAttribute("data-remedy-kind"), fileBtn.getAttribute("data-remedy-first"));
+    }
+  });
+}
+
 // ---------------------------------------------------------------- Wiring
 
 function init() {
   // Sync persisted sidebar state from <html> marker class to .layout
   applySidebarStateFromStorage();
+  applyBomnavStateFromStorage();
 
   // Theme toggle: pre-paint inline script set the initial mode; this wires
   // up the button + system-preference watcher.
@@ -5119,6 +9452,7 @@ function init() {
   document.getElementById("btn-signout").addEventListener("click", doSignOut);
   document.getElementById("btn-switch-dir").addEventListener("click", doSwitchDirectory);
   document.getElementById("filters-handle").addEventListener("click", toggleSidebar);
+  document.getElementById("bomnav-handle").addEventListener("click", toggleBomnav);
   document.getElementById("clear-filters").addEventListener("click", clearAllFilters);
 
   document.getElementById("filter-search").addEventListener("input", applyFilters);
@@ -5135,7 +9469,9 @@ function init() {
     }
   });
   document.querySelectorAll('[data-filter="verdict"]').forEach(el => el.addEventListener("change", applyFilters));
-  document.getElementById("filter-v6-only").addEventListener("change", applyFilters);
+  document.querySelectorAll('[data-filter="quota"]').forEach(el => el.addEventListener("change", applyFilters));
+  document.querySelectorAll('[data-filter="az"]').forEach(el => el.addEventListener("change", applyFilters));
+  document.getElementById("filter-missing-services").addEventListener("change", applyFilters);
   document.getElementById("filter-v5-fallback").addEventListener("change", applyFilters);
   document.getElementById("filter-restricted-only").addEventListener("change", applyFilters);
   document.getElementById("pending-quota-panel").addEventListener("click", (ev) => {
@@ -5152,9 +9488,34 @@ function init() {
   });
 
   document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => switchView(t.dataset.view)));
+  document.querySelectorAll(".region-subtab").forEach(t => t.addEventListener("click", () => switchRegionsSub(t.dataset.sub)));
+  const openSettingsBtn = document.getElementById("open-settings");
+  if (openSettingsBtn) openSettingsBtn.addEventListener("click", () => switchView("settings"));
+  const ownerSaveBtn = document.getElementById("owner-save");
+  if (ownerSaveBtn) ownerSaveBtn.addEventListener("click", saveOwnerSettings);
+  const ownerValRgCreateBtn = document.getElementById("owner-valrg-create");
+  if (ownerValRgCreateBtn) ownerValRgCreateBtn.addEventListener("click", _createValidationRg);
+  const ownerWipeBtn = document.getElementById("owner-wipe");
+  if (ownerWipeBtn) ownerWipeBtn.addEventListener("click", _supportWipe);
+  { const ofb = document.getElementById("owner-open-folder"); if (ofb) ofb.addEventListener("click", _openSnapshotsFolder); }
+  { const dsb = document.getElementById("owner-download-snapshots"); if (dsb) dsb.addEventListener("click", _downloadSnapshots); }
+  { const isb = document.getElementById("owner-import-snapshots"); const ifi = document.getElementById("owner-import-file");
+    if (isb && ifi) {
+      isb.addEventListener("click", () => ifi.click());
+      ifi.addEventListener("change", () => { const file = ifi.files && ifi.files[0]; ifi.value = ""; if (file) _importSnapshots(file); });
+    } }
+  document.querySelectorAll("[data-settings-tab]").forEach(btn => {
+    btn.addEventListener("click", () => switchSettingsTab(btn.getAttribute("data-settings-tab")));
+  });
+  const pricingSaveBtn = document.getElementById("pricing-save");
+  if (pricingSaveBtn) pricingSaveBtn.addEventListener("click", savePricingSettings);
+  { const pc = document.getElementById("perm-check"); if (pc) pc.addEventListener("click", checkPermissions); }
   document.getElementById("btn-export-csv").addEventListener("click", exportCsv);
   document.getElementById("btn-export-xlsx").addEventListener("click", exportXlsx);
+  { const vb = document.getElementById("btn-verify-all"); if (vb) vb.addEventListener("click", verifyAllRegions); }
+  { const vc = document.getElementById("btn-verify-cancel"); if (vc) vc.addEventListener("click", cancelVerifyAll); }
   document.getElementById("drilldown-overlay").addEventListener("click", closeDrilldown);
+  document.addEventListener("click", _handleRegisterProviderInteraction);
   document.getElementById("latency-source").addEventListener("change", refreshLatencyChart);
   document.getElementById("snapshot-compare-toggle").addEventListener("click", toggleSnapshotComparePicker);
   document.getElementById("snapshot-compare-picker").addEventListener("change", (ev) => {
@@ -5221,6 +9582,16 @@ function init() {
   document.getElementById("bom-cancel").addEventListener("click", closeBomModal);
   document.getElementById("bom-overlay").addEventListener("click", closeBomModal);
   document.getElementById("bom-save").addEventListener("click", saveBom);
+  document.getElementById("bom-wizard-back").addEventListener("click", bomWizardBack);
+  document.getElementById("bom-wizard-next").addEventListener("click", bomWizardNext);
+  document.querySelectorAll("#bom-wizard-nav .bom-wizard-tab").forEach(tab => {
+    tab.addEventListener("click", () => {
+      const target = parseInt(tab.getAttribute("data-wstep"), 10) || 1;
+      // Only allow jumping forward if step 1 validates.
+      if (target > 1 && !bomWizardValidateStep(1)) return;
+      bomWizardGoTo(target);
+    });
+  });
   document.getElementById("bom-skus-add").addEventListener("click", () => { addBomSkuRow(); renderBomSkuFamilyOptions(); });
   const skuRefreshBtn = document.getElementById("bom-skus-refresh");
   if (skuRefreshBtn) {
@@ -5230,7 +9601,6 @@ function init() {
       await ensureBomSkuFamilies(true);
     });
   }
-  document.getElementById("bom-import-go").addEventListener("click", importBomFromXlsx);
   document.getElementById("bom-services-filter").addEventListener("input", (ev) => filterBomServices(ev.target.value));
   document.getElementById("bom-services-select-all").addEventListener("click", () => {
     document.querySelectorAll('#bom-services-list label:not(.hidden) input[data-bom-svc]').forEach(cb => { cb.checked = true; });
@@ -5294,18 +9664,181 @@ function init() {
   }
 
   (async () => {
-    await loadSubscriptions();
-    await loadSnapshotsList();
-    const picker = document.getElementById("snapshot-picker");
-    await loadSnapshot(picker.value || null);
-    // Restore quota request history from SQLite
-    await _restoreQuotaRequestsFromDb();
-    // Populate the header sign-in chip (silent — never opens a browser).
-    refreshAuthToken({ force: false }).then(() => {
-      // Pre-load subscription names so quota displays show names not IDs.
-      preloadSubscriptionNames().catch(() => {});
-    }).catch(() => {});
+    await loadAppConfig();
+    // MSAL-only single sign-in: if the app runs in delegated (multi-customer)
+    // mode, require a browser sign-in before loading any data. A silent attempt
+    // reuses an existing MSAL session; otherwise a "Sign in to continue" gate is
+    // shown and the app boots only after the user completes the single sign-in.
+    if (APP_CONFIG && APP_CONFIG.delegated_mode) {
+      const ok = await ensureSignedInOrGate();
+      if (!ok) return; // gate is showing; startAppAfterAuth() runs on Sign in
+    }
+    await startAppAfterAuth();
   })().catch(e => console.error("init failed:", e));
 }
 
+// Everything that populates the dashboard once we have (or don't need) a signed
+// -in session. Factored out so the sign-in gate can invoke it after a
+// successful interactive sign-in.
+async function startAppAfterAuth() {
+  await hydrateStateFromLocal();
+  await loadSubscriptions();
+  await loadSnapshotsList();
+  const picker = document.getElementById("snapshot-picker");
+  await loadSnapshot(picker ? (picker.value || null) : null);
+  maybeShowSettingsCoach();
+  // Restore quota request history from the (browser-held) store
+  await _restoreQuotaRequestsFromDb();
+  // Populate the header sign-in chip (silent — never opens a browser).
+  refreshAuthToken({ force: false }).then(() => {
+    // Pre-load subscription names so quota displays show names not IDs.
+    preloadSubscriptionNames().catch(() => {});
+  }).catch(() => {});
+}
+
+// Try a silent sign-in (existing MSAL session in this tab). Returns true if
+// signed in; otherwise shows the full-screen gate and returns false.
+async function ensureSignedInOrGate() {
+  try {
+    const tok = await ensureDelegatedToken({ force: false });
+    if (tok) { hideAuthGate(); return true; }
+  } catch (e) { /* silent failure -> show the gate */ }
+  showAuthGate();
+  return false;
+}
+
+function _ensureAuthGate() {
+  let g = document.getElementById("auth-gate");
+  if (g) return g;
+  const style = document.createElement("style");
+  style.textContent = `
+    #auth-gate{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;
+      justify-content:center;background:linear-gradient(135deg,#0b1220,#1b2a4a);}
+    #auth-gate .auth-card{background:#ffffff;color:#1a2233;
+      max-width:440px;width:92%;padding:2.25rem;border-radius:16px;text-align:center;
+      box-shadow:0 24px 70px rgba(0,0,0,.55);font-family:system-ui,sans-serif;}
+    #auth-gate h2{margin:.25rem 0 .5rem;font-size:1.4rem;color:#0f1b33;font-weight:700;}
+    #auth-gate p{margin:.25rem 0 1.4rem;color:#41506b;font-size:.96rem;line-height:1.5;}
+    #auth-gate button{background:#2f6feb;color:#fff;border:0;border-radius:10px;
+      padding:.8rem 1.6rem;font-size:1.02rem;cursor:pointer;font-weight:600;
+      box-shadow:0 6px 18px rgba(47,111,235,.4);transition:background .15s;}
+    #auth-gate button:hover:not(:disabled){background:#1f5fdb;}
+    #auth-gate button:disabled{opacity:.6;cursor:default;}
+    #auth-gate .auth-err{color:#d13438;min-height:1.2em;margin-top:.9rem;font-size:.9rem;}
+    #auth-gate .brand{font-size:2.2rem;margin-bottom:.4rem;}
+    #auth-gate.hidden{display:none;}`;
+  document.head.appendChild(style);
+  g = document.createElement("div");
+  g.id = "auth-gate";
+  g.innerHTML = `
+    <div class="auth-card" role="dialog" aria-modal="true" aria-labelledby="auth-gate-title">
+      <div class="brand">☁️</div>
+      <h2 id="auth-gate-title">Azure BOM Region Dashboard</h2>
+      <p>Sign in with your Microsoft Entra account to analyze your Bill of Materials
+         against Azure region availability, quota and support. Your data stays in your
+         browser — nothing is stored on the server.</p>
+      <button type="button" data-gate-signin>Sign in to continue</button>
+      <div class="auth-err" id="auth-gate-err" aria-live="polite"></div>
+    </div>`;
+  document.body.appendChild(g);
+  g.querySelector("[data-gate-signin]").addEventListener("click", onGateSignIn);
+  return g;
+}
+
+function showAuthGate() { _ensureAuthGate().classList.remove("hidden"); }
+function hideAuthGate() {
+  const g = document.getElementById("auth-gate");
+  if (g) g.classList.add("hidden");
+}
+
+async function onGateSignIn(ev) {
+  const btn = ev.currentTarget;
+  const err = document.getElementById("auth-gate-err");
+  btn.disabled = true;
+  if (err) err.textContent = "Opening Microsoft sign-in…";
+  try {
+    const tok = await ensureDelegatedToken({ force: true }); // interactive popup
+    if (!tok) throw new Error("Sign-in was cancelled. Please try again.");
+    if (err) err.textContent = "";
+    hideAuthGate();
+    await startAppAfterAuth();
+  } catch (e) {
+    if (err) err.textContent = (e && e.message) ? e.message : "Sign-in failed. Please try again.";
+    btn.disabled = false;
+  }
+}
+
 document.addEventListener("DOMContentLoaded", init);
+
+// ---------------------------------------------------------------- Coachmark
+// First-run "Start here" pointer at the Settings gear, nudging the user to set
+// their support contact and refresh region / latency / SKU data *before*
+// building a BOM. Shows once, then remembers dismissal in localStorage. It is
+// also dismissed the moment the user opens Settings by any means.
+const COACH_KEY = "coach_settings_done";
+
+function _coachDone() {
+  try { return localStorage.getItem(COACH_KEY) === "1"; } catch (e) { return false; }
+}
+
+function dismissSettingsCoach(remember) {
+  const el = document.getElementById("settings-coach");
+  if (el) el.remove();
+  const gear = document.getElementById("open-settings");
+  if (gear) gear.classList.remove("coach-pulse");
+  if (window.__coachReposition) {
+    window.removeEventListener("resize", window.__coachReposition);
+    window.removeEventListener("scroll", window.__coachReposition, true);
+    window.__coachReposition = null;
+  }
+  if (remember) { try { localStorage.setItem(COACH_KEY, "1"); } catch (e) {} }
+}
+
+function maybeShowSettingsCoach() {
+  if (_coachDone()) return;
+  const gear = document.getElementById("open-settings");
+  if (!gear || document.getElementById("settings-coach")) return;
+
+  const coach = document.createElement("div");
+  coach.id = "settings-coach";
+  coach.className = "coach";
+  coach.setAttribute("role", "dialog");
+  coach.setAttribute("aria-label", "Getting started");
+  coach.innerHTML = `
+    <div class="coach-arrow" aria-hidden="true"></div>
+    <div class="coach-body">
+      <div class="coach-title">👋 Start here</div>
+      <p class="coach-text">Open <strong>Settings</strong> to set your support contact and
+        <strong>refresh your region, latency &amp; SKU data from Azure</strong> before building your first BOM.</p>
+      <div class="coach-actions">
+        <button type="button" class="btn btn--accent btn--sm" data-coach="open">Open Settings</button>
+        <button type="button" class="link-btn" data-coach="dismiss">Maybe later</button>
+      </div>
+    </div>`;
+  document.body.appendChild(coach);
+  gear.classList.add("coach-pulse");
+
+  const place = () => {
+    const r = gear.getBoundingClientRect();
+    coach.style.top = Math.round(r.bottom + 12) + "px";
+    const rightGap = Math.max(12, Math.round(window.innerWidth - r.right - 2));
+    coach.style.right = rightGap + "px";
+    // Point the arrow up at the gear's horizontal centre.
+    coach.style.setProperty("--coach-arrow-right",
+      Math.round(gear.offsetWidth / 2 - 6) + "px");
+  };
+  place();
+  window.__coachReposition = place;
+  window.addEventListener("resize", place);
+  window.addEventListener("scroll", place, true);
+
+  const openBtn = coach.querySelector('[data-coach="open"]');
+  if (openBtn) openBtn.addEventListener("click", () => {
+    dismissSettingsCoach(true);
+    switchView("settings");
+  });
+  const dismissBtn = coach.querySelector('[data-coach="dismiss"]');
+  if (dismissBtn) dismissBtn.addEventListener("click", () => dismissSettingsCoach(true));
+  // Any click that opens Settings should also retire the coachmark.
+  gear.addEventListener("click", () => dismissSettingsCoach(true), { once: true });
+}

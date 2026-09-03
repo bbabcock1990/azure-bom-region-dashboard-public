@@ -20,6 +20,28 @@ def test_catalog_loads_and_has_expected_shape():
         assert isinstance(entry["zone_check"], bool)
 
 
+def test_catalog_exposes_service_tiers():
+    cat = {s["name"]: s for s in bom_services.load_catalog()}
+    sql = cat.get("Azure SQL Database")
+    assert sql is not None
+    tiers = sql.get("tiers") or []
+    ids = {t["id"] for t in tiers}
+    assert {"basic", "business_critical", "hyperscale"} <= ids
+    for t in tiers:
+        assert set(t.keys()) >= {"id", "label", "zone_redundant"}
+        assert isinstance(t["zone_redundant"], bool)
+    # Business Critical is zone-redundant capable; Basic is not.
+    by_id = {t["id"]: t for t in tiers}
+    assert by_id["business_critical"]["zone_redundant"] is True
+    assert by_id["basic"]["zone_redundant"] is False
+
+
+def test_tiers_for_service_returns_empty_for_untiered():
+    assert bom_services.tiers_for_service("Azure Automation") == []
+    assert bom_services.tiers_for_service("") == []
+    assert len(bom_services.tiers_for_service("Azure Cache for Redis")) >= 3
+
+
 def test_resolve_services_returns_catalog_entries():
     out = bom_services.resolve_services(["Azure Automation", "Premium SSD v2"])
     names = [s["name"] for s in out]
@@ -101,6 +123,65 @@ def test_fetch_provider_locations_treats_global_sentinel():
             arm_token="t",
         )
     assert out["Microsoft.Automation/automationAccounts"] == ["*"]
+
+
+def test_fetch_provider_locations_global_provider_wildcard_available_everywhere():
+    """A registered provider whose resource types report NO regional
+    locations (e.g. Azure Advisor) is a global/control-plane service — with a
+    ``*`` resource type it must resolve to ``["*"]`` (available everywhere),
+    not to an empty list that marks every region red."""
+    body = {
+        "resourceTypes": [
+            {"resourceType": "recommendations", "locations": []},
+            {"resourceType": "assessments", "locations": []},
+        ],
+    }
+    with patch("_shared.bom_services.httpx.Client") as MC:
+        client = MC.return_value.__enter__.return_value
+        client.get.return_value = _arm_response(200, body)
+        out = bom_services.fetch_provider_locations(
+            [{"name": "Azure Advisor", "provider": "Microsoft.Advisor",
+              "resource_type": "*"}],
+            arm_token="t",
+        )
+    assert out["Microsoft.Advisor/*"] == ["*"]
+
+
+def test_fetch_provider_locations_wildcard_unions_regional_locations():
+    """A ``*`` provider that DOES report regional locations unions them across
+    resource types (ignoring the ``global`` pseudo-location)."""
+    body = {
+        "resourceTypes": [
+            {"resourceType": "operations", "locations": []},
+            {"resourceType": "alertRules", "locations": ["West Europe"]},
+            {"resourceType": "cases", "locations": ["global", "UK South"]},
+        ],
+    }
+    with patch("_shared.bom_services.httpx.Client") as MC:
+        client = MC.return_value.__enter__.return_value
+        client.get.return_value = _arm_response(200, body)
+        out = bom_services.fetch_provider_locations(
+            [{"name": "Microsoft Sentinel",
+              "provider": "Microsoft.SecurityInsights", "resource_type": "*"}],
+            arm_token="t",
+        )
+    assert out["Microsoft.SecurityInsights/*"] == ["UK South", "West Europe"]
+
+
+def test_fetch_provider_locations_404_marks_unavailable_not_raise():
+    """A 404 InvalidResourceNamespace (provider not valid in this tenant) is
+    surfaced as the ABSENT sentinel (provider not registered), not a fatal
+    error and not confused with a per-region gap."""
+    with patch("_shared.bom_services.httpx.Client") as MC:
+        client = MC.return_value.__enter__.return_value
+        client.get.return_value = _arm_response(
+            404, {"error": {"code": "InvalidResourceNamespace"}})
+        out = bom_services.fetch_provider_locations(
+            [{"name": "Azure Container Storage",
+              "provider": "Microsoft.ContainerStorage", "resource_type": "*"}],
+            arm_token="t",
+        )
+    assert out["Microsoft.ContainerStorage/*"] == [bom_services.PROVIDER_ABSENT]
 
 
 def test_fetch_provider_locations_401_raises():
@@ -194,6 +275,68 @@ def test_check_services_availability_marks_missing_regions_fail():
     assert e["services"]["Azure Automation"]["available"] is True
     assert w["overall"] == "FAIL"
     assert w["services"]["Azure Automation"]["available"] is False
+    # region-specific gap gets a region-specific detail, not a blanket label
+    assert "West US 3" in w["services"]["Azure Automation"]["detail"]
+
+
+def test_check_services_availability_absent_provider_labeled_distinctly():
+    """A provider ARM doesn't recognize (404) is labelled as a
+    registration-required warning, distinct from a per-region miss, and does
+    NOT fail the region (availability is unknown until registered)."""
+    svc = [{"name": "Azure Container Storage",
+            "provider": "Microsoft.ContainerStorage",
+            "resource_type": "pools", "zone_check": False}]
+    regions = [
+        {"name": "eastus", "display_name": "East US"},
+        {"name": "westus3", "display_name": "West US 3"},
+    ]
+    with patch("_shared.bom_services.httpx.Client") as MC:
+        client = MC.return_value.__enter__.return_value
+        client.get.return_value = _arm_response(
+            404, {"error": {"code": "InvalidResourceNamespace"}})
+        out = bom_services.check_services_availability(
+            svc, regions, arm_token="t",
+            subscription_id="00000000-0000-0000-0000-000000000000",
+        )
+    for r in out:
+        sr = r["services"]["Azure Container Storage"]
+        assert sr["available"] is False
+        assert sr["status"] == "registration_required"
+        assert sr["provider"] == "Microsoft.ContainerStorage"
+        assert "requires provider registration" in sr["detail"]
+        # Amber warning — the region is NOT failed by an unregistered provider.
+        assert r["overall"] == "PASS"
+
+
+def test_check_services_availability_global_service_available_everywhere():
+    """A global/control-plane provider (e.g. Azure Advisor) resolves to the
+    ``*`` sentinel and must be marked available in EVERY region — with a
+    'global service' detail so it's clear it isn't region-bound (not a plain
+    regional match, and never a per-region red)."""
+    svc = [{"name": "Azure Advisor", "provider": "Microsoft.Advisor",
+            "resource_type": "*", "zone_check": False}]
+    regions = [
+        {"name": "eastus", "display_name": "East US"},
+        {"name": "westus3", "display_name": "West US 3"},
+    ]
+    # All resource types report NO regional locations → global service.
+    body = {"resourceTypes": [
+        {"resourceType": "configurations", "locations": []},
+        {"resourceType": "recommendations", "locations": []},
+    ]}
+    with patch("_shared.bom_services.httpx.Client") as MC:
+        client = MC.return_value.__enter__.return_value
+        client.get.return_value = _arm_response(200, body)
+        out = bom_services.check_services_availability(
+            svc, regions, arm_token="t",
+            subscription_id="00000000-0000-0000-0000-000000000000",
+        )
+    assert len(out) == 2
+    for r in out:
+        sr = r["services"]["Azure Advisor"]
+        assert sr["available"] is True
+        assert "global service" in sr["detail"]
+        assert r["overall"] == "PASS"
 
 
 def test_check_services_availability_ssdv2_needs_three_zones():
@@ -352,6 +495,41 @@ def test_synthesized_records_with_services_flag_only_failing_ones():
     missing_names = [m["service"] if isinstance(m, dict) else m for m in missing]
     assert "Azure Firewall" in missing_names
     assert "Azure Automation" not in missing_names
+
+
+def test_registration_required_service_is_warning_not_missing():
+    """A registration-required (⚠️) service must NOT be reported as a missing
+    service, but MUST be surfaced by extract_registration_required with its
+    provider namespace — so the UI shows an amber 'register' warning that does
+    not fail the BOM."""
+    svc = [{"name": "Azure Container Storage"}, {"name": "Azure Automation"}]
+    results = [{
+        "region": "eastus", "display_name": "East US", "overall": "PASS",
+        "services": {
+            "Azure Container Storage": {
+                "available": False,
+                "status": "registration_required",
+                "provider": "Microsoft.ContainerStorage",
+                "detail": "requires provider registration (Microsoft.ContainerStorage)",
+            },
+            "Azure Automation": {"available": True, "detail": ""},
+        },
+    }]
+    header, records = bom_services.synthesize_bom_records(svc, results)
+    # Cell is an amber warning, not a ❌.
+    assert records[0]["Azure Container Storage"].startswith("\u26a0")
+    # Region stays SUPPORTED — an unregistered provider does not fail the BOM.
+    assert "UNSUPPORTED" not in records[0]["Overall Status"]
+
+    missing = pipeline_model.extract_missing_services(records[0], header)
+    missing_names = [m["service"] if isinstance(m, dict) else m for m in missing]
+    assert "Azure Container Storage" not in missing_names
+
+    reg = pipeline_model.extract_registration_required(records[0], header)
+    reg_by_name = {r["service"]: r for r in reg}
+    assert "Azure Container Storage" in reg_by_name
+    assert reg_by_name["Azure Container Storage"]["provider"] == "Microsoft.ContainerStorage"
+    assert "Azure Automation" not in reg_by_name
 
 
 # ─── build_region_specs ── display-name cascade ──────────────

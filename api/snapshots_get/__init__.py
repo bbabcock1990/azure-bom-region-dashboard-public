@@ -9,7 +9,7 @@ import logging
 
 from .._shared import httpfunc as func
 
-from .._shared import auth, storage
+from .._shared import auth, storage, snapshot_store
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +46,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             json.dumps({"error": "blob_missing", "blob": blob_name}),
             status_code=404, mimetype="application/json",
         )
+    payload = snapshot_store.backfill_meta_timestamp(payload, results[0])
     return func.HttpResponse(
         body=payload,
         status_code=200,

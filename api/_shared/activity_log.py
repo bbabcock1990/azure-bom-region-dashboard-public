@@ -97,6 +97,13 @@ KNOWN_EVENT_TYPES = frozenset({
     "bom_region_remove",
     "quota_history_save",
     "donor_quota_scan",
+    "support_ticket_preview",
+    "support_ticket_submit",
+    "support_ticket_ok",
+    "support_ticket_failed",
+    "support_settings_update",
+    "local_state_wipe",
+    "demo_seed",
 })
 
 

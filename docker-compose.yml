@@ -1,0 +1,19 @@
+services:
+  dashboard:
+    build: .
+    image: azure-bom-region-dashboard:local
+    ports:
+      - "4280:4280"
+    environment:
+      LOCAL_MODE: "true"
+      HOST: "0.0.0.0"
+      PORT: "4280"
+      ALLOWED_ORIGIN: "http://localhost:4280"
+      # Set to "true" to seed the bundled sample BOM + snapshot on first run.
+      DEMO_MODE: "${DEMO_MODE:-false}"
+    volumes:
+      # Persist SQLite + snapshot JSON on the host so runs survive restarts.
+      - bomdash-data:/data
+
+volumes:
+  bomdash-data:

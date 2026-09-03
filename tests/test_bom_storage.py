@@ -77,6 +77,24 @@ def test_validate_segments_rejects_unknown():
     assert "VIP" in ex.value.message
 
 
+def test_validate_resilience_defaults_and_normalizes():
+    # Missing/blank/unknown → zone_redundant (preserves legacy blocking behavior).
+    assert bom_storage._validate_resilience(None) == "zone_redundant"
+    assert bom_storage._validate_resilience("") == "zone_redundant"
+    assert bom_storage._validate_resilience("bogus") == "zone_redundant"
+    # Recognized values pass through, case-insensitively.
+    assert bom_storage._validate_resilience("regional") == "regional"
+    assert bom_storage._validate_resilience("REGIONAL") == "regional"
+    assert bom_storage._validate_resilience("zone_redundant") == "zone_redundant"
+
+
+def test_entity_to_record_defaults_resilience():
+    rec = bom_storage._entity_to_record({"RowKey": "bom-x", "subscription_id": "s"})
+    assert rec["resilience"] == "zone_redundant"
+    rec2 = bom_storage._entity_to_record({"RowKey": "bom-y", "subscription_id": "s", "resilience": "regional"})
+    assert rec2["resilience"] == "regional"
+
+
 def test_validate_services_resolves_against_catalog():
     out = bom_storage._validate_services([
         {"name": "Azure Automation"},
@@ -95,6 +113,36 @@ def test_validate_services_rejects_unknown_via_catalog():
 
 def test_validate_services_empty_list_allowed():
     assert bom_storage._validate_services([]) == []
+
+
+def test_validate_services_persists_valid_tier():
+    from _shared import bom_services
+    out = bom_storage._validate_services([
+        {"name": "Azure SQL Database", "tier": "Business_Critical"},
+        {"name": "Azure Automation"},  # no tiers → no tier key
+    ])
+    assert out[0]["name"] == "Azure SQL Database"
+    # Normalizes to the catalog's canonical id casing.
+    assert out[0]["tier"] == "business_critical"
+    valid_ids = {t["id"] for t in bom_services.tiers_for_service("Azure SQL Database")}
+    assert out[0]["tier"] in valid_ids
+    assert "tier" not in out[1]
+
+
+def test_validate_services_rejects_invalid_tier():
+    with pytest.raises(bom_storage.BomStorageError) as ex:
+        bom_storage._validate_services([
+            {"name": "Azure SQL Database", "tier": "does-not-exist"},
+        ])
+    assert ex.value.code == "bad_services"
+
+
+def test_validate_services_rejects_tier_on_non_tiered_service():
+    with pytest.raises(bom_storage.BomStorageError) as ex:
+        bom_storage._validate_services([
+            {"name": "Azure Automation", "tier": "premium"},
+        ])
+    assert ex.value.code == "bad_services"
 
 
 def test_validate_required_skus_normalizes_via_compile_validator():

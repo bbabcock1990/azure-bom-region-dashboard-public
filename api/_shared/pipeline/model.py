@@ -152,6 +152,36 @@ def extract_missing_services(rec: Dict, header: List[str]) -> List[Dict[str, str
     return out
 
 
+def extract_registration_required(rec: Dict, header: List[str]) -> List[Dict[str, str]]:
+    """Return [{service, detail, provider}] for any ⚠️ registration-required
+    service in this record.
+
+    These are BOM services whose Azure resource provider is not registered on
+    the subscription. Availability is unknown until the provider is registered,
+    so they are surfaced as an amber warning (with a one-click / CLI register
+    hand-off) rather than a red "not available" that fails the BOM.
+    The provider namespace is parsed from the trailing ``(Microsoft.X)``.
+    """
+    out = []
+    for key in header[3:]:
+        if not key:
+            continue
+        val = rec.get(key)
+        if val is None:
+            continue
+        v = str(val)
+        if v.startswith("\u26a0") or "requires provider registration" in v.lower():
+            short = re.sub(r"^[\u26a0\ufe0f]+\s*", "", v).strip()
+            m = re.search(r"\(([A-Za-z0-9.]+)\)", short)
+            provider = m.group(1) if m else ""
+            out.append({
+                "service": str(key),
+                "detail": short,
+                "provider": provider,
+            })
+    return out
+
+
 # ---- Per-region SKU analysis ------------------------------------------------
 
 def _zone_state(zones: Optional[List[bool]]) -> str:
@@ -474,6 +504,60 @@ def alternatives(display: str, latency: Dict, healthy: List[str], top_n: int = 3
     return _geo_distance_alternatives(display, healthy, top_n)
 
 
+def _least_bad_alternatives(display: str, analyses: List[Dict], latency: Dict,
+                            top_n: int = 3) -> List[Dict]:
+    """Fallback ranking when NO region is strictly healthy.
+
+    Every region has at least one issue, so ``alternatives()`` (which only
+    recommends fully-healthy regions) returns nothing for everyone. Instead we
+    surface the "least-bad" regions: those with strictly fewer gaps than the
+    source region, ranked by gap score then by published latency (falling back
+    to great-circle distance). Each result carries a ``caveat`` describing the
+    residual gaps so the UI can make clear these are compromises, not clean
+    targets.
+    """
+    src = next((a for a in analyses if a["name"].lower() == display.lower()), None)
+    if src is None:
+        return []
+    src_score = src.get("gap_score", 0)
+    src_lat_name = DISPLAY_TO_LATENCY.get(display.lower())
+    lat_row = latency.get(src_lat_name) if src_lat_name else None
+    src_coord = geo.coords(display)
+
+    cand: List[Dict] = []
+    for a in analyses:
+        if a["name"].lower() == display.lower():
+            continue
+        sc = a.get("gap_score", 0)
+        if sc >= src_score:
+            continue  # only suggest regions that are genuinely less bad
+        ms = None
+        h_lat_name = DISPLAY_TO_LATENCY.get(a["name"].lower())
+        if lat_row and h_lat_name:
+            ms = lat_row.get(h_lat_name)
+        dist = None
+        if src_coord is not None:
+            h_coord = geo.coords(a["name"])
+            if h_coord is not None:
+                dist = int(round(geo.haversine_km(
+                    src_coord[0], src_coord[1], h_coord[0], h_coord[1])))
+        cand.append({
+            "region": a["name"],
+            "latency_ms": ms,
+            "distance_km": dist,
+            "source": "least_bad",
+            "gap_score": sc,
+            "caveat": a.get("gap_summary", ""),
+        })
+    cand.sort(key=lambda c: (
+        c["gap_score"],
+        0 if c["latency_ms"] is not None else 1,
+        c["latency_ms"] if c["latency_ms"] is not None
+        else (c["distance_km"] if c["distance_km"] is not None else 10 ** 9),
+    ))
+    return cand[:top_n]
+
+
 # ---- Top-level pipeline -----------------------------------------------------
 
 def build_model(raw: Dict,
@@ -541,6 +625,7 @@ def build_model(raw: Dict,
         zone_constraint_blocks = [not z for z in zone_ok]
 
         missing_services = extract_missing_services(rec, bom_header)
+        registration_required = extract_registration_required(rec, bom_header)
 
         is_supported = "SUPPORTED" in overall_status and "UNSUPPORTED" not in overall_status
         # Any ❌ service in the BOM is a deal-breaker even if Overall Status
@@ -568,6 +653,27 @@ def build_model(raw: Dict,
         rec_msg, primary_viable, sku_healthy = recommendation(required_families, chosen)
         geo_info = geo.lookup(display)
 
+        # Gap score + human summary — used to rank "least-bad" alternatives when
+        # no region is strictly healthy (every region has at least one issue).
+        # Hard gaps (missing services / unavailable SKUs / unsupported BOM
+        # status) dominate; per-zone restrictions are a softer, partial issue.
+        missing_n = len(missing_services)
+        sku_n = len(sku_blockers)
+        zone_n = sum(1 for b in zone_constraint_blocks if b)
+        unsupported_only = (not is_supported) and missing_n == 0
+        hard_gaps = missing_n + sku_n + (1 if unsupported_only else 0)
+        gap_score = hard_gaps * 100 + zone_n
+        _gap_parts: List[str] = []
+        if missing_n:
+            _gap_parts.append(f"{missing_n} missing service{'s' if missing_n != 1 else ''}")
+        elif unsupported_only:
+            _gap_parts.append("BOM status unsupported")
+        if sku_n:
+            _gap_parts.append(f"{sku_n} SKU gap{'s' if sku_n != 1 else ''}")
+        if zone_n:
+            _gap_parts.append(f"{zone_n} zone{'s' if zone_n != 1 else ''} restricted")
+        gap_summary = ", ".join(_gap_parts)
+
         analyses.append({
             "name": display,
             "short": region_short,
@@ -585,6 +691,7 @@ def build_model(raw: Dict,
             "sku_blockers": sku_blockers,
             "sku_fallbacks": sku_fallbacks,
             "missing_services": missing_services,
+            "registration_required": registration_required,
             # Generic primary/fallback flags (tier-agnostic — work for v6/v5,
             # v5/v4, or any other primary+alt pair the user puts in their BOM).
             "primary_used": primary_viable,
@@ -597,15 +704,21 @@ def build_model(raw: Dict,
             "sku_zone_detail": sku_zone_detail,
             "has_zone_restriction": any(bool(r) for r in zone_restrictions),
             "overall_status_raw": overall_status,
+            "gap_score": gap_score,
+            "gap_summary": gap_summary,
         })
 
     healthy = [a["name"] for a in analyses if a["deployment_health"] == "Yes"]
 
     for a in analyses:
-        if a["deployment_health"] == "No":
+        if a["deployment_health"] == "Yes":
+            a["alt_regions"] = []
+        elif healthy:
             a["alt_regions"] = alternatives(a["name"], latency, healthy, top_n=3)
         else:
-            a["alt_regions"] = []
+            # No region is strictly healthy — offer the least-bad options so the
+            # customer still gets actionable "closest-to-deployable" guidance.
+            a["alt_regions"] = _least_bad_alternatives(a["name"], analyses, latency, top_n=3)
 
     bom_skus_serialized = [
         {

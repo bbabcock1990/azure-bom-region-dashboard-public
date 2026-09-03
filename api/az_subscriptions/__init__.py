@@ -24,7 +24,8 @@ def _err(code: str, message: str, status: int = 400) -> func.HttpResponse:
 
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
-    if not auth_token.is_local_mode():
+    if not auth_token.is_local_mode() and not auth_token.managed_identity_mode() \
+            and not auth_token.delegated_mode():
         return _err("not_local_mode",
                     "/api/az/subscriptions is only available when LOCAL_MODE=true.", 403)
     try:

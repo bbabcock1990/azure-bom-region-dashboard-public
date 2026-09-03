@@ -22,8 +22,10 @@ Public surface mirrors ``azcli_token`` so call sites are drop-in:
 from __future__ import annotations
 
 import base64
+import contextvars
 import json
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple
@@ -34,16 +36,212 @@ EARLY_REFRESH_SECONDS = 5 * 60  # treat as stale if < 5 min left
 _lock = threading.Lock()
 _signin_lock = threading.Lock()
 _credential = None  # lazily-built InteractiveBrowserCredential
+_mi_credential = None  # lazily-built ManagedIdentityCredential (hosted mode)
 _silent_credential = None  # lazily-built non-interactive credential (never prompts)
 _probe_credential = None  # lazily-built non-interactive credential for silent cache probes
+_probe_credential_key = None  # home_account_id the probe credential was built for (rebuild on change)
 _auth_record = None  # AuthenticationRecord captured at sign-in, for silent reuse
 _signed_in = False  # set True after any successful token acquisition this process
 _cache: Dict[Tuple[str, str, str], "TokenInfo"] = {}
 _sub_tenant_map: Dict[str, str] = {}  # subscription_id -> tenant_id (populated by list_subscriptions)
 
+# ─── Per-request context (delegated / multi-customer hosted mode) ────────────
+# In the hosted multi-tenant deployment the server is stateless: it holds NO
+# customer tokens or data across requests. Each API call carries the signed-in
+# customer's ARM access token (minted in their browser via MSAL and forwarded in
+# the ``X-Bom-Access-Token`` header) plus a stable user key (the Easy Auth
+# principal id). Both live only for the duration of the request in these
+# context vars, so concurrent customers never see each other's tokens or data.
+_ctx_delegated_arm_token: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
+    "bom_delegated_arm_token", default=None
+)
+_ctx_user_key: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
+    "bom_user_key", default=None
+)
+
+
+def delegated_mode() -> bool:
+    """Hosted multi-customer mode: acquire ARM tokens from the per-request
+    delegated token forwarded by the signed-in customer's browser, never from a
+    managed identity or an interactive prompt. Enabled by ``DELEGATED_MODE=true``.
+
+    In this mode the server is stateless and reads Azure strictly *as the
+    signed-in customer*, so customer A can only ever see customer A's tenant.
+    """
+    import os
+    return os.getenv("DELEGATED_MODE", "").lower() in ("true", "1", "yes")
+
+
+def set_request_context(*, arm_token: Optional[str] = None, user_key: Optional[str] = None) -> None:
+    """Bind the current request's delegated ARM token and/or user key. Called by
+    the web host per request from the ``X-Bom-Access-Token`` /
+    ``X-MS-CLIENT-PRINCIPAL-ID`` headers. Values are cleared after the request."""
+    if arm_token is not None:
+        _ctx_delegated_arm_token.set(arm_token.strip() or None)
+    if user_key is not None:
+        _ctx_user_key.set(user_key.strip() or None)
+
+
+def clear_request_context() -> None:
+    """Reset the per-request delegated token + user key (call in a finally)."""
+    _ctx_delegated_arm_token.set(None)
+    _ctx_user_key.set(None)
+
+
+def current_user_key() -> Optional[str]:
+    """Stable id of the signed-in customer for the current request, or None.
+
+    Used to partition any transient per-user server state so concurrent
+    customers are isolated. Prefers the Easy Auth principal id (when a platform
+    auth gate is in front); otherwise falls back to the signed-in customer's
+    identity decoded from the delegated ARM token (``tid``+``oid`` claims), so
+    MSAL-only mode (no Easy Auth header) still partitions correctly."""
+    key = _ctx_user_key.get()
+    if key:
+        return key
+    tok = _ctx_delegated_arm_token.get()
+    if tok:
+        claims = _decode_claims(tok)
+        oid = claims.get("oid") or claims.get("sub")
+        if oid:
+            tid = claims.get("tid") or ""
+            return f"{tid}.{oid}" if tid else str(oid)
+    return None
+
+
+def _delegated_token() -> Optional[str]:
+    return _ctx_delegated_arm_token.get()
+
+
+def _access_token_from_jwt(jwt_str: str):
+    """Wrap a raw JWT access token as an azure-core ``AccessToken`` (token +
+    expires_on), reading the ``exp`` claim so the token cache/refresh logic sees
+    a correct expiry. Falls back to a short window if ``exp`` can't be read."""
+    from azure.core.credentials import AccessToken
+    claims = _decode_claims(jwt_str)
+    exp = claims.get("exp")
+    if not isinstance(exp, (int, float)):
+        exp = int(time.time()) + 300
+    return AccessToken(jwt_str, int(exp))
+
+
 def is_local_mode() -> bool:
     import os
     return os.getenv("LOCAL_MODE", "").lower() in ("true", "1", "yes")
+
+
+def managed_identity_mode() -> bool:
+    """Hosted mode: acquire ARM tokens from the App Service / VM **managed
+    identity** instead of an interactive browser sign-in.
+
+    Enabled by ``MANAGED_IDENTITY_MODE=true``. In this mode the server has no
+    per-user browser to sign in with, so every ARM call is made as the hosting
+    resource's identity. The identity must be granted RBAC (e.g. Reader) on the
+    target subscription(s). Because the identity is single-tenant, only
+    subscriptions in the app's own tenant are reachable — cross-tenant customer
+    subscriptions are not supported in this mode.
+
+    SECURITY: anyone who can reach the app inherits this identity's access, so a
+    hosted instance MUST be placed behind Entra ID auth (App Service Easy Auth)
+    restricted to authorized users.
+    """
+    import os
+    return os.getenv("MANAGED_IDENTITY_MODE", "").lower() in ("true", "1", "yes")
+
+
+# Azure CLI first-party public client. Used as the default so the app works with
+# no app registration. If the customer's tenant Conditional Access policy blocks
+# the Azure CLI app (surfaces as AADSTS53003 "you don't have access"), set
+# AZURE_CLIENT_ID (and usually AZURE_TENANT_ID + AZURE_REDIRECT_URI) to a
+# dedicated app registration the tenant permits.
+_AZURE_CLI_CLIENT_ID = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
+
+
+def _auth_config_kwargs() -> Dict[str, str]:
+    """Env-driven overrides for the interactive credential.
+
+    Returns kwargs to merge into every ``InteractiveBrowserCredential(...)``
+    construction so all three credential builders (interactive, silent, probe)
+    stay consistent and target the same client/tenant/redirect.
+
+    - ``AZURE_CLIENT_ID``    -> ``client_id``    (custom app registration)
+    - ``AZURE_TENANT_ID``    -> ``tenant_id``    (home authority tenant)
+    - ``AZURE_REDIRECT_URI`` -> ``redirect_uri`` (must match a public-client
+      redirect on the app registration, e.g. ``http://localhost``)
+    """
+    import os
+    cfg: Dict[str, str] = {}
+    client_id = os.getenv("AZURE_CLIENT_ID", "").strip()
+    if client_id:
+        cfg["client_id"] = client_id
+    tenant_id = os.getenv("AZURE_TENANT_ID", "").strip()
+    if tenant_id:
+        cfg["tenant_id"] = tenant_id
+    redirect_uri = os.getenv("AZURE_REDIRECT_URI", "").strip()
+    if redirect_uri:
+        cfg["redirect_uri"] = redirect_uri
+    return cfg
+
+
+def _auth_record_path() -> str:
+    """Path to the persisted AuthenticationRecord JSON.
+
+    Stored under ``LOCAL_STORAGE_DIR`` (set by launch.py) so it lives beside the
+    rest of the local state; falls back to ``<repo>/local-storage``. The record
+    contains **no secrets** (home_account_id, username, tenant, authority,
+    client_id) — the actual refresh tokens stay in the OS-encrypted MSAL cache.
+    """
+    import os
+    base = os.getenv("LOCAL_STORAGE_DIR", "").strip()
+    if not base:
+        base = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+            "local-storage",
+        )
+    try:
+        os.makedirs(base, exist_ok=True)
+    except Exception:
+        pass
+    return os.path.join(base, "auth_record.json")
+
+
+def _persist_auth_record(record) -> None:
+    """Serialize the AuthenticationRecord to disk (best-effort, no secrets)."""
+    if record is None:
+        return
+    try:
+        data = record.serialize()
+        with open(_auth_record_path(), "w", encoding="utf-8") as f:
+            f.write(data)
+    except Exception:
+        pass
+
+
+def _load_auth_record():
+    """Load the persisted AuthenticationRecord into ``_auth_record`` (once).
+
+    Enables silent SSO across process restarts: a fresh process can point the
+    non-interactive probe/silent credentials at the exact cached account without
+    any browser prompt. Returns the record or ``None``.
+    """
+    global _auth_record
+    if _auth_record is not None:
+        return _auth_record
+    try:
+        from azure.identity import AuthenticationRecord
+    except Exception:
+        return None
+    try:
+        import os
+        p = _auth_record_path()
+        if not os.path.exists(p):
+            return None
+        with open(p, "r", encoding="utf-8") as f:
+            data = f.read()
+        _auth_record = AuthenticationRecord.deserialize(data)
+    except Exception:
+        _auth_record = None
+    return _auth_record
 
 
 class AuthError(Exception):
@@ -159,6 +357,56 @@ except Exception:
     pass  # fallback: _AutoCloseRedirectServer stays None
 
 
+def _managed_identity_credential():
+    """Lazily build the ManagedIdentityCredential used in hosted mode.
+
+    Uses the system-assigned identity by default; set
+    ``MANAGED_IDENTITY_CLIENT_ID`` to target a specific user-assigned identity.
+    """
+    global _mi_credential
+    if _mi_credential is not None:
+        return _mi_credential
+    with _lock:
+        if _mi_credential is not None:
+            return _mi_credential
+        try:
+            from azure.identity import ManagedIdentityCredential
+        except Exception as ex:  # pragma: no cover - import guard
+            raise AuthError(
+                "msal_unavailable",
+                f"azure-identity is required for managed identity but failed to import: {ex}",
+            )
+        import os
+        client_id = os.getenv("MANAGED_IDENTITY_CLIENT_ID", "").strip()
+        if client_id:
+            _mi_credential = ManagedIdentityCredential(client_id=client_id)
+        else:
+            _mi_credential = ManagedIdentityCredential()
+        return _mi_credential
+
+
+def _acquire_managed_identity(scope: str):
+    """Fetch an ARM AccessToken from the hosting managed identity.
+
+    Never interactive. Raises a stable AuthError on failure so callers surface a
+    clear message instead of a raw MSI exception."""
+    global _signed_in
+    cred = _managed_identity_credential()
+    try:
+        info = cred.get_token(scope)
+        _signed_in = True
+        return info
+    except AuthError:
+        raise
+    except Exception as ex:  # pragma: no cover - environment dependent
+        raise AuthError(
+            "managed_identity_failed",
+            "Failed to acquire a token from the managed identity. Ensure the app "
+            "has a system- or user-assigned identity with RBAC (e.g. Reader) on "
+            f"the target subscription(s). Detail: {ex}",
+        )
+
+
 def _credentials():
     global _credential
     if _credential is not None:
@@ -180,7 +428,19 @@ def _credentials():
             # All tenants allowed so per-customer-subscription ARM tokens (which
             # live in foreign tenants) can be requested via get_token(tenant_id=).
             "additionally_allowed_tenants": ["*"],
+            # Never let get_token() transparently pop a browser. Interactive
+            # sign-in happens ONLY through ensure_signed_in() -> authenticate(),
+            # which is serialized. This is what prevents the "keeps asking me to
+            # sign in" behavior: silent paths raise AuthenticationRequiredError
+            # (mapped to not_signed_in) instead of opening a login window.
+            "disable_automatic_authentication": True,
         }
+        # Bind to the persisted account when available so a fresh process can
+        # silently reuse the OS-encrypted cache (silent SSO across restarts).
+        _rec = _load_auth_record()
+        if _rec is not None:
+            kwargs["authentication_record"] = _rec
+        kwargs.update(_auth_config_kwargs())
         try:
             kwargs["cache_persistence_options"] = TokenCachePersistenceOptions(
                 name="azure-bom-region-dashboard"
@@ -202,6 +462,27 @@ def _acquire(*, scope: str, tenant: Optional[str], allow_interactive: bool) -> "
     account exists azure-identity raises, which we translate to a stable code so
     callers can prompt the user to sign in.
     """
+    global _signed_in, _auth_record
+    # Hosted multi-customer mode: use the per-request delegated ARM token
+    # forwarded from the signed-in customer's browser. This is the ONLY token
+    # source in delegated mode — never a managed identity or a browser prompt —
+    # so every ARM call runs as that customer, in that customer's tenant.
+    delegated = _delegated_token()
+    if delegated and scope.startswith(ARM_RESOURCE_ID.rstrip("/")):
+        _signed_in = True
+        return _access_token_from_jwt(delegated)
+    if delegated_mode():
+        # Delegated mode but the caller didn't attach a token (or asked for a
+        # non-ARM scope): the customer must (re)authenticate in the browser.
+        raise AuthError(
+            "not_signed_in",
+            "No delegated Azure token was supplied for this request. Sign in "
+            "again in the dashboard so the browser can attach your access token.",
+        )
+    # Hosted mode: acquire from the managed identity. MI is single-tenant, so the
+    # ``tenant`` hint is ignored (foreign-tenant subs are unsupported here).
+    if managed_identity_mode():
+        return _acquire_managed_identity(scope)
     cred = _credentials()
     kwargs = {}
     if tenant:
@@ -210,10 +491,18 @@ def _acquire(*, scope: str, tenant: Optional[str], allow_interactive: bool) -> "
         from azure.identity import CredentialUnavailableError
     except Exception:  # pragma: no cover
         CredentialUnavailableError = Exception  # type: ignore
+    try:
+        from azure.identity import AuthenticationRequiredError
+    except Exception:  # pragma: no cover
+        AuthenticationRequiredError = Exception  # type: ignore
 
-    # azure-identity has no public "silent only" switch on get_token; we rely on
-    # a cached account for silent paths. When interactive isn't allowed and there
-    # is no account, surface a not-signed-in error instead of popping a browser.
+    # The main credential is built with disable_automatic_authentication=True,
+    # so get_token() NEVER pops a browser: it silently uses the persistent cache
+    # (bound to the persisted AuthenticationRecord) or raises
+    # AuthenticationRequiredError. On the silent path we translate that raise to
+    # a stable not_signed_in code so the UI can show a Sign in action instead of
+    # a login window appearing on its own. The one-time interactive prompt only
+    # happens via ensure_signed_in() -> authenticate().
     if not allow_interactive and not has_cached_account():
         raise AuthError(
             "not_signed_in",
@@ -222,7 +511,6 @@ def _acquire(*, scope: str, tenant: Optional[str], allow_interactive: bool) -> "
         )
     try:
         info = cred.get_token(scope, **kwargs)
-        global _signed_in, _auth_record
         _signed_in = True
         # Opportunistically capture the AuthenticationRecord so a later
         # non-interactive refresh can silently reuse this account (covers
@@ -233,40 +521,62 @@ def _acquire(*, scope: str, tenant: Optional[str], allow_interactive: bool) -> "
                 rec = getattr(cred, "_auth_record", None)
                 if rec is not None:
                     _auth_record = rec
+                    _persist_auth_record(rec)
             except Exception:
                 pass
         return info
+    except AuthenticationRequiredError as ex:  # type: ignore
+        raise AuthError(
+            "not_signed_in",
+            "Not signed in. Use the dashboard's Sign in action (or POST "
+            "/api/auth/signin) to start the one-time browser sign-in.",
+        )
     except CredentialUnavailableError as ex:  # type: ignore
         raise AuthError("not_signed_in", f"Sign-in required: {ex}")
     except Exception as ex:
-        low = str(ex).lower()
-        if "aadsts50020" in low:
-            raise AuthError(
-                "cross_tenant_not_guest",
-                "User is not a guest in the target tenant.",
-            )
-        if "aadsts700016" in low:
-            raise AuthError(
-                "cross_tenant_no_consent",
-                "Application not registered in target tenant.",
-            )
-        if "aadsts65001" in low:
-            raise AuthError(
-                "cross_tenant_no_consent",
-                "Consent required in target tenant.",
-            )
-        if "status code 403" in low or "403 client error" in low or "forbidden" in low:
-            raise AuthError(
-                "subscription_no_reader",
-                "Need Reader role on the subscription.",
-            )
-        if "aadsts53003" in low or "conditional access" in low:
-            raise AuthError(
-                "ca_consent_required",
-                "Conditional Access requires interactive sign-in. Use the "
-                "dashboard's Sign in action and complete the browser prompt.",
-            )
-        raise AuthError("token_acquire_failed", f"Token acquisition failed: {ex}")
+        _raise_mapped_auth_error(ex)
+
+
+def _raise_mapped_auth_error(ex: Exception) -> "None":
+    """Translate a raw azure-identity/MSAL exception into a stable AuthError.
+
+    Shared by the silent acquisition path and the interactive
+    ``authenticate()`` call so both surface identical, actionable codes
+    (Conditional Access, cross-tenant, missing Reader, etc.).
+    """
+    low = str(ex).lower()
+    if "aadsts50020" in low:
+        raise AuthError(
+            "cross_tenant_not_guest",
+            "User is not a guest in the target tenant.",
+        )
+    if "aadsts700016" in low:
+        raise AuthError(
+            "cross_tenant_no_consent",
+            "Application not registered in target tenant.",
+        )
+    if "aadsts65001" in low:
+        raise AuthError(
+            "cross_tenant_no_consent",
+            "Consent required in target tenant.",
+        )
+    if "status code 403" in low or "403 client error" in low or "forbidden" in low:
+        raise AuthError(
+            "subscription_no_reader",
+            "Need Reader role on the subscription.",
+        )
+    if "aadsts53003" in low or "conditional access" in low:
+        raise AuthError(
+            "ca_consent_required",
+            "Sign-in blocked by your organization's Conditional Access "
+            "policy (AADSTS53003). The built-in Microsoft Azure CLI sign-in "
+            "app is not permitted in this tenant. An admin must either "
+            "exclude that app from the policy, or register a dedicated app "
+            "and launch with AZURE_CLIENT_ID / AZURE_TENANT_ID / "
+            "AZURE_REDIRECT_URI set. See the README section 'If sign-in is "
+            "blocked by Conditional Access'.",
+        )
+    raise AuthError("token_acquire_failed", f"Token acquisition failed: {ex}")
 
 
 def has_cached_account() -> bool:
@@ -282,6 +592,22 @@ def has_cached_account() -> bool:
     """
     if _signed_in:
         return True
+    # Delegated (multi-customer) mode: the browser attaches the customer's token
+    # per request, so an account is "available" whenever a token is present.
+    if _delegated_token() is not None:
+        return True
+    # Hosted mode: the managed identity is always available (no interactive
+    # sign-in), so report an account so silent paths proceed to acquire.
+    if managed_identity_mode():
+        return True
+    # A persisted AuthenticationRecord means we have an account to silently
+    # target from the OS-encrypted cache — treat that as "signed in" so a fresh
+    # process attempts silent SSO instead of forcing a new interactive prompt.
+    try:
+        if _load_auth_record() is not None:
+            return True
+    except Exception:
+        pass
     global _credential
     if _credential is None:
         # Building the credential is cheap and reads the persistent cache.
@@ -323,6 +649,12 @@ def _to_info(access_token, *, scope_resource: str, subscription: str = "") -> "T
         expires_at = datetime.now(timezone.utc)
     claims = _decode_claims(token)
     user = claims.get("upn") or claims.get("preferred_username") or claims.get("unique_name") or ""
+    # Managed-identity tokens carry no user principal; label them by the app/MI
+    # identity so the UI shows a meaningful "signed in as" value.
+    if not user:
+        user = claims.get("app_displayname") or claims.get("appid") or ""
+        if not user and managed_identity_mode():
+            user = "managed-identity"
     tenant = claims.get("tid") or ""
     return TokenInfo(
         token=token,
@@ -349,6 +681,13 @@ def get_token(
     subscription.
     """
     cache_key = (resource, tenant or "default", subscription or "")
+    # Delegated (multi-customer) tokens are per-request and per-user: never read
+    # or write the process-wide cache with them, or one customer's token could
+    # be handed to another. Acquire fresh from the request context each time.
+    if _delegated_token() is not None:
+        access = _acquire(scope=_scope_for(resource), tenant=tenant,
+                          allow_interactive=allow_interactive)
+        return _to_info(access, scope_resource=resource, subscription=subscription or "")
     with _lock:
         cached = _cache.get(cache_key)
         if not force_refresh and cached is not None and cached.is_fresh:
@@ -365,21 +704,41 @@ def ensure_signed_in(*, force: bool = False) -> TokenInfo:
     """Trigger the one-time interactive browser sign-in (or refresh) and return
     the ARM TokenInfo. Serialized so concurrent callers don't open multiple
     browser windows. Call this from the explicit sign-in endpoint, off the
-    silent GET path."""
+    silent GET path.
+
+    The main credential is built with ``disable_automatic_authentication=True``,
+    so ``get_token`` never prompts on its own. The single interactive prompt is
+    performed here via ``authenticate()``; afterwards every silent acquisition
+    (this process and future ones, via the persisted AuthenticationRecord)
+    succeeds without a browser."""
+    global _auth_record, _signed_in
     with _signin_lock:
+        cred = _credentials()
+        # Prompt only when we can't already satisfy a silent acquisition. An
+        # explicit Sign in click (force=True) always re-authenticates; otherwise
+        # a persisted/known account refreshes silently with no window.
+        if force or not has_cached_account():
+            try:
+                rec = cred.authenticate(scopes=[_scope_for(ARM_RESOURCE_ID)])
+                if rec is not None:
+                    _auth_record = rec
+                    _persist_auth_record(rec)
+                    _signed_in = True
+            except AuthError:
+                raise
+            except Exception as ex:
+                _raise_mapped_auth_error(ex)
         info = get_token(force_refresh=force, allow_interactive=True)
-        # Best-effort: capture the AuthenticationRecord azure-identity stored on
-        # the credential after sign-in, so a later non-interactive refresh
-        # (``try_silent_refresh``) can silently reuse this exact account. This is
-        # read post-hoc (no extra prompt); if the attribute isn't present the
-        # silent refresh simply stays a safe no-op.
-        global _auth_record
-        try:
-            rec = getattr(_credentials(), "_auth_record", None)
-            if rec is not None:
-                _auth_record = rec
-        except Exception:
-            pass
+        # Best-effort post-hoc capture (covers a silent refresh that warmed the
+        # cache without going through authenticate()).
+        if _auth_record is None:
+            try:
+                rec = getattr(cred, "_auth_record", None)
+                if rec is not None:
+                    _auth_record = rec
+                    _persist_auth_record(rec)
+            except Exception:
+                pass
         return info
 
 
@@ -397,7 +756,7 @@ def try_silent_refresh(
     token outlives the work without risking an interactive prompt.
     """
     global _silent_credential
-    record = _auth_record
+    record = _load_auth_record()
     if record is None:
         # No captured account this session — can't silently target one. Caller
         # keeps its existing token.
@@ -417,6 +776,7 @@ def try_silent_refresh(
                 "disable_automatic_authentication": True,
                 "authentication_record": record,
             }
+            kwargs.update(_auth_config_kwargs())
             try:
                 kwargs["cache_persistence_options"] = TokenCachePersistenceOptions(
                     name="azure-bom-region-dashboard"
@@ -456,7 +816,7 @@ def get_arm_token(subscription_id: str, *, force_refresh: bool = False) -> Token
     )
 
 
-def _silent_probe_token(scope: str):
+def _silent_probe_token(scope: str, tenant: Optional[str] = None):
     """Attempt a silent token acquisition from the shared persistent MSAL cache
     **without ever launching a browser**. Returns an azure-core AccessToken on
     success, or ``None`` if no cached account can satisfy the request.
@@ -468,7 +828,7 @@ def _silent_probe_token(scope: str):
     failing every sign-in. The only interactive path is ``ensure_signed_in``,
     which is serialized by ``_signin_lock``.
     """
-    global _probe_credential
+    global _probe_credential, _probe_credential_key
     try:
         from azure.identity import (
             InteractiveBrowserCredential,
@@ -476,13 +836,25 @@ def _silent_probe_token(scope: str):
         )
     except Exception:
         return None
+    # A persisted AuthenticationRecord lets a fresh process silently target the
+    # exact cached account (silent SSO across restarts) instead of raising
+    # "no account". Without it, disable_automatic_authentication has nothing to
+    # bind to and the probe can only succeed within the same process lifetime.
+    record = _load_auth_record()
+    record_key = getattr(record, "home_account_id", None) if record is not None else None
     with _lock:
-        if _probe_credential is None:
+        # Rebuild if never built, or if a record became available (or changed)
+        # since the cached credential was constructed — otherwise a probe built
+        # before sign-in would stay record-less and never SSO.
+        if _probe_credential is None or _probe_credential_key != record_key:
             kwargs = {
                 "additionally_allowed_tenants": ["*"],
                 # Never start an interactive flow — raise instead of prompting.
                 "disable_automatic_authentication": True,
             }
+            if record is not None:
+                kwargs["authentication_record"] = record
+            kwargs.update(_auth_config_kwargs())
             try:
                 kwargs["cache_persistence_options"] = TokenCachePersistenceOptions(
                     name="azure-bom-region-dashboard"
@@ -491,11 +863,15 @@ def _silent_probe_token(scope: str):
                 pass
             try:
                 _probe_credential = InteractiveBrowserCredential(**kwargs)
+                _probe_credential_key = record_key
             except Exception:
                 return None
         cred = _probe_credential
     try:
-        return cred.get_token(scope)
+        kw = {}
+        if tenant:
+            kw["tenant_id"] = tenant
+        return cred.get_token(scope, **kw)
     except Exception:
         # AuthenticationRequiredError / CredentialUnavailableError / etc. all
         # mean "no silently-usable account" — caller re-raises not_signed_in.
@@ -541,10 +917,23 @@ def _resolve_subscription_tenant(subscription_id: str, *, force_refresh: bool = 
         with httpx.Client(timeout=20.0) as client:
             resp = client.get(url, headers={"Authorization": f"Bearer {default.token}"})
         if resp.status_code == 200:
-            return resp.json().get("tenantId") or None
+            tid = resp.json().get("tenantId")
+            if tid:
+                _sub_tenant_map[subscription_id] = tid
+                return tid
     except Exception:
-        return None
-    return None
+        pass
+    # Foreign/guest subscriptions return 401/403 for a home-tenant token (and no
+    # tenant-discovery WWW-Authenticate header), so the direct GET above can't see
+    # them. Fall back to the authoritative cross-tenant enumeration, which lists
+    # subs per tenant and populates ``_sub_tenant_map`` — this is what lets a
+    # guest subscription in a foreign tenant resolve to the tenant where the user
+    # actually holds RBAC (otherwise ARM calls run in the wrong tenant → 403).
+    try:
+        list_subscriptions()
+    except Exception:
+        pass
+    return _sub_tenant_map.get(subscription_id)
 
 
 def list_subscriptions() -> list:
@@ -623,14 +1012,16 @@ def list_subscriptions() -> list:
 
 def reset_for_tests() -> None:
     """Test helper — clear the cached credential + token cache."""
-    global _credential, _silent_credential, _auth_record, _signed_in
+    global _credential, _silent_credential, _auth_record, _signed_in, _mi_credential
     with _lock:
         _credential = None
         _silent_credential = None
+        _mi_credential = None
         _auth_record = None
         _signed_in = False
         _cache.clear()
         _sub_tenant_map.clear()
+    clear_request_context()
 
 
 def sign_out() -> None:

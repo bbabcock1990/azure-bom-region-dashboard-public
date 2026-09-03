@@ -333,6 +333,58 @@ def fetch_arm_restrictions(
     return out
 
 
+def fetch_region_capabilities(
+    *,
+    arm_token: str,
+    subscription_id: str,
+    region: str,
+    timeout_s: float = DEFAULT_TIMEOUT_S,
+) -> Dict[str, Dict[str, str]]:
+    """Return ``{armSkuName_lower: {capability_name: value}}`` for a region.
+
+    A single ``Microsoft.Compute/skus`` call returns every VM size in the region
+    along with its ``capabilities`` (temp disk size, PremiumIO, accelerated
+    networking, encryption-at-host, HyperV generations, memory, vCPUs, ...). We
+    use this to verify a recommended size-equivalent actually supports every
+    capability the original BOM size does.
+    """
+    clean = _strip_bearer(arm_token)
+    if not clean:
+        raise ArmError("arm_missing_token", "ARM bearer token is required.", 400)
+    if not subscription_id:
+        raise ArmError("arm_missing_sub", "subscription_id is required.", 400)
+    if not region or not str(region).strip():
+        raise ArmError("arm_no_regions", "No region requested.", 400)
+
+    headers = {
+        "authorization": f"Bearer {clean}",
+        "accept": "application/json",
+        "user-agent": "azure-bom-region-dashboard/1.0",
+    }
+
+    out: Dict[str, Dict[str, str]] = {}
+    with httpx.Client(timeout=timeout_s, http2=False) as client:
+        items = _list_skus_for_region(
+            client,
+            subscription_id=subscription_id,
+            region=str(region).strip(),
+            headers=headers,
+        )
+    for sku in items:
+        if sku.get("resourceType") != "virtualMachines":
+            continue
+        name = str(sku.get("name") or "").strip().lower()
+        if not name:
+            continue
+        caps: Dict[str, str] = {}
+        for c in sku.get("capabilities") or []:
+            cap_name = c.get("name")
+            if cap_name is not None:
+                caps[str(cap_name)] = c.get("value")
+        out[name] = caps
+    return out
+
+
 def overlay_onto_availability_rows(
     *,
     availability_rows: List[dict],

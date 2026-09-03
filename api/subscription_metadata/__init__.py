@@ -136,9 +136,11 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                     tag=body.get("tag"),
                     customer_name=body.get("customer_name"),
                     customer_segments=body.get("customer_segments"),
+                    resilience=body.get("resilience"),
                     required_skus=body.get("required_skus") or [],
                     services=body.get("services") or [],
                     regions=body.get("regions") or [],
+                    support_override=body.get("support_override") or {},
                     updated_by=principal.email,
                 )
             except bom_storage.BomStorageError as ex:
@@ -200,9 +202,11 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                     tag=body.get("tag"),
                     customer_name=body.get("customer_name"),
                     customer_segments=body.get("customer_segments"),
+                    resilience=body.get("resilience"),
                     required_skus=body.get("required_skus") or [],
                     services=body.get("services") or [],
                     regions=body.get("regions") or [],
+                    support_override=body.get("support_override") or {},
                     updated_by=principal.email,
                 )
             except bom_storage.BomStorageError as ex:

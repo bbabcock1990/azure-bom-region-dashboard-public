@@ -122,7 +122,8 @@ def fetch_arm_sku_records(
 
 
 def load_default_regions(data_dir: str) -> List[str]:
-    path = os.path.join(data_dir, "regions.txt")
+    from . import dataset_store
+    path = dataset_store.resolve_path("regions_list")
     if not os.path.exists(path):
         return []
     with open(path, "r", encoding="utf-8") as f:
@@ -136,7 +137,8 @@ def load_default_regions(data_dir: str) -> List[str]:
 
 
 def load_default_families(data_dir: str) -> List[str]:
-    path = os.path.join(data_dir, "skus.txt")
+    from . import dataset_store
+    path = dataset_store.resolve_path("skus_list")
     if not os.path.exists(path):
         return []
     with open(path, "r", encoding="utf-8") as f:

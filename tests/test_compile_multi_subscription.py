@@ -309,6 +309,8 @@ def test_compile_snapshot_adds_ready_with_constraints_verdict(monkeypatch):
 
     verdict = snap["regions"][0]["deployment_verdict"]
     assert verdict["verdict"] == "ready_with_constraints"
+    assert verdict["confidence"] == "capability"
+    assert any(p.get("signal") == "SKU + zone coverage" for p in verdict.get("provenance", []))
     assert "Using fallback SKU Dasv5 for Dav6" in verdict["constraints"]
     assert "Quota tight for Dav6 (82% used)" in verdict["constraints"]
     assert {

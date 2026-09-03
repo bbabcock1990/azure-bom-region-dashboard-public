@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 GUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
-API_VERSION = "2023-06-01-preview"
+API_VERSION = "2023-09-01"
 ARM_BASE = "https://management.azure.com"
 
 
@@ -169,7 +169,7 @@ async def main(req: func.HttpRequest) -> func.HttpResponse:
             event_type="quota_request_failed",
             api_scope="subscription",
             subscription_id=subscription_id,
-            severity="error",
+            status="error",
             message=f"Quota increase FAILED: {family} in {region} (HTTP {resp.status_code})",
             details={"family": family, "region": region, "new_limit": new_limit,
                      "status_code": resp.status_code, "request_id": request_id},

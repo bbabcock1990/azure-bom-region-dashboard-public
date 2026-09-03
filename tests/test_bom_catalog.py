@@ -236,6 +236,33 @@ def test_catalog_by_name_strips_is_custom(monkeypatch):
         assert "is_custom" not in entry
 
 
+def test_sentinel_maps_to_log_analytics_not_securityinsights(monkeypatch):
+    """Microsoft Sentinel must be gated on the Log Analytics workspace it runs
+    on (Microsoft.OperationalInsights/workspaces), NOT on Microsoft.Security-
+    Insights. The SecurityInsights provider only advertises ~16 control-plane
+    homing regions, which understates true availability (e.g. it omits the
+    Australia regions where Sentinel is GA) and produced false "not available"
+    verdicts."""
+    monkeypatch.setattr(bom_catalog, "list_custom", lambda kind: [])
+    by = bom_services.catalog_by_name()
+    assert "Microsoft Sentinel" in by
+    entry = by["Microsoft Sentinel"]
+    assert entry["provider"] == "Microsoft.OperationalInsights"
+    assert entry["resource_type"] == "workspaces"
+
+
+def test_container_storage_maps_to_aks_not_containerstorage(monkeypatch):
+    """Azure Container Storage (v2) is an AKS add-on, not a standalone
+    registerable provider; the Microsoft.ContainerStorage namespace 404s on
+    subscriptions. It must be gated on Microsoft.ContainerService (AKS)."""
+    monkeypatch.setattr(bom_catalog, "list_custom", lambda kind: [])
+    by = bom_services.catalog_by_name()
+    assert "Azure Container Storage" in by
+    entry = by["Azure Container Storage"]
+    assert entry["provider"] == "Microsoft.ContainerService"
+    assert entry["resource_type"] == "managedClusters"
+
+
 # ─── add_region / add_service unique check ─────────────────────────────────
 
 def test_add_region_rejects_collision_with_builtin(monkeypatch):

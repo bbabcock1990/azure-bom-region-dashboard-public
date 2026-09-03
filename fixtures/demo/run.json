@@ -1,0 +1,17 @@
+{
+  "pk": "0c04d0143c354ea8adf7537872e92f97",
+  "rk": "2026-08-05T16-29-02Z-2c077257",
+  "data": {
+    "subscription_id": "d3305e11-0000-4a00-b000-0000c0ffee01",
+    "status": "succeeded",
+    "source": "local-web+saved-bom",
+    "triggered_by_email": "demo-user",
+    "triggered_by_oid": "local",
+    "started_at": "2026-08-05T16:29:27.003290+00:00",
+    "customer_name": "test",
+    "customer_segments": "EA,ANY",
+    "ended_at": "2026-08-05T16:29:27.003290+00:00",
+    "snapshot_blob": "0c04d0143c354ea8adf7537872e92f97/2026-08-05T16-29-02Z-2c077257.json",
+    "arm_overlay_applied": true
+  }
+}

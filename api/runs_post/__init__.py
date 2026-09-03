@@ -330,6 +330,10 @@ def _main(req: func.HttpRequest) -> func.HttpResponse:
             "bom_header": bom_header,
             "bom_records": bom_records,
             "required_families": saved["required_skus"],
+            # Persist the selected services (with any per-service tier) into
+            # the snapshot so the dashboard can surface tiers + ZRS readiness
+            # without re-reading the BOM record.
+            "services": saved.get("services") or [],
         }
     else:
         if step2_file is None:
@@ -597,6 +601,11 @@ def _main(req: func.HttpRequest) -> func.HttpResponse:
     )
     if progress_token:
         run_progress.complete(progress_token, status="succeeded", run_id=run_id)
+    try:
+        from .._shared import snapshot_store
+        snapshot_store.prune_snapshots(bom_id)
+    except Exception:
+        log.debug("snapshot pruning skipped", exc_info=True)
     log.info("run %s done in %.1fs (arm_availability=%s, "
              "skus_source=%s, families=%d)",
              run_id, time.time() - t0, True,
