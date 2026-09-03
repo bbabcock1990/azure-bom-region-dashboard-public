@@ -270,6 +270,23 @@ def test_real_submit_mfa_required_maps_to_mfa_required(isolated_storage):
     assert ex.value.status == 401
 
 
+@respx.mock
+def test_close_azure_ticket_mfa_required(isolated_storage):
+    from _shared import support_tickets
+    respx.patch(url__regex=r".*/supportTickets/.*").mock(
+        return_value=httpx.Response(401, json={"error": {
+            "code": "RequestDisallowedByAzure",
+            "message": "authenticate through MFA. https://aka.ms/MFAforAzure",
+        }})
+    )
+    with pytest.raises(support_tickets.SupportError) as ex:
+        support_tickets.close_azure_ticket(
+            "11111111-1111-1111-1111-111111111111", "bomdash-quota-x", "fake-token",
+        )
+    assert ex.value.code == "mfa_required"
+    assert ex.value.status == 401
+
+
 def test_mfa_challenge_detection():
     from _shared import support_tickets as st
 

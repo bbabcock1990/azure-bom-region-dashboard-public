@@ -890,6 +890,19 @@ def close_azure_ticket(subscription_id: str, ticket_name: str, token: str) -> Di
 
     if resp.status_code >= 400:
         body = _safe_json(resp)
+        # A ticket status change is an ARM write — Conditional Access can require
+        # an MFA token here too. Surface a distinct code so the SPA can step up
+        # and retry, matching the create flow.
+        mfa = _mfa_challenge(resp, body)
+        if mfa is not None:
+            raise SupportError(
+                "mfa_required",
+                "Azure requires multi-factor authentication (MFA) to change a "
+                "support ticket. Please re-authenticate when prompted and try "
+                "again.",
+                401,
+                details={"azure": body, "claims": mfa.get("claims")},
+            )
         raise SupportError(
             "close_failed",
             _extract_message(body, f"Could not close the ticket ({resp.status_code})."),

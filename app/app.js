@@ -9125,12 +9125,34 @@ async function _supportCloseAzureTicket(ticketName, subId, title, btn) {
   if (!ok) return;
   const original = btn ? btn.textContent : "";
   if (btn) { btn.disabled = true; btn.textContent = "Closing…"; }
+
+  const closeOnce = () => apiJson("/api/support/azure-tickets/close", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ subscription_id: subId, ticket_name: ticketName }),
+  });
+
   try {
-    await apiJson("/api/support/azure-tickets/close", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ subscription_id: subId, ticket_name: ticketName }),
-    });
+    try {
+      await closeOnce();
+    } catch (e) {
+      // Azure gated this write behind MFA — step the user up and retry once.
+      if (e && e.body && e.body.error === "mfa_required") {
+        const claims = e.body.details && e.body.details.claims;
+        if (btn) btn.textContent = "Verifying MFA…";
+        showToast("Azure needs multi-factor authentication to close this ticket — please complete the sign-in prompt.", "warning");
+        try {
+          await stepUpDelegatedToken(claims);
+        } catch (authErr) {
+          showToast(`MFA sign-in was cancelled or blocked: ${authErr.message || authErr}`, "error");
+          throw e;
+        }
+        if (btn) btn.textContent = "Closing…";
+        await closeOnce();
+      } else {
+        throw e;
+      }
+    }
     showToast(`✓ Ticket closed: ${label}`, "success");
     await _supportLoadAzureTickets();
   } catch (e) {
