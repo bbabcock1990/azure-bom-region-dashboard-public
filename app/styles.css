@@ -1477,6 +1477,7 @@ table.region-table tbody tr.selected td { background: var(--ms-blue-light); }
 .cockpit-chip.cockpit-warn { border-color: rgba(200,140,20,.45); background: rgba(200,140,20,.08); }
 .cockpit-ok-text { color: #1a8f52; }
 .cockpit-bad-text { color: #c33; }
+.cockpit-sub { color: var(--muted, #8a93a6); font-size: 12px; }
 .cockpit-nudge {
   margin-left: 8px;
   font-size: 12px;

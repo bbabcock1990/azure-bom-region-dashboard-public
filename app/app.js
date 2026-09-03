@@ -1760,9 +1760,30 @@ async function verifyAllRegions() {
   applyFilters();
   _persistVerifyAll(sub).catch(() => {});
   if (noteEl) {
-    noteEl.textContent = cancelled
-      ? `Stopped — ${done}/${total} regions verified.`
-      : `Verified ${done}/${total} regions · ${new Date().toLocaleTimeString()}`;
+    // Report conclusiveness, not just completion: a "done" probe on a
+    // restricted subscription can come back with no definitive answer, so
+    // "Verified 38/38" would be misleading.
+    let checked = 0, conclusive = 0, inconclusive = 0, errored = 0;
+    regions.forEach(r => {
+      const c = PRICING.zonalCap[`${String(r.short).toLowerCase()}|${sub}`];
+      if (!c) return;
+      if (c.status === "error") { errored++; return; }
+      if (c.status !== "done") return;
+      checked++;
+      if (_zonalEntryConclusive(c)) conclusive++; else inconclusive++;
+    });
+    const ts = new Date().toLocaleTimeString();
+    const parts = [`${conclusive} conclusive`];
+    if (inconclusive) parts.push(`${inconclusive} inconclusive`);
+    if (errored) parts.push(`${errored} errored`);
+    let msg = cancelled
+      ? `Stopped — live-checked ${checked}/${total} regions · ${parts.join(", ")}.`
+      : `Live-checked ${checked}/${total} regions · ${parts.join(", ")} · ${ts}`;
+    if (!cancelled && conclusive === 0 && (inconclusive + errored) > 0) {
+      msg += " — no region could be conclusively verified for this subscription "
+        + "(restricted access, throttling, or no authoritative API). Confidence stays at ARM metadata.";
+    }
+    noteEl.textContent = msg;
   }
 }
 
@@ -2424,12 +2445,27 @@ function _regionConfidence(region) {
           source: `verified against subscription${entry.ts ? ` · ${entry.ts}` : ""}`,
         });
         if (inconclusive) liveNote = "partial";
-      } else if (inconclusive) {
+      } else {
+        // A live probe ran but returned no definitive per-subscription answer
+        // (restricted sub, no authoritative API, or an empty result). Flag it
+        // honestly as unverifiable rather than silently leaving it at the
+        // metadata tier, which reads as "nothing happened".
         liveNote = "unverifiable";
       }
     }
   }
   return { tier, provenance, liveNote };
+}
+
+// Classify a completed zonal-capability entry: true only when it carries at
+// least one *definitive* per-subscription verdict (available/blocked/
+// unavailable). A "done" probe that returned only inconclusive results (403 /
+// restricted / no API / empty) is NOT a conclusive live verification.
+function _zonalEntryConclusive(entry) {
+  if (!entry || entry.status !== "done" || !entry.map) return false;
+  return Object.values(entry.map).some(
+    v => v && ["available", "blocked", "unavailable"].includes(v.verdict),
+  );
 }
 
 // Presentation for a confidence tier → pill.
@@ -8404,19 +8440,24 @@ function renderOverviewCockpit() {
 
   // Live-verification coverage for the focused subscription.
   const sub = focusedSubscriptionId() || "";
-  let verified = 0;
+  let verified = 0, inconclusive = 0;
   regions.forEach(r => {
     const c = PRICING.zonalCap[`${String(r.short).toLowerCase()}|${sub}`];
-    if (c && c.status === "done") verified++;
+    if (!c) return;
+    if (_zonalEntryConclusive(c)) verified++;
+    else if (c.status === "done" || c.status === "error") inconclusive++;
   });
 
   const staleNudge = stale
     ? `<button type="button" class="cockpit-nudge" id="cockpit-verify">Raise confidence →</button>`
     : "";
+  const inconclNote = inconclusive
+    ? ` <span class="cockpit-sub" title="A live probe ran but returned no definitive answer for these regions (restricted subscription, throttling, or no authoritative API)">· ${inconclusive} inconclusive</span>`
+    : "";
   el.innerHTML = `
     <div class="cockpit-chip ${freshCls}" title="Snapshot age from the last analysis">🕒 ${escapeHtml(freshTxt)}${staleNudge}</div>
     <div class="cockpit-chip" title="Quota verdicts across analyzed regions">📊 Quota: <strong class="cockpit-ok-text">${suff}</strong> OK · <strong class="cockpit-bad-text">${insuff}</strong> short · ${unk} unknown</div>
-    <div class="cockpit-chip" title="Regions confirmed by a live per-subscription probe">⚡ Live-verified: <strong>${verified}</strong>/${regions.length}</div>`;
+    <div class="cockpit-chip" title="Regions with a conclusive live per-subscription probe (definitive available/blocked/unavailable verdict)">⚡ Live-verified: <strong>${verified}</strong>/${regions.length}${inconclNote}</div>`;
   el.classList.remove("hidden");
   const nudge = document.getElementById("cockpit-verify");
   if (nudge) nudge.addEventListener("click", () => {
