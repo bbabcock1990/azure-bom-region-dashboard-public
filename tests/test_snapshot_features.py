@@ -268,3 +268,56 @@ def test_backfill_meta_timestamp_returns_original_on_bad_json():
 
     payload = b"{not valid json"
     assert snapshot_store.backfill_meta_timestamp(payload, {"RowKey": "r1"}) == payload
+
+
+def test_snapshots_export_bundles_snapshots_into_zip(client):
+    import io
+    import zipfile
+
+    _persist_run_and_snapshot(
+        bom_id="demo-bom", run_id="20260629-190500-a",
+        snapshot={"meta": {"subscription_id": "sub"}, "regions": []})
+    _persist_run_and_snapshot(
+        bom_id="demo-bom", run_id="20260630-190500-b",
+        snapshot={"meta": {"subscription_id": "sub"}, "regions": []})
+
+    res = client.get("/api/snapshots/export")
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "application/zip"
+    assert "attachment" in res.headers.get("content-disposition", "")
+
+    zf = zipfile.ZipFile(io.BytesIO(res.content))
+    names = zf.namelist()
+    assert "index.json" in names
+    snap_files = [n for n in names if n.startswith("snapshots/") and n.endswith(".json")]
+    assert len(snap_files) == 2
+    manifest = json.loads(zf.read("index.json"))
+    assert manifest["count"] == 2
+
+
+def test_snapshots_export_empty_is_valid_zip(client):
+    import io
+    import zipfile
+
+    res = client.get("/api/snapshots/export")
+    assert res.status_code == 200
+    zf = zipfile.ZipFile(io.BytesIO(res.content))
+    assert json.loads(zf.read("index.json"))["count"] == 0
+
+
+def test_open_folder_refused_when_not_local(client, monkeypatch):
+    monkeypatch.delenv("LOCAL_MODE", raising=False)
+    res = client.post("/api/local-state/open-folder")
+    assert res.status_code == 400
+    assert res.json()["error"] == "not_local"
+
+
+def test_open_folder_opens_when_local(client, monkeypatch):
+    monkeypatch.setenv("LOCAL_MODE", "true")
+    called = {}
+    from api import local_state_open_folder as mod
+    monkeypatch.setattr(mod, "_open_in_explorer", lambda path: called.setdefault("path", path))
+    res = client.post("/api/local-state/open-folder")
+    assert res.status_code == 200
+    assert res.json()["ok"] is True
+    assert called.get("path", "").endswith("snapshots")

@@ -28,7 +28,7 @@
        Order matters: this must run before the <link> below. -->
   <script src="preinit.js?v=2026061503"></script>
 
-  <link rel="stylesheet" href="styles.css?v=2026090311" />
+  <link rel="stylesheet" href="styles.css?v=2026090312" />
 </head>
 <body>
 
@@ -358,8 +358,13 @@
               <div class="settings-danger">
                 <h3>Danger zone</h3>
                 <p class="muted">Delete all local snapshots and analysis history (support contact settings are kept). Does not touch Azure.</p>
-                <p class="muted settings-storage-path">Snapshots and local data are saved on this machine under:<br>
+                <p class="muted settings-storage-path" id="owner-storage-path-line">Snapshots and local data are saved on this machine under:<br>
                   <code id="owner-storage-path">…</code></p>
+                <div class="settings-danger-actions">
+                  <button type="button" class="btn btn--sm" id="owner-open-folder">📂 Open snapshots folder</button>
+                  <button type="button" class="btn btn--sm" id="owner-download-snapshots">⬇ Download snapshots (.zip)</button>
+                  <span class="muted" id="owner-snapshots-status"></span>
+                </div>
                 <button type="button" class="btn btn--danger" id="owner-wipe">Wipe local state</button>
               </div>
             </section>
@@ -1016,6 +1021,6 @@
 
 <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
 
-<script src="app.js?v=2026090311"></script>
+<script src="app.js?v=2026090312"></script>
 </body>
 </html>

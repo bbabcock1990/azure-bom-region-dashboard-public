@@ -3164,6 +3164,7 @@ html.filters-collapsed-init.bomnav-collapsed-init .layout { grid-template-column
   background: rgba(106, 42, 42, 0.08);
 }
 .settings-danger h3 { margin: 0 0 4px; font-size: 14px; }
+.settings-danger-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 4px 0 14px; }
 .settings-storage-path { margin: 8px 0 12px; }
 .settings-storage-path code {
   display: inline-block;

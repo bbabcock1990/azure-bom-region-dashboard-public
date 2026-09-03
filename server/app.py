@@ -41,6 +41,7 @@ APP_DIR = _REPO_ROOT / "app"
 # Optional Azure route params ({name?}) are registered as two explicit paths.
 ROUTES = [
     ("snapshots/diff", ["GET"], "snapshot_diff"),
+    ("snapshots/export", ["GET"], "snapshots_export"),
     ("snapshots/latest", ["GET"], "snapshots_latest"),
     ("snapshots/{run_id}", ["GET"], "snapshots_get"),
     ("snapshots", ["GET"], "snapshots_list"),
@@ -88,6 +89,7 @@ ROUTES = [
     ("datasets/{dataset_id}", ["GET", "POST", "DELETE"], "datasets"),
     ("datasets", ["GET"], "datasets"),
     ("local-state/wipe", ["POST"], "local_state_wipe"),
+    ("local-state/open-folder", ["POST"], "local_state_open_folder"),
     ("state/{action}", ["GET", "POST"], "state_sync"),
     ("demo/seed", ["POST"], "demo_seed"),
 ]

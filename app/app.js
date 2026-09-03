@@ -7732,10 +7732,21 @@ async function loadOwnerSettings() {
       : "Optional — pick a subscription on the dashboard first, then set a resource group for it here.";
   }
   const pathEl = document.getElementById("owner-storage-path");
-  if (pathEl) {
-    const dir = (APP_CONFIG && (APP_CONFIG.snapshots_dir || APP_CONFIG.storage_dir)) || "";
-    pathEl.textContent = dir || "(path unavailable — run a live, non-demo analysis to persist snapshots locally)";
+  const isLocal = !!(APP_CONFIG && APP_CONFIG.local_mode);
+  const pathLine = document.getElementById("owner-storage-path-line");
+  const dir = (APP_CONFIG && (APP_CONFIG.snapshots_dir || APP_CONFIG.storage_dir)) || "";
+  const dirText = dir || "(path unavailable — run a live, non-demo analysis to persist snapshots locally)";
+  if (pathEl) pathEl.textContent = dirText;
+  if (pathLine) {
+    const lead = isLocal
+      ? "Snapshots and local data are saved on this machine under:"
+      : "Snapshots are stored in your private session for this hosted app (not a folder you can open). The server-side path is:";
+    pathLine.innerHTML = `${escapeHtml(lead)}<br><code id="owner-storage-path">${escapeHtml(dirText)}</code>`;
   }
+  // Open-folder only works when self-hosting locally; hide it in the hosted app
+  // where the "folder" lives in your browser session and can't be opened.
+  const openBtn = document.getElementById("owner-open-folder");
+  if (openBtn) openBtn.classList.toggle("hidden", !isLocal);
   _loadValidationRgOptions();
 }
 
@@ -9261,6 +9272,49 @@ async function _supportWipe() {
   } catch (e) { showToast(e.message, "error"); }
 }
 
+// Open the snapshots folder in the OS file explorer — only works when the
+// dashboard is self-hosted locally (the server shares the user's desktop).
+async function _openSnapshotsFolder() {
+  const status = document.getElementById("owner-snapshots-status");
+  if (status) status.textContent = "Opening…";
+  try {
+    const r = await apiJson("/api/local-state/open-folder", { method: "POST" });
+    if (status) status.textContent = `Opened ${r.path}`;
+  } catch (e) {
+    if (status) status.textContent = "";
+    showToast(e.message || "Could not open the folder.", "error");
+  }
+}
+
+// Download all snapshots as a zip. Works in both local and hosted mode — in the
+// hosted app this is the portable substitute for "open the folder".
+async function _downloadSnapshots() {
+  const status = document.getElementById("owner-snapshots-status");
+  if (status) status.textContent = "Preparing download…";
+  try {
+    const res = await apiFetch("/api/snapshots/export");
+    if (!res.ok) {
+      let msg = res.statusText;
+      try { const b = await res.json(); msg = (b && (b.message || b.error)) || msg; } catch (e) {}
+      throw new Error(msg);
+    }
+    const blob = await res.blob();
+    let filename = "bom-snapshots.zip";
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = /filename="?([^"]+)"?/.exec(cd);
+    if (m) filename = m[1];
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    if (status) status.textContent = "Downloaded.";
+  } catch (e) {
+    if (status) status.textContent = "";
+    showToast(e.message || "Could not download snapshots.", "error");
+  }
+}
+
 function _supportPrefill(kind, regionShort, opts) {
   opts = opts || {};
   switchView("support");
@@ -9444,6 +9498,8 @@ function init() {
   if (ownerValRgCreateBtn) ownerValRgCreateBtn.addEventListener("click", _createValidationRg);
   const ownerWipeBtn = document.getElementById("owner-wipe");
   if (ownerWipeBtn) ownerWipeBtn.addEventListener("click", _supportWipe);
+  { const ofb = document.getElementById("owner-open-folder"); if (ofb) ofb.addEventListener("click", _openSnapshotsFolder); }
+  { const dsb = document.getElementById("owner-download-snapshots"); if (dsb) dsb.addEventListener("click", _downloadSnapshots); }
   document.querySelectorAll("[data-settings-tab]").forEach(btn => {
     btn.addEventListener("click", () => switchSettingsTab(btn.getAttribute("data-settings-tab")));
   });
