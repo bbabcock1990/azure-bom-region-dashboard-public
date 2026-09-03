@@ -2110,6 +2110,7 @@ def compile_snapshot(
         "skus_resolved": required_families,
         "services": bom_services_selected,
         "compile_seconds": round(time.time() - t_start, 2),
+        "compiled_at": datetime.now(timezone.utc).isoformat(),
         "sku_availability": {
             "provider": "arm",
             "subscription_id": subscription_id,

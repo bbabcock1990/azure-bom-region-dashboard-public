@@ -98,6 +98,32 @@ def snapshot_timestamp(run_entity: Optional[Dict], snapshot: Optional[Dict]) -> 
     return None
 
 
+def backfill_meta_timestamp(payload: bytes, run_entity: Optional[Dict]) -> bytes:
+    """Ensure the streamed snapshot JSON carries ``meta.compiled_at`` so the UI
+    can show freshness. Older snapshots were persisted without a timestamp in
+    ``meta``; derive one from the run entity (ended_at/started_at/run-id) and
+    inject it. On any parse issue the original bytes are returned unchanged."""
+    try:
+        snapshot = json.loads(payload)
+    except Exception:
+        return payload
+    if not isinstance(snapshot, dict):
+        return payload
+    meta = snapshot.get("meta")
+    if not isinstance(meta, dict):
+        return payload
+    if meta.get("compiled_at"):
+        return payload
+    ts = snapshot_timestamp(run_entity, snapshot)
+    if not ts:
+        return payload
+    meta["compiled_at"] = ts
+    try:
+        return json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    except Exception:
+        return payload
+
+
 def prune_snapshots(bom_id: str, keep: Optional[int] = None) -> int:
     """Delete succeeded runs (and their snapshot blobs) beyond the newest
     ``keep`` for a BOM. Best-effort; returns the number of snapshots removed.

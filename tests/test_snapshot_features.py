@@ -238,3 +238,33 @@ def test_bom_sensitivity_ranks_constraints_from_snapshot(client):
     zone = by_type[("zone_requirement", "3-zone-availability")]
     assert zone["regions_excluded"] == 2
     assert zone["excluded_regions"] == ["centralus", "westus"]
+
+
+def test_backfill_meta_timestamp_injects_when_missing():
+    from _shared import snapshot_store
+
+    snapshot = {"meta": {"subscription_id": "sub"}, "regions": []}
+    payload = json.dumps(snapshot).encode("utf-8")
+    run_entity = {"RowKey": "r1", "ended_at": "2026-06-29T20:34:44Z"}
+
+    out = snapshot_store.backfill_meta_timestamp(payload, run_entity)
+    parsed = json.loads(out)
+    assert parsed["meta"]["compiled_at"] == "2026-06-29T20:34:44Z"
+
+
+def test_backfill_meta_timestamp_preserves_existing():
+    from _shared import snapshot_store
+
+    snapshot = {"meta": {"compiled_at": "2026-01-01T00:00:00Z"}, "regions": []}
+    payload = json.dumps(snapshot).encode("utf-8")
+    run_entity = {"RowKey": "r1", "ended_at": "2026-06-29T20:34:44Z"}
+
+    out = snapshot_store.backfill_meta_timestamp(payload, run_entity)
+    assert json.loads(out)["meta"]["compiled_at"] == "2026-01-01T00:00:00Z"
+
+
+def test_backfill_meta_timestamp_returns_original_on_bad_json():
+    from _shared import snapshot_store
+
+    payload = b"{not valid json"
+    assert snapshot_store.backfill_meta_timestamp(payload, {"RowKey": "r1"}) == payload
