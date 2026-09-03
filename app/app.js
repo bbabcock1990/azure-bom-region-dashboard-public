@@ -5989,6 +5989,22 @@ async function openBomModal(bomId, opts = {}) {
   }
   // Make sure the datalist reflects any rows just rendered (saved/legacy values).
   renderBomSkuFamilyOptions();
+
+  // Guided walkthrough: explicitly requested (opts.guide) or the first time a
+  // user builds a BOM from any entry point. Runs after the wizard is fully
+  // populated so every target exists. Remembered so it doesn't nag on reuse.
+  if (opts.create && (opts.guide || !_bomWizardGuideSeen())) {
+    _setBomWizardGuideSeen();
+    setTimeout(() => startBomWizardCoachTour(), 300);
+  }
+}
+
+const BOM_GUIDE_KEY = "bom_wizard_guide_seen";
+function _bomWizardGuideSeen() {
+  try { return localStorage.getItem(BOM_GUIDE_KEY) === "1"; } catch (_e) { return false; }
+}
+function _setBomWizardGuideSeen() {
+  try { localStorage.setItem(BOM_GUIDE_KEY, "1"); } catch (_e) {}
 }
 
 function closeBomModal() {
@@ -7614,11 +7630,7 @@ function gettingStartedSteps() {
       actions: [{
         label: "+ New BOM & guide me",
         className: "btn btn--accent btn--sm",
-        run: () => {
-          Promise.resolve(openBomModal(null, { create: true }))
-            .then(() => startBomWizardCoachTour())
-            .catch(() => startBomWizardCoachTour());
-        },
+        run: () => { openBomModal(null, { create: true, guide: true }); },
         close: true,
       }],
     },
@@ -9976,6 +9988,7 @@ function init() {
 
   // BOM modal wiring
   document.getElementById("bom-modal-close").addEventListener("click", closeBomModal);
+  { const gm = document.getElementById("bom-wizard-guide"); if (gm) gm.addEventListener("click", () => startBomWizardCoachTour()); }
   const ddClose = document.getElementById("dd-close");
   if (ddClose) ddClose.addEventListener("click", closeDrilldown);
   document.getElementById("bom-cancel").addEventListener("click", closeBomModal);

@@ -21,14 +21,14 @@
        the server reports delegated_mode; mints the customer's ARM token
        client-side so tokens never touch the server. -->
   <script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.28.1/lib/msal-browser.min.js"></script>
-  <script src="msal-auth.js?v=2026090326"></script>
+  <script src="msal-auth.js?v=2026090327"></script>
 
   <!-- Apply persisted theme + filters state BEFORE styles.css loads to prevent
        FOUC. Kept external (not inline) so the CSP can forbid inline scripts.
        Order matters: this must run before the <link> below. -->
   <script src="preinit.js?v=2026061503"></script>
 
-  <link rel="stylesheet" href="styles.css?v=2026090326" />
+  <link rel="stylesheet" href="styles.css?v=2026090327" />
 </head>
 <body>
 
@@ -709,6 +709,7 @@
 <div id="bom-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="bom-modal-title">
   <header>
     <h2 id="bom-modal-title">Edit BOM</h2>
+    <button type="button" class="btn btn--sm" id="bom-wizard-guide" title="Walk me through this form" style="margin-left:auto; margin-right:.6rem;">❔ Guide me</button>
     <button class="close" id="bom-modal-close" aria-label="Close">&times;</button>
   </header>
   <div class="modal-body">
@@ -930,6 +931,6 @@
 
 <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
 
-<script src="app.js?v=2026090326"></script>
+<script src="app.js?v=2026090327"></script>
 </body>
 </html>
