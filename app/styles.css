@@ -1438,16 +1438,6 @@ table.region-table tbody tr.selected td { background: var(--ms-blue-light); }
   vertical-align: middle;
 }
 .br-legend-btn:hover { background: rgba(90,120,180,.2); }
-.ranking-formula {
-  margin: 10px 0 12px;
-  padding: 8px 10px;
-  border: 1px solid var(--panel-border, rgba(120,120,120,.3));
-  border-radius: 8px;
-  background: var(--panel-bg-alt, rgba(0,0,0,.18));
-  color: var(--panel-code, #c7d1e6);
-  font-size: 12px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-}
 .ranking-legend-list {
   list-style: none;
   display: grid;

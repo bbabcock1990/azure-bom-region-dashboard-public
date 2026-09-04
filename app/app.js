@@ -8691,13 +8691,15 @@ function _bestRegionTradeoffs(s) {
 }
 
 // ---------------------------------------------------- Ranking evaluation help
+// Plain-language explanation of how the Best-regions list is ordered. We
+// deliberately avoid exposing the internal numeric score/weights — customers
+// only need the priority order and what each factor means in practice.
 const _RANKING_LEGEND_ROWS = [
-  { label: "Deployment verdict", weight: "bucket ×1000", desc: "Ready maps to bucket 0, then ready with constraints, needs validation, and not recommended." },
-  { label: "Evidence confidence", weight: "bucket ×120", desc: "Live-validated evidence maps to bucket 0, then ARM capability metadata, then baseline metadata." },
-  { label: "Quota status", weight: "bucket ×80", desc: "Sufficient quota maps to bucket 0, then unknown quota, then quota shortfalls." },
-  { label: "Unverifiable live probe", weight: "+60 penalty", desc: "Adds a caution penalty when a live check ran but could not produce a definitive result." },
-  { label: "Remediation effort", weight: "count ×15", desc: "Each blocker or constraint adds effort so regions with fewer actions get a lower score." },
-  { label: "Availability zones", weight: "+8 penalty", desc: "Regions without AZ support receive a small penalty when the BOM prefers zone-ready regions." },
+  { rank: "Most important", label: "Can it deploy?", desc: "Regions where your whole BOM can deploy come first — then ready with a few limits, then needs a quick check, and \u201Cnot recommended\u201D last." },
+  { rank: "Next", label: "How sure are we?", desc: "We rank a region higher when we\u2019ve confirmed it with a live check, above ones based on Azure\u2019s published data or a baseline estimate." },
+  { rank: "Next", label: "Do you have quota?", desc: "Regions where you already have enough quota rank above ones where quota is unknown, which rank above known shortfalls." },
+  { rank: "Next", label: "How much setup?", desc: "The fewer blockers you\u2019d have to clear, the higher it ranks \u2014 so regions you can use with little or no extra work rise to the top." },
+  { rank: "Tie-breaker", label: "Availability zones", desc: "If your BOM prefers zone-redundant regions, those that offer Availability Zones edge ahead of those that don\u2019t." },
 ];
 
 function renderBestRegionPanel() {
@@ -8731,7 +8733,7 @@ function renderBestRegionPanel() {
     <div class="br-header">
       <div class="br-header-top">
         <div class="br-title">Best regions for your BOM
-          <button type="button" class="br-legend-btn" id="br-ranking-btn" title="How are region rankings evaluated?">ⓘ How rankings work</button>
+          <button type="button" class="br-legend-btn" id="br-ranking-btn" title="Why are the regions in this order?">ⓘ Why this order?</button>
           <button type="button" class="br-legend-btn" id="br-legend-btn" title="What do the confidence levels mean?">Confidence levels</button>
         </div>
         <div class="br-actions">
@@ -8739,7 +8741,7 @@ function renderBestRegionPanel() {
           <button type="button" class="btn btn--sm btn--primary" id="br-deploy-plan" title="Download a customer-ready deployment plan">📄 Deploy plan</button>
         </div>
       </div>
-      <div class="br-lead">${heading} <span class="br-sub">ranked by readiness, confidence, quota, remediation effort, latency & cost</span></div>
+      <div class="br-lead">${heading} <span class="br-sub">sorted best-fit first — the safest place to deploy is at the top</span></div>
     </div>
     <div class="br-cards">${cards}</div>`;
   el.classList.remove("hidden");
@@ -8775,17 +8777,16 @@ function _openRankingLegend() {
   overlay.id = "ranking-legend-overlay";
   overlay.className = "conf-legend-overlay ranking-legend-overlay";
   const rows = _RANKING_LEGEND_ROWS.map(row =>
-    `<li><span class="ranking-factor">${escapeHtml(row.label)}</span><span class="ranking-weight">${escapeHtml(row.weight)}</span><span class="ranking-desc">${escapeHtml(row.desc)}</span></li>`
+    `<li><span class="ranking-factor">${escapeHtml(row.label)}</span><span class="ranking-weight">${escapeHtml(row.rank)}</span><span class="ranking-desc">${escapeHtml(row.desc)}</span></li>`
   ).join("");
   overlay.innerHTML = `<div class="conf-legend-modal ranking-legend-modal" role="dialog" aria-modal="true" aria-label="How rankings are evaluated" tabindex="-1">
       <div class="conf-legend-head">
-        <strong>How region rankings are evaluated</strong>
+        <strong>How the best regions are chosen</strong>
         <button type="button" class="conf-legend-close" aria-label="Close">✕</button>
       </div>
-      <p class="muted">The dashboard assigns each analyzed region a lower-is-better ranking score. Each major factor is converted to a bucket where the best bucket is 0 before weights are applied. Hard deployment readiness dominates the score; latency, estimated monthly cost, and region name are tie-breakers after the weighted factors match.</p>
-      <div class="ranking-formula">score = verdictBucket×1000 + confidenceBucket×120 + quotaBucket×80 + unverifiablePenalty + remediationCount×15 + azPenalty(+8)</div>
+      <p class="muted">The region at the <strong>top of the list is the safest place to deploy your BOM</strong>. There\u2019s no score to read \u2014 we simply compare regions in the priority order below, and the first thing that differs decides which one ranks higher.</p>
       <ul class="ranking-legend-list">${rows}</ul>
-      <p class="muted conf-legend-foot">Open a region's details to see the blockers and constraints behind its score. Use <strong>⚡ Raise confidence</strong> to replace metadata assumptions with read-only live probes where possible.</p>
+      <p class="muted conf-legend-foot">If two regions are otherwise equal, the one with <strong>lower latency</strong> — then <strong>lower estimated monthly cost</strong> — wins. Open any region\u2019s details to see exactly what\u2019s behind its place in the list, or use <strong>⚡ Raise confidence</strong> to replace estimates with read-only live checks.</p>
     </div>`;
   document.body.appendChild(overlay);
   const close = () => overlay.classList.add("hidden");
