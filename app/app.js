@@ -8756,11 +8756,11 @@ function renderBestRegionPanel() {
 
 // ---------------------------------------------------- Ranking evaluation help
 const _RANKING_LEGEND_ROWS = [
-  { label: "Deployment verdict", weight: "×1000", desc: "Ready outranks ready with constraints, which outranks needs validation, which outranks not recommended." },
-  { label: "Evidence confidence", weight: "×120", desc: "Live-validated signals rank above ARM capability metadata, which ranks above baseline metadata." },
-  { label: "Quota status", weight: "×80", desc: "Sufficient quota ranks above unknown quota, which ranks above quota shortfalls." },
+  { label: "Deployment verdict", weight: "bucket ×1000", desc: "Ready maps to bucket 0, then ready with constraints, needs validation, and not recommended." },
+  { label: "Evidence confidence", weight: "bucket ×120", desc: "Live-validated evidence maps to bucket 0, then ARM capability metadata, then baseline metadata." },
+  { label: "Quota status", weight: "bucket ×80", desc: "Sufficient quota maps to bucket 0, then unknown quota, then quota shortfalls." },
   { label: "Unverifiable live probe", weight: "+60 penalty", desc: "Adds a caution penalty when a live check ran but could not produce a definitive result." },
-  { label: "Remediation effort", weight: "×15", desc: "Each blocker or constraint adds effort so regions with fewer actions rank higher." },
+  { label: "Remediation effort", weight: "count ×15", desc: "Each blocker or constraint adds effort so regions with fewer actions get a lower score." },
   { label: "Availability zones", weight: "+8 penalty", desc: "Regions without AZ support receive a small penalty when the BOM prefers zone-ready regions." },
 ];
 
@@ -8778,8 +8778,8 @@ function _openRankingLegend() {
         <strong>How region rankings are evaluated</strong>
         <button type="button" class="conf-legend-close" aria-label="Close">✕</button>
       </div>
-      <p class="muted">The dashboard assigns each analyzed region a lower-is-better ranking score. Hard deployment readiness dominates the score; latency, estimated monthly cost, and region name are tie-breakers after the weighted factors match.</p>
-      <div class="ranking-formula">score = verdict×1000 + confidence×120 + quota×80 + unverifiable×60 + remediation×15 + AZ penalty</div>
+      <p class="muted">The dashboard assigns each analyzed region a lower-is-better ranking score. Each major factor is converted to a bucket where the best bucket is 0 before weights are applied. Hard deployment readiness dominates the score; latency, estimated monthly cost, and region name are tie-breakers after the weighted factors match.</p>
+      <div class="ranking-formula">score = verdictBucket×1000 + confidenceBucket×120 + quotaBucket×80 + unverifiablePenalty + remediationCount×15 + AZ penalty</div>
       <ul class="ranking-legend-list">${rows}</ul>
       <p class="muted conf-legend-foot">Open a region's details to see the blockers and constraints behind its score. Use <strong>⚡ Raise confidence</strong> to replace metadata assumptions with read-only live probes where possible.</p>
     </div>`;

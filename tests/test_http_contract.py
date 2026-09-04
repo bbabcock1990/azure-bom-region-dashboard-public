@@ -39,7 +39,8 @@ def test_static_assets_explain_ranking_evaluation(client):
     app_js = client.get("/app.js")
     assert app_js.status_code == 200
     assert "How rankings work" in app_js.text
-    assert "score = verdict×1000 + confidence×120 + quota×80" in app_js.text
+    assert "score = verdictBucket×1000 + confidenceBucket×120 + quotaBucket×80" in app_js.text
+    assert "best bucket is 0" in app_js.text
     assert "latency, estimated monthly cost, and region name are tie-breakers" in app_js.text
 
     styles = client.get("/styles.css")
