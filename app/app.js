@@ -8768,8 +8768,7 @@ function _openRankingLegend() {
   let overlay = document.getElementById("ranking-legend-overlay");
   if (overlay) {
     overlay.classList.remove("hidden");
-    const btn = overlay.querySelector(".conf-legend-close");
-    if (btn) btn.focus();
+    _focusLegendDialog(overlay);
     return;
   }
   overlay = document.createElement("div");
@@ -8793,7 +8792,12 @@ function _openRankingLegend() {
   overlay.addEventListener("click", (ev) => { if (ev.target === overlay) close(); });
   const closeBtn = overlay.querySelector(".conf-legend-close");
   closeBtn.addEventListener("click", close);
-  closeBtn.focus();
+  _focusLegendDialog(overlay);
+}
+
+function _focusLegendDialog(overlay) {
+  const modal = overlay && overlay.querySelector(".conf-legend-modal");
+  if (modal) modal.focus();
 }
 
 // -------------------------------------------------- Confidence legend popover
@@ -8808,8 +8812,7 @@ function _openConfidenceLegend() {
   let overlay = document.getElementById("conf-legend-overlay");
   if (overlay) {
     overlay.classList.remove("hidden");
-    const btn = overlay.querySelector(".conf-legend-close");
-    if (btn) btn.focus();
+    _focusLegendDialog(overlay);
     return;
   }
   overlay = document.createElement("div");
@@ -8832,7 +8835,7 @@ function _openConfidenceLegend() {
   overlay.addEventListener("click", (ev) => { if (ev.target === overlay) close(); });
   const closeBtn = overlay.querySelector(".conf-legend-close");
   closeBtn.addEventListener("click", close);
-  closeBtn.focus();
+  _focusLegendDialog(overlay);
 }
 
 // ------------------------------------------------------ Deploy plan (export)
