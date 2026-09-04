@@ -7668,6 +7668,13 @@ function gettingStartedSteps() {
   return steps;
 }
 
+// Reference to the Getting Started guide opener (set in setupGettingStarted).
+// Lets coach-mark tours return the user to the guide after a hand-off task.
+let _gsOpenAt = null;
+function reopenGettingStarted(stepIdx) {
+  if (typeof _gsOpenAt === "function") { try { _gsOpenAt(stepIdx || 0); } catch (_e) {} }
+}
+
 function setupGettingStarted() {
   const openBtn = document.getElementById("open-guide");
   const modal = document.getElementById("guide-modal");
@@ -7739,6 +7746,10 @@ function setupGettingStarted() {
   openBtn.addEventListener("click", () => open(0));
   if (closeBtn) closeBtn.addEventListener("click", close);
   overlay.addEventListener("click", close);
+
+  // Expose the opener so coach tours can bring the user back to the guide when
+  // they finish a hand-off task (e.g. after the Settings walkthrough).
+  _gsOpenAt = open;
 
   // First-visit auto-open removes the discovery barrier — new users land
   // straight in the guided flow. Only once; the "?" button reopens it later.
@@ -10363,7 +10374,7 @@ function startCoachmarkTour(steps, opts) {
   async function show() {
     if (myToken !== CM_TOUR.token) return; // superseded/stopped
     const step = CM_TOUR.steps[CM_TOUR.i];
-    if (!step) { finish(); return; }
+    if (!step) { finish("done"); return; }
     if (step.before) { try { await step.before(); } catch (_e) {} }
     if (myToken !== CM_TOUR.token) return;
     const el = await _cmResolveTarget(step.target);
@@ -10387,18 +10398,18 @@ function startCoachmarkTour(steps, opts) {
       `</div>`;
     inner.querySelectorAll("[data-cm]").forEach(b => b.addEventListener("click", () => {
       const a = b.dataset.cm;
-      if (a === "skip") return finish();
+      if (a === "skip") return finish("skip");
       if (a === "back") { CM_TOUR.i = Math.max(0, CM_TOUR.i - 1); return show(); }
-      if (CM_TOUR.i >= CM_TOUR.steps.length - 1) return finish();
+      if (CM_TOUR.i >= CM_TOUR.steps.length - 1) return finish("done");
       CM_TOUR.i++; show();
     }));
     place();
   }
 
-  function finish() {
+  function finish(reason) {
     if (myToken !== CM_TOUR.token) return;
     stopCoachmarkTour();
-    if (typeof opts.onDone === "function") { try { opts.onDone(); } catch (_e) {} }
+    if (typeof opts.onDone === "function") { try { opts.onDone(reason || "done"); } catch (_e) {} }
   }
 
   show();
@@ -10430,10 +10441,17 @@ function startSettingsCoachTour() {
       target: '#datasets-list',
       title: "Pull the latest from Azure",
       text: "Click <strong>Refresh from Azure</strong> on each dataset so your analysis uses current region &amp; SKU availability. " +
-        "That's it — head back and create your first BOM.",
+        "That's it — next we'll create your first BOM.",
       before: () => switchSettingsTab("datasets"),
     },
-  ]);
+  ], {
+    // When the Settings hand-off finishes, bring the user back to the guide at
+    // the next step ("Create a BOM") so they always know what to do next.
+    // Only on genuine completion — a Skip leaves them where they are.
+    onDone: (reason) => {
+      if (reason === "done") setTimeout(() => reopenGettingStarted(2), 300);
+    },
+  });
 }
 
 // Contextual walkthrough of the BOM wizard — points at each field and what it
