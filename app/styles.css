@@ -1438,6 +1438,33 @@ table.region-table tbody tr.selected td { background: var(--ms-blue-light); }
   vertical-align: middle;
 }
 .br-legend-btn:hover { background: rgba(90,120,180,.2); }
+.ranking-legend-list {
+  list-style: none;
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 0;
+}
+.ranking-legend-list li {
+  display: grid;
+  grid-template-columns: minmax(130px, 1fr) auto minmax(220px, 2fr);
+  gap: 10px;
+  align-items: start;
+  padding: 8px 0;
+  border-top: 1px solid var(--panel-border-divider, rgba(120,120,120,.2));
+}
+.ranking-factor { font-weight: 700; color: var(--panel-text-strong, #fff); }
+.ranking-weight {
+  justify-self: start;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(90,120,180,.18);
+  color: var(--panel-text-soft, #c7d1e6);
+  font-size: 12px;
+}
+.ranking-desc { color: var(--panel-text-muted, #aab3c8); font-size: 12px; }
+@media (max-width: 640px) {
+  .ranking-legend-list li { grid-template-columns: 1fr; gap: 4px; }
+}
 
 .conf-legend-overlay {
   position: fixed; inset: 0;

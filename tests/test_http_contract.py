@@ -29,8 +29,29 @@ def test_static_index_and_security_headers(client):
     r = client.get("/")
     assert r.status_code == 200
     assert "<html" in r.text.lower()
+    assert "app.js?v=2026090402" in r.text
+    assert "styles.css?v=2026090402" in r.text
     assert "Content-Security-Policy" in r.headers
     assert r.headers.get("X-Content-Type-Options") == "nosniff"
+
+
+def test_static_assets_explain_ranking_evaluation(client):
+    app_js = client.get("/app.js")
+    assert app_js.status_code == 200
+    # Plain-language ranking help (no internal score/weights exposed to users).
+    assert "Why this order?" in app_js.text
+    assert "the safest place to deploy" in app_js.text
+    assert "Can it deploy?" in app_js.text
+    assert "How sure are we?" in app_js.text
+    assert "Do you have quota?" in app_js.text
+    assert 'role="dialog" aria-modal="true" aria-label="How rankings are evaluated"' in app_js.text
+    assert "lower latency" in app_js.text
+    # The raw formula/weights must NOT be shown to end users.
+    assert "verdictBucket×1000" not in app_js.text
+
+    styles = client.get("/styles.css")
+    assert styles.status_code == 200
+    assert ".ranking-legend-list" in styles.text
 
 
 @pytest.mark.parametrize("path", [

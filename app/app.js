@@ -8690,6 +8690,18 @@ function _bestRegionTradeoffs(s) {
   return bits;
 }
 
+// ---------------------------------------------------- Ranking evaluation help
+// Plain-language explanation of how the Best-regions list is ordered. We
+// deliberately avoid exposing the internal numeric score/weights — customers
+// only need the priority order and what each factor means in practice.
+const _RANKING_LEGEND_ROWS = [
+  { rank: "Most important", label: "Can it deploy?", desc: "Regions where your whole BOM can deploy come first — then ready with a few limits, then needs a quick check, and \u201Cnot recommended\u201D last." },
+  { rank: "Next", label: "How sure are we?", desc: "We rank a region higher when we\u2019ve confirmed it with a live check, above ones based on Azure\u2019s published data or a baseline estimate." },
+  { rank: "Next", label: "Do you have quota?", desc: "Regions where you already have enough quota rank above ones where quota is unknown, which rank above known shortfalls." },
+  { rank: "Next", label: "How much setup?", desc: "The fewer blockers you\u2019d have to clear, the higher it ranks \u2014 so regions you can use with little or no extra work rise to the top." },
+  { rank: "Tie-breaker", label: "Availability zones", desc: "If your BOM prefers zone-redundant regions, those that offer Availability Zones edge ahead of those that don\u2019t." },
+];
+
 function renderBestRegionPanel() {
   const el = document.getElementById("best-region-panel");
   if (!el) return;
@@ -8721,14 +8733,15 @@ function renderBestRegionPanel() {
     <div class="br-header">
       <div class="br-header-top">
         <div class="br-title">Best regions for your BOM
-          <button type="button" class="br-legend-btn" id="br-legend-btn" title="What do the confidence levels mean?">ⓘ What do the levels mean?</button>
+          <button type="button" class="br-legend-btn" id="br-ranking-btn" title="Why are the regions in this order?">ⓘ Why this order?</button>
+          <button type="button" class="br-legend-btn" id="br-legend-btn" title="What do the confidence levels mean?">Confidence levels</button>
         </div>
         <div class="br-actions">
           <button type="button" class="btn btn--sm" id="br-verify-cta" title="Run a read-only live probe across all regions to raise confidence">⚡ Raise confidence</button>
           <button type="button" class="btn btn--sm btn--primary" id="br-deploy-plan" title="Download a customer-ready deployment plan">📄 Deploy plan</button>
         </div>
       </div>
-      <div class="br-lead">${heading} <span class="br-sub">ranked by readiness, confidence, quota, latency & cost</span></div>
+      <div class="br-lead">${heading} <span class="br-sub">sorted best-fit first — the safest place to deploy is at the top</span></div>
     </div>
     <div class="br-cards">${cards}</div>`;
   el.classList.remove("hidden");
@@ -8741,6 +8754,8 @@ function renderBestRegionPanel() {
   });
   const legendBtn = document.getElementById("br-legend-btn");
   if (legendBtn) legendBtn.addEventListener("click", _openConfidenceLegend);
+  const rankingBtn = document.getElementById("br-ranking-btn");
+  if (rankingBtn) rankingBtn.addEventListener("click", _openRankingLegend);
   const verifyCta = document.getElementById("br-verify-cta");
   if (verifyCta) verifyCta.addEventListener("click", () => {
     switchView("regions");
@@ -8749,6 +8764,41 @@ function renderBestRegionPanel() {
   });
   const planBtn = document.getElementById("br-deploy-plan");
   if (planBtn) planBtn.addEventListener("click", exportDeployPlan);
+}
+
+function _openRankingLegend() {
+  let overlay = document.getElementById("ranking-legend-overlay");
+  if (overlay) {
+    overlay.classList.remove("hidden");
+    _focusLegendDialog(overlay);
+    return;
+  }
+  overlay = document.createElement("div");
+  overlay.id = "ranking-legend-overlay";
+  overlay.className = "conf-legend-overlay ranking-legend-overlay";
+  const rows = _RANKING_LEGEND_ROWS.map(row =>
+    `<li><span class="ranking-factor">${escapeHtml(row.label)}</span><span class="ranking-weight">${escapeHtml(row.rank)}</span><span class="ranking-desc">${escapeHtml(row.desc)}</span></li>`
+  ).join("");
+  overlay.innerHTML = `<div class="conf-legend-modal ranking-legend-modal" role="dialog" aria-modal="true" aria-label="How rankings are evaluated" tabindex="-1">
+      <div class="conf-legend-head">
+        <strong>How the best regions are chosen</strong>
+        <button type="button" class="conf-legend-close" aria-label="Close">✕</button>
+      </div>
+      <p class="muted">The region at the <strong>top of the list is the safest place to deploy your BOM</strong>. There\u2019s no score to read \u2014 we simply compare regions in the priority order below, and the first thing that differs decides which one ranks higher.</p>
+      <ul class="ranking-legend-list">${rows}</ul>
+      <p class="muted conf-legend-foot">If two regions are otherwise equal, the one with <strong>lower latency</strong> — then <strong>lower estimated monthly cost</strong> — wins. Open any region\u2019s details to see exactly what\u2019s behind its place in the list, or use <strong>⚡ Raise confidence</strong> to replace estimates with read-only live checks.</p>
+    </div>`;
+  document.body.appendChild(overlay);
+  const close = () => overlay.classList.add("hidden");
+  overlay.addEventListener("click", (ev) => { if (ev.target === overlay) close(); });
+  const closeBtn = overlay.querySelector(".conf-legend-close");
+  closeBtn.addEventListener("click", close);
+  _focusLegendDialog(overlay);
+}
+
+function _focusLegendDialog(overlay) {
+  const modal = overlay && overlay.querySelector(".conf-legend-modal");
+  if (modal) modal.focus();
 }
 
 // -------------------------------------------------- Confidence legend popover
@@ -8761,14 +8811,18 @@ const _CONF_LEGEND = [
 
 function _openConfidenceLegend() {
   let overlay = document.getElementById("conf-legend-overlay");
-  if (overlay) { overlay.classList.remove("hidden"); return; }
+  if (overlay) {
+    overlay.classList.remove("hidden");
+    _focusLegendDialog(overlay);
+    return;
+  }
   overlay = document.createElement("div");
   overlay.id = "conf-legend-overlay";
   overlay.className = "conf-legend-overlay";
   const rows = _CONF_LEGEND.map(t =>
     `<li><span class="conf-legend-key"><span class="conf-dot ${t.cls}"></span><span class="conf-badge ${t.cls}">${escapeHtml(t.text)}</span></span><span class="conf-legend-desc">${escapeHtml(t.desc)}</span></li>`
   ).join("");
-  overlay.innerHTML = `<div class="conf-legend-modal" role="dialog" aria-label="Confidence levels">
+  overlay.innerHTML = `<div class="conf-legend-modal" role="dialog" aria-modal="true" aria-label="Confidence levels" tabindex="-1">
       <div class="conf-legend-head">
         <strong>How confident is each verdict?</strong>
         <button type="button" class="conf-legend-close" aria-label="Close">✕</button>
@@ -8780,7 +8834,9 @@ function _openConfidenceLegend() {
   document.body.appendChild(overlay);
   const close = () => overlay.classList.add("hidden");
   overlay.addEventListener("click", (ev) => { if (ev.target === overlay) close(); });
-  overlay.querySelector(".conf-legend-close").addEventListener("click", close);
+  const closeBtn = overlay.querySelector(".conf-legend-close");
+  closeBtn.addEventListener("click", close);
+  _focusLegendDialog(overlay);
 }
 
 // ------------------------------------------------------ Deploy plan (export)
@@ -10524,4 +10580,3 @@ function startBomWizardCoachTour() {
     },
   ]);
 }
-
