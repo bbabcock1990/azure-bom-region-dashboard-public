@@ -8721,14 +8721,15 @@ function renderBestRegionPanel() {
     <div class="br-header">
       <div class="br-header-top">
         <div class="br-title">Best regions for your BOM
-          <button type="button" class="br-legend-btn" id="br-legend-btn" title="What do the confidence levels mean?">ⓘ What do the levels mean?</button>
+          <button type="button" class="br-legend-btn" id="br-ranking-btn" title="How are region rankings evaluated?">ⓘ How rankings work</button>
+          <button type="button" class="br-legend-btn" id="br-legend-btn" title="What do the confidence levels mean?">Confidence levels</button>
         </div>
         <div class="br-actions">
           <button type="button" class="btn btn--sm" id="br-verify-cta" title="Run a read-only live probe across all regions to raise confidence">⚡ Raise confidence</button>
           <button type="button" class="btn btn--sm btn--primary" id="br-deploy-plan" title="Download a customer-ready deployment plan">📄 Deploy plan</button>
         </div>
       </div>
-      <div class="br-lead">${heading} <span class="br-sub">ranked by readiness, confidence, quota, latency & cost</span></div>
+      <div class="br-lead">${heading} <span class="br-sub">ranked by readiness, confidence, quota, remediation effort, latency & cost</span></div>
     </div>
     <div class="br-cards">${cards}</div>`;
   el.classList.remove("hidden");
@@ -8741,6 +8742,8 @@ function renderBestRegionPanel() {
   });
   const legendBtn = document.getElementById("br-legend-btn");
   if (legendBtn) legendBtn.addEventListener("click", _openConfidenceLegend);
+  const rankingBtn = document.getElementById("br-ranking-btn");
+  if (rankingBtn) rankingBtn.addEventListener("click", _openRankingLegend);
   const verifyCta = document.getElementById("br-verify-cta");
   if (verifyCta) verifyCta.addEventListener("click", () => {
     switchView("regions");
@@ -8749,6 +8752,41 @@ function renderBestRegionPanel() {
   });
   const planBtn = document.getElementById("br-deploy-plan");
   if (planBtn) planBtn.addEventListener("click", exportDeployPlan);
+}
+
+// ---------------------------------------------------- Ranking evaluation help
+const _RANKING_LEGEND_ROWS = [
+  { label: "Deployment verdict", weight: "×1000", desc: "Ready outranks ready with constraints, which outranks needs validation, which outranks not recommended." },
+  { label: "Evidence confidence", weight: "×120", desc: "Live-validated signals rank above ARM capability metadata, which ranks above baseline metadata." },
+  { label: "Quota status", weight: "×80", desc: "Sufficient quota ranks above unknown quota, which ranks above quota shortfalls." },
+  { label: "Unverifiable live probe", weight: "+60", desc: "Adds a caution penalty when a live check ran but could not produce a definitive result." },
+  { label: "Remediation effort", weight: "×15", desc: "Each blocker or constraint adds effort so regions with fewer actions rank higher." },
+  { label: "Availability zones", weight: "+8", desc: "Regions without AZ support receive a small penalty when the BOM prefers zone-ready regions." },
+];
+
+function _openRankingLegend() {
+  let overlay = document.getElementById("ranking-legend-overlay");
+  if (overlay) { overlay.classList.remove("hidden"); return; }
+  overlay = document.createElement("div");
+  overlay.id = "ranking-legend-overlay";
+  overlay.className = "conf-legend-overlay ranking-legend-overlay";
+  const rows = _RANKING_LEGEND_ROWS.map(row =>
+    `<li><span class="ranking-factor">${escapeHtml(row.label)}</span><span class="ranking-weight">${escapeHtml(row.weight)}</span><span class="ranking-desc">${escapeHtml(row.desc)}</span></li>`
+  ).join("");
+  overlay.innerHTML = `<div class="conf-legend-modal ranking-legend-modal" role="dialog" aria-label="How rankings are evaluated">
+      <div class="conf-legend-head">
+        <strong>How region rankings are evaluated</strong>
+        <button type="button" class="conf-legend-close" aria-label="Close">✕</button>
+      </div>
+      <p class="muted">The dashboard assigns each analyzed region a lower-is-better ranking score. Hard deployment readiness dominates the score; latency, estimated monthly cost, and region name are tie-breakers after the weighted factors match.</p>
+      <div class="ranking-formula">score = verdict×1000 + confidence×120 + quota×80 + unverifiable×60 + remediation×15 + AZ penalty</div>
+      <ul class="ranking-legend-list">${rows}</ul>
+      <p class="muted conf-legend-foot">Open a region's details to see the blockers and constraints behind its score. Use <strong>⚡ Raise confidence</strong> to replace metadata assumptions with read-only live probes where possible.</p>
+    </div>`;
+  document.body.appendChild(overlay);
+  const close = () => overlay.classList.add("hidden");
+  overlay.addEventListener("click", (ev) => { if (ev.target === overlay) close(); });
+  overlay.querySelector(".conf-legend-close").addEventListener("click", close);
 }
 
 // -------------------------------------------------- Confidence legend popover
@@ -10524,4 +10562,3 @@ function startBomWizardCoachTour() {
     },
   ]);
 }
-

@@ -29,8 +29,23 @@ def test_static_index_and_security_headers(client):
     r = client.get("/")
     assert r.status_code == 200
     assert "<html" in r.text.lower()
+    assert "app.js?v=2026090401" in r.text
+    assert "styles.css?v=2026090401" in r.text
     assert "Content-Security-Policy" in r.headers
     assert r.headers.get("X-Content-Type-Options") == "nosniff"
+
+
+def test_static_assets_explain_ranking_evaluation(client):
+    app_js = client.get("/app.js")
+    assert app_js.status_code == 200
+    assert "How rankings work" in app_js.text
+    assert "score = verdict×1000 + confidence×120 + quota×80" in app_js.text
+    assert "latency, estimated monthly cost, and region name are tie-breakers" in app_js.text
+
+    styles = client.get("/styles.css")
+    assert styles.status_code == 200
+    assert ".ranking-legend-list" in styles.text
+    assert ".ranking-formula" in styles.text
 
 
 @pytest.mark.parametrize("path", [
