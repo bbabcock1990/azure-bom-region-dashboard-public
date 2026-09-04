@@ -41,6 +41,7 @@ def test_static_assets_explain_ranking_evaluation(client):
     assert "How rankings work" in app_js.text
     assert "score = verdictBucket×1000 + confidenceBucket×120 + quotaBucket×80" in app_js.text
     assert "best bucket is 0" in app_js.text
+    assert 'role="dialog" aria-modal="true" aria-label="How rankings are evaluated"' in app_js.text
     assert "latency, estimated monthly cost, and region name are tie-breakers" in app_js.text
 
     styles = client.get("/styles.css")

@@ -8766,14 +8766,19 @@ function renderBestRegionPanel() {
 
 function _openRankingLegend() {
   let overlay = document.getElementById("ranking-legend-overlay");
-  if (overlay) { overlay.classList.remove("hidden"); return; }
+  if (overlay) {
+    overlay.classList.remove("hidden");
+    const btn = overlay.querySelector(".conf-legend-close");
+    if (btn) btn.focus();
+    return;
+  }
   overlay = document.createElement("div");
   overlay.id = "ranking-legend-overlay";
   overlay.className = "conf-legend-overlay ranking-legend-overlay";
   const rows = _RANKING_LEGEND_ROWS.map(row =>
     `<li><span class="ranking-factor">${escapeHtml(row.label)}</span><span class="ranking-weight">${escapeHtml(row.weight)}</span><span class="ranking-desc">${escapeHtml(row.desc)}</span></li>`
   ).join("");
-  overlay.innerHTML = `<div class="conf-legend-modal ranking-legend-modal" role="dialog" aria-label="How rankings are evaluated">
+  overlay.innerHTML = `<div class="conf-legend-modal ranking-legend-modal" role="dialog" aria-modal="true" aria-label="How rankings are evaluated" tabindex="-1">
       <div class="conf-legend-head">
         <strong>How region rankings are evaluated</strong>
         <button type="button" class="conf-legend-close" aria-label="Close">✕</button>
@@ -8786,7 +8791,9 @@ function _openRankingLegend() {
   document.body.appendChild(overlay);
   const close = () => overlay.classList.add("hidden");
   overlay.addEventListener("click", (ev) => { if (ev.target === overlay) close(); });
-  overlay.querySelector(".conf-legend-close").addEventListener("click", close);
+  const closeBtn = overlay.querySelector(".conf-legend-close");
+  closeBtn.addEventListener("click", close);
+  closeBtn.focus();
 }
 
 // -------------------------------------------------- Confidence legend popover
@@ -8799,14 +8806,19 @@ const _CONF_LEGEND = [
 
 function _openConfidenceLegend() {
   let overlay = document.getElementById("conf-legend-overlay");
-  if (overlay) { overlay.classList.remove("hidden"); return; }
+  if (overlay) {
+    overlay.classList.remove("hidden");
+    const btn = overlay.querySelector(".conf-legend-close");
+    if (btn) btn.focus();
+    return;
+  }
   overlay = document.createElement("div");
   overlay.id = "conf-legend-overlay";
   overlay.className = "conf-legend-overlay";
   const rows = _CONF_LEGEND.map(t =>
     `<li><span class="conf-legend-key"><span class="conf-dot ${t.cls}"></span><span class="conf-badge ${t.cls}">${escapeHtml(t.text)}</span></span><span class="conf-legend-desc">${escapeHtml(t.desc)}</span></li>`
   ).join("");
-  overlay.innerHTML = `<div class="conf-legend-modal" role="dialog" aria-label="Confidence levels">
+  overlay.innerHTML = `<div class="conf-legend-modal" role="dialog" aria-modal="true" aria-label="Confidence levels" tabindex="-1">
       <div class="conf-legend-head">
         <strong>How confident is each verdict?</strong>
         <button type="button" class="conf-legend-close" aria-label="Close">✕</button>
@@ -8818,7 +8830,9 @@ function _openConfidenceLegend() {
   document.body.appendChild(overlay);
   const close = () => overlay.classList.add("hidden");
   overlay.addEventListener("click", (ev) => { if (ev.target === overlay) close(); });
-  overlay.querySelector(".conf-legend-close").addEventListener("click", close);
+  const closeBtn = overlay.querySelector(".conf-legend-close");
+  closeBtn.addEventListener("click", close);
+  closeBtn.focus();
 }
 
 // ------------------------------------------------------ Deploy plan (export)
