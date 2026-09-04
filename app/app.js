@@ -5989,6 +5989,28 @@ async function openBomModal(bomId, opts = {}) {
   }
   // Make sure the datalist reflects any rows just rendered (saved/legacy values).
   renderBomSkuFamilyOptions();
+
+  // Guided walkthrough: a section-by-section tutorial that explains what each
+  // part of the wizard is for. Auto-runs only on the user's FIRST BOM (no BOMs
+  // saved yet) and only until they've seen/skipped it once; opts.guide (the
+  // "Guide me" button / Getting Started) always forces it. Runs after the
+  // wizard is fully populated so every target exists.
+  const firstBomAuto = opts.create && !_hasExistingBoms() && !_bomWizardGuideSeen();
+  if (opts.guide || firstBomAuto) {
+    _setBomWizardGuideSeen();
+    setTimeout(() => startBomWizardCoachTour(), 300);
+  }
+}
+
+const BOM_GUIDE_KEY = "bom_wizard_guide_seen";
+function _hasExistingBoms() {
+  try { return Object.keys((BOM_META && BOM_META.index) || {}).length > 0; } catch (_e) { return false; }
+}
+function _bomWizardGuideSeen() {
+  try { return localStorage.getItem(BOM_GUIDE_KEY) === "1"; } catch (_e) { return false; }
+}
+function _setBomWizardGuideSeen() {
+  try { localStorage.setItem(BOM_GUIDE_KEY, "1"); } catch (_e) {}
 }
 
 function closeBomModal() {
@@ -7544,20 +7566,185 @@ function formatSkusLine(source, resolved) {
 }
 
 // ---------------------------------------------------------------- Getting Started
+//
+// A clear, one-step-at-a-time walkthrough (replaces the old wall-of-text guide).
+// Each step has plain-language copy plus a real action button that DOES the thing
+// — sign in, open Settings, create a BOM, or load sample data — so the guide
+// removes barriers instead of just describing them. Auto-opens once on first
+// visit; re-openable any time from the header "?" button.
+
+const GS_SEEN_KEY = "gs_tour_seen";
+function _gsTourSeen() {
+  try { return localStorage.getItem(GS_SEEN_KEY) === "1"; } catch (_e) { return false; }
+}
+function _gsTourMarkSeen() {
+  try { localStorage.setItem(GS_SEEN_KEY, "1"); } catch (_e) {}
+}
+
+// Build the step list fresh each render so sign-in state is reflected live.
+function gettingStartedSteps() {
+  const signedIn = _isSignedIn();
+  const who = signedIn ? (TOKEN.info.az_user || "your account") : "";
+  const demo = !!(APP_CONFIG && APP_CONFIG.demo_mode);
+
+  const signInAction = {
+    label: signedIn ? "Switch account" : "Sign in to Azure",
+    className: signedIn ? "btn btn--sm" : "btn btn--accent btn--sm",
+    run: () => { openSigninModal(); refreshAuthToken({ force: true }); },
+  };
+
+  const steps = [
+    {
+      title: "Sign in to Azure",
+      body:
+        `<p>A one-time browser sign-in mints a <strong>read-only ARM token</strong> so the ` +
+        `dashboard can read SKU, region, and quota data. Nothing about the customer is ` +
+        `stored on the server.</p>` +
+        `<p class="muted">You need <em>Reader</em> on the customer's subscription — or have ` +
+        `the customer run the dashboard in their own tenant (same steps, their sign-in).</p>` +
+        (signedIn ? `<p class="gs-ok">✓ Signed in as <strong>${escapeHtml(who)}</strong>.</p>` : ""),
+      actions: [signInAction],
+    },
+    {
+      title: "Refresh your Azure data",
+      body:
+        `<p>Open <strong>Settings</strong> to set your <strong>support-ticket owner</strong> and ` +
+        `refresh the <strong>region, latency, and SKU</strong> datasets, so every analysis uses ` +
+        `the latest Azure data.</p>` +
+        `<p class="muted">Choose <strong>Open Settings & guide me</strong> and arrows will walk you ` +
+        `through exactly what to fill in.</p>`,
+      actions: [{
+        label: "⚙ Open Settings & guide me",
+        className: "btn btn--accent btn--sm",
+        run: () => {
+          _setOnboardSettingsDone();
+          dismissSettingsCoach(true);
+          switchView("settings");
+          setTimeout(() => startSettingsCoachTour(), 350);
+        },
+        close: true,
+      }],
+    },
+    {
+      title: "Create a BOM (Bill of Materials)",
+      body:
+        `<p>A <strong>BOM</strong> describes what the customer deploys: the Azure ` +
+        `<strong>services</strong>, the VM <strong>SKU families</strong>, and <strong>required ` +
+        `cores</strong>. Name it, pick the subscription(s), then choose services, regions, and SKUs.</p>` +
+        `<p class="muted">Choose <strong>New BOM & guide me</strong> and arrows will point at each ` +
+        `field as you go.</p>`,
+      actions: [{
+        label: "+ New BOM & guide me",
+        className: "btn btn--accent btn--sm",
+        run: () => { openBomModal(null, { create: true, guide: true }); },
+        close: true,
+      }],
+    },
+    {
+      title: "Run the analysis",
+      body:
+        `<p>Select your BOM in the <strong>Bills of Materials</strong> list on the left, then click ` +
+        `<strong>▶ Refresh analysis</strong>. A live progress bar streams SKU availability across ` +
+        `<strong>~38 Azure regions</strong> — usually a few minutes for a full run.</p>`,
+      actions: [],
+    },
+    {
+      title: "Explore results & clear blockers",
+      body:
+        `<p>Use the tabs to explore your results: <strong>Overview</strong> KPIs, per-region ` +
+        `<strong>Table</strong>, <strong>Map</strong>, <strong>Latency</strong>, <strong>Compare</strong>, ` +
+        `and <strong>Best regions</strong>.</p>` +
+        `<p>Where <strong>quota</strong> or <strong>zonal access</strong> blocks a region, you can ` +
+        `<strong>open, submit, and track an Azure support ticket</strong> right from the dashboard.</p>`,
+      // Offer the sample-data escape hatch here only when there's nothing to look at yet.
+      actions: (demo || signedIn) ? [] : [{
+        label: "▶ Explore with sample data",
+        className: "btn btn--sm",
+        run: () => loadSampleData(),
+        close: true,
+      }],
+    },
+  ];
+  return steps;
+}
 
 function setupGettingStarted() {
   const openBtn = document.getElementById("open-guide");
   const modal = document.getElementById("guide-modal");
   const overlay = document.getElementById("guide-overlay");
   const closeBtn = document.getElementById("guide-modal-close");
-  if (!openBtn || !modal || !overlay) return;
+  const stepHost = document.getElementById("gs-tour-step");
+  const dotsHost = document.getElementById("gs-tour-dots");
+  const backBtn = document.getElementById("gs-tour-back");
+  const nextBtn = document.getElementById("gs-tour-next");
+  const skipBtn = document.getElementById("gs-tour-skip");
+  if (!openBtn || !modal || !overlay || !stepHost || !dotsHost || !nextBtn) return;
 
-  const open = () => { overlay.classList.remove("hidden"); modal.classList.remove("hidden"); };
-  const close = () => { overlay.classList.add("hidden"); modal.classList.add("hidden"); };
+  let idx = 0;
 
-  openBtn.addEventListener("click", open);
+  const close = () => {
+    overlay.classList.add("hidden");
+    modal.classList.add("hidden");
+    _gsTourMarkSeen();
+  };
+  const open = (start) => {
+    idx = start || 0;
+    render();
+    overlay.classList.remove("hidden");
+    modal.classList.remove("hidden");
+  };
+
+  function render() {
+    const steps = gettingStartedSteps();
+    idx = Math.max(0, Math.min(idx, steps.length - 1));
+    const step = steps[idx];
+
+    dotsHost.innerHTML = steps.map((s, i) =>
+      `<button type="button" class="gs-dot${i === idx ? " is-active" : ""}${i < idx ? " is-done" : ""}" ` +
+      `data-goto="${i}" role="tab" aria-selected="${i === idx}" ` +
+      `title="Step ${i + 1}: ${escapeHtml(s.title)}"><span>${i + 1}</span></button>`
+    ).join("");
+    dotsHost.querySelectorAll("[data-goto]").forEach(d =>
+      d.addEventListener("click", () => { idx = Number(d.dataset.goto); render(); }));
+
+    stepHost.innerHTML =
+      `<div class="gs-tour-count">Step ${idx + 1} of ${steps.length}</div>` +
+      `<h3 class="gs-tour-title">${escapeHtml(step.title)}</h3>` +
+      `<div class="gs-tour-copy">${step.body}</div>` +
+      `<div class="gs-tour-actions" id="gs-tour-actions"></div>`;
+
+    const acts = stepHost.querySelector("#gs-tour-actions");
+    (step.actions || []).forEach(a => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = a.className || "btn btn--sm";
+      b.textContent = a.label;
+      b.addEventListener("click", () => {
+        try { if (a.run) a.run(); } finally { if (a.close) close(); }
+      });
+      acts.appendChild(b);
+    });
+
+    if (backBtn) backBtn.disabled = idx === 0;
+    nextBtn.textContent = idx === steps.length - 1 ? "Done" : "Next →";
+  }
+
+  if (backBtn) backBtn.addEventListener("click", () => { idx = Math.max(0, idx - 1); render(); });
+  nextBtn.addEventListener("click", () => {
+    const steps = gettingStartedSteps();
+    if (idx >= steps.length - 1) { close(); }
+    else { idx += 1; render(); }
+  });
+  if (skipBtn) skipBtn.addEventListener("click", close);
+  openBtn.addEventListener("click", () => open(0));
   if (closeBtn) closeBtn.addEventListener("click", close);
   overlay.addEventListener("click", close);
+
+  // First-visit auto-open removes the discovery barrier — new users land
+  // straight in the guided flow. Only once; the "?" button reopens it later.
+  if (!_gsTourSeen()) {
+    setTimeout(() => { if (!_gsTourSeen()) open(0); }, 700);
+  }
 }
 
 // ---------------------------------------------------------------- Settings: activity log
@@ -9807,6 +9994,7 @@ function init() {
 
   // BOM modal wiring
   document.getElementById("bom-modal-close").addEventListener("click", closeBomModal);
+  { const gm = document.getElementById("bom-wizard-guide"); if (gm) gm.addEventListener("click", () => startBomWizardCoachTour()); }
   const ddClose = document.getElementById("dd-close");
   if (ddClose) ddClose.addEventListener("click", closeDrilldown);
   document.getElementById("bom-cancel").addEventListener("click", closeBomModal);
@@ -10072,3 +10260,250 @@ function maybeShowSettingsCoach() {
   // Any click that opens Settings should also retire the coachmark.
   gear.addEventListener("click", () => dismissSettingsCoach(true), { once: true });
 }
+
+// ---------------------------------------------------------------- Coach-mark tour engine
+//
+// A reusable spotlight walkthrough: dims the page, rings a real UI element, and
+// shows an arrow bubble ("click here / fill this out / this does xyz") with
+// Back / Next / Skip. Each step can run a `before()` hook to open the right view,
+// modal or wizard step before pointing at its `target` (a CSS selector or a
+// function returning an element). Missing targets are skipped gracefully.
+
+const CM_TOUR = { steps: null, i: 0, ring: null, bubble: null, arrow: null, inner: null, target: null, reposition: null, token: 0 };
+
+function _cmSleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function _cmClamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+async function _cmResolveTarget(target, tries) {
+  tries = tries || 12;
+  for (let k = 0; k < tries; k++) {
+    let el = null;
+    try { el = (typeof target === "function") ? target() : document.querySelector(target); }
+    catch (_e) { el = null; }
+    if (el && el.getBoundingClientRect && el.offsetParent !== null) return el;
+    await _cmSleep(120);
+  }
+  // Last attempt even if offsetParent is null (e.g. fixed elements).
+  try { return (typeof target === "function") ? target() : document.querySelector(target); }
+  catch (_e) { return null; }
+}
+
+function stopCoachmarkTour() {
+  CM_TOUR.token++;
+  if (CM_TOUR.reposition) {
+    window.removeEventListener("resize", CM_TOUR.reposition);
+    window.removeEventListener("scroll", CM_TOUR.reposition, true);
+    CM_TOUR.reposition = null;
+  }
+  [CM_TOUR.ring, CM_TOUR.bubble].forEach(el => { if (el && el.parentNode) el.parentNode.removeChild(el); });
+  CM_TOUR.ring = CM_TOUR.bubble = CM_TOUR.arrow = CM_TOUR.inner = CM_TOUR.target = CM_TOUR.steps = null;
+  CM_TOUR.i = 0;
+}
+
+function startCoachmarkTour(steps, opts) {
+  opts = opts || {};
+  stopCoachmarkTour();
+  const list = (steps || []).filter(Boolean);
+  if (!list.length) return;
+  const myToken = ++CM_TOUR.token;
+  CM_TOUR.steps = list;
+  CM_TOUR.i = 0;
+
+  const ring = document.createElement("div"); ring.className = "cm-ring";
+  const bubble = document.createElement("div");
+  bubble.className = "cm-bubble";
+  bubble.setAttribute("role", "dialog");
+  bubble.setAttribute("aria-label", "Guided walkthrough");
+  const arrow = document.createElement("div"); arrow.className = "cm-arrow";
+  const inner = document.createElement("div"); inner.className = "cm-inner";
+  bubble.appendChild(arrow); bubble.appendChild(inner);
+  document.body.appendChild(ring); document.body.appendChild(bubble);
+  CM_TOUR.ring = ring; CM_TOUR.bubble = bubble; CM_TOUR.arrow = arrow; CM_TOUR.inner = inner;
+
+  function place() {
+    const t = CM_TOUR.target;
+    if (!t) return;
+    const r = t.getBoundingClientRect();
+    const pad = 6;
+    ring.style.top = (r.top - pad) + "px";
+    ring.style.left = (r.left - pad) + "px";
+    ring.style.width = (r.width + pad * 2) + "px";
+    ring.style.height = (r.height + pad * 2) + "px";
+
+    const bw = bubble.offsetWidth, bh = bubble.offsetHeight;
+    const vw = window.innerWidth, vh = window.innerHeight, gap = 14;
+    let placement;
+    if (r.bottom + gap + bh <= vh) placement = "bottom";
+    else if (r.top - gap - bh >= 0) placement = "top";
+    else if (r.right + gap + bw <= vw) placement = "right";
+    else placement = "left";
+
+    arrow.style.top = arrow.style.left = arrow.style.right = arrow.style.bottom = "";
+    let top, left;
+    if (placement === "bottom" || placement === "top") {
+      left = _cmClamp(r.left + r.width / 2 - bw / 2, 8, vw - bw - 8);
+      const ax = _cmClamp(r.left + r.width / 2 - left - 7, 12, bw - 20);
+      if (placement === "bottom") { top = r.bottom + gap; arrow.style.top = "-7px"; }
+      else { top = r.top - gap - bh; arrow.style.bottom = "-7px"; }
+      arrow.style.left = ax + "px";
+    } else {
+      top = _cmClamp(r.top + r.height / 2 - bh / 2, 8, vh - bh - 8);
+      const ay = _cmClamp(r.top + r.height / 2 - top - 7, 12, bh - 20);
+      if (placement === "right") { left = r.right + gap; arrow.style.left = "-7px"; }
+      else { left = r.left - gap - bw; arrow.style.right = "-7px"; }
+      arrow.style.top = ay + "px";
+    }
+    bubble.style.top = Math.round(top) + "px";
+    bubble.style.left = Math.round(left) + "px";
+  }
+  CM_TOUR.reposition = place;
+  window.addEventListener("resize", place);
+  window.addEventListener("scroll", place, true);
+
+  async function show() {
+    if (myToken !== CM_TOUR.token) return; // superseded/stopped
+    const step = CM_TOUR.steps[CM_TOUR.i];
+    if (!step) { finish(); return; }
+    if (step.before) { try { await step.before(); } catch (_e) {} }
+    if (myToken !== CM_TOUR.token) return;
+    const el = await _cmResolveTarget(step.target);
+    if (myToken !== CM_TOUR.token) return;
+    if (!el) { CM_TOUR.i++; return show(); }
+    CM_TOUR.target = el;
+    try { el.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" }); } catch (_e) {}
+    await _cmSleep(step.settle || 240);
+    if (myToken !== CM_TOUR.token) return;
+
+    const last = CM_TOUR.i === CM_TOUR.steps.length - 1;
+    inner.innerHTML =
+      `<div class="cm-count">Step ${CM_TOUR.i + 1} of ${CM_TOUR.steps.length}</div>` +
+      `<div class="cm-title">${escapeHtml(step.title || "")}</div>` +
+      `<div class="cm-text">${step.text || ""}</div>` +
+      `<div class="cm-actions">` +
+        `<button type="button" class="link-btn" data-cm="skip">Skip</button>` +
+        `<span class="cm-spacer"></span>` +
+        (CM_TOUR.i > 0 ? `<button type="button" class="btn btn--sm" data-cm="back">Back</button>` : "") +
+        `<button type="button" class="btn btn--accent btn--sm" data-cm="next">${last ? "Done" : "Next →"}</button>` +
+      `</div>`;
+    inner.querySelectorAll("[data-cm]").forEach(b => b.addEventListener("click", () => {
+      const a = b.dataset.cm;
+      if (a === "skip") return finish();
+      if (a === "back") { CM_TOUR.i = Math.max(0, CM_TOUR.i - 1); return show(); }
+      if (CM_TOUR.i >= CM_TOUR.steps.length - 1) return finish();
+      CM_TOUR.i++; show();
+    }));
+    place();
+  }
+
+  function finish() {
+    if (myToken !== CM_TOUR.token) return;
+    stopCoachmarkTour();
+    if (typeof opts.onDone === "function") { try { opts.onDone(); } catch (_e) {} }
+  }
+
+  show();
+}
+
+// Contextual walkthrough of the Settings screen — points at the ticket-owner
+// fields and the datasets refresh. Launched from Getting Started step 2.
+function startSettingsCoachTour() {
+  startCoachmarkTour([
+    {
+      target: '#owner-first',
+      title: "Set your ticket owner",
+      text: "Fill in the contact <strong>name</strong>, <strong>email</strong> and <strong>country</strong>. " +
+        "Azure requires these on every support ticket — the dashboard reuses them as the defaults.",
+      before: () => switchSettingsTab("owner"),
+    },
+    {
+      target: '#owner-save',
+      title: "Save the owner",
+      text: "Click <strong>Save owner</strong>. It's stored in your browser only — nothing goes to the server.",
+    },
+    {
+      target: '[data-settings-tab="datasets"]',
+      title: "Refresh your Azure data",
+      text: "Now open <strong>Model datasets</strong> — the regions, latency and SKU reference data the analysis is built on.",
+      before: () => switchSettingsTab("owner"),
+    },
+    {
+      target: '#datasets-list',
+      title: "Pull the latest from Azure",
+      text: "Click <strong>Refresh from Azure</strong> on each dataset so your analysis uses current region &amp; SKU availability. " +
+        "That's it — head back and create your first BOM.",
+      before: () => switchSettingsTab("datasets"),
+    },
+  ]);
+}
+
+// Contextual walkthrough of the BOM wizard — points at each field and what it
+// drives. Launched from Getting Started step 3 after the wizard opens.
+function startBomWizardCoachTour() {
+  startCoachmarkTour([
+    // ---- Step 1 · Basics -----------------------------------------------
+    {
+      target: '#bom-tag',
+      title: "Step 1 · Basics — Name the BOM",
+      text: "This is a <strong>Bill of Materials</strong> for one deployment. Give it a short, memorable label (e.g. <code>Contoso-Prod</code>) so you can tell BOMs apart in the left-hand list.",
+      before: () => bomWizardGoTo(1),
+    },
+    {
+      target: '#bom-customer',
+      title: "Customer name",
+      text: "Optional. The customer or team this BOM belongs to — shown next to the name for context.",
+    },
+    {
+      target: '#bom-resilience',
+      title: "Availability target",
+      text: "How the workload is deployed. <strong>Zone-redundant</strong> spreads across Availability Zones, so a tier that's restricted from zone redundancy in a region becomes a <strong>hard blocker</strong>. <strong>Regional</strong> makes those restrictions advisory only.",
+    },
+    {
+      target: '#bom-preferred-region',
+      title: "Preferred source region",
+      text: "Optional: the customer's primary region. Latency to every other region is measured <em>from</em> here, and it becomes the default source on the Latency tab.",
+    },
+    {
+      target: '#bom-owner-first',
+      title: "Support contact",
+      text: "Who Azure support tickets for <em>this</em> BOM are filed under. Defaults to your global Settings and can be overridden here. Expand <strong>Additional support details</strong> for phone, severity and CCs.",
+    },
+    {
+      target: '#bom-sub',
+      title: "Subscriptions",
+      text: "Select the customer subscription(s) to analyze — hold Ctrl/Cmd for multiple. SKU, quota and region availability are all read from these.",
+    },
+    // ---- Step 2 · Services & Regions -----------------------------------
+    {
+      target: '#bom-services-list',
+      title: "Step 2 · Services",
+      text: "Pick the Azure <strong>services</strong> in the architecture. The dashboard checks each one's per-region availability when you run the BOM.",
+      before: () => bomWizardGoTo(2),
+    },
+    {
+      target: '#bom-regions-list',
+      title: "Regions",
+      text: "Choose the <strong>regions</strong> to score. Leave the full list checked to compare all of Azure, or narrow it to the regions a customer actually cares about.",
+      before: () => bomWizardGoTo(2),
+    },
+    // ---- Step 3 · SKUs & Capacity --------------------------------------
+    {
+      target: '#bom-skus-tbody',
+      title: "Step 3 · SKUs & cores",
+      text: "Add the VM <strong>SKU families</strong> and the <strong>required cores</strong>. This drives the <strong>Quota Status</strong> check — it's what tells you where the customer needs a quota increase.",
+      before: () => bomWizardGoTo(3),
+    },
+    {
+      target: '#bom-service-tiers-step',
+      title: "Service tiers",
+      text: "Some services offer tiers (e.g. SQL Basic / Premium). Tiers marked <em>zone-redundant capable</em> are validated by the region readiness check.",
+      before: () => bomWizardGoTo(3),
+    },
+    {
+      target: '#bom-save',
+      title: "Save, then run",
+      text: "Click <strong>Save</strong> to store the BOM, then hit <strong>▶ Refresh analysis</strong> in the BOM's panel to score every region for blockers, quota and readiness.",
+      before: () => bomWizardGoTo(3),
+    },
+  ]);
+}
+
