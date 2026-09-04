@@ -8759,9 +8759,9 @@ const _RANKING_LEGEND_ROWS = [
   { label: "Deployment verdict", weight: "×1000", desc: "Ready outranks ready with constraints, which outranks needs validation, which outranks not recommended." },
   { label: "Evidence confidence", weight: "×120", desc: "Live-validated signals rank above ARM capability metadata, which ranks above baseline metadata." },
   { label: "Quota status", weight: "×80", desc: "Sufficient quota ranks above unknown quota, which ranks above quota shortfalls." },
-  { label: "Unverifiable live probe", weight: "+60", desc: "Adds a caution penalty when a live check ran but could not produce a definitive result." },
+  { label: "Unverifiable live probe", weight: "+60 penalty", desc: "Adds a caution penalty when a live check ran but could not produce a definitive result." },
   { label: "Remediation effort", weight: "×15", desc: "Each blocker or constraint adds effort so regions with fewer actions rank higher." },
-  { label: "Availability zones", weight: "+8", desc: "Regions without AZ support receive a small penalty when the BOM prefers zone-ready regions." },
+  { label: "Availability zones", weight: "+8 penalty", desc: "Regions without AZ support receive a small penalty when the BOM prefers zone-ready regions." },
 ];
 
 function _openRankingLegend() {
