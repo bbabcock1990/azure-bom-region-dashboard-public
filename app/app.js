@@ -2729,12 +2729,26 @@ function renderDeploymentReadinessSection(region, deployment) {
 const REGION_SUBVIEWS = ["table", "map", "latency", "compare"];
 
 function switchView(view) {
+  const prevView = STATE.view;
   // Legacy/direct calls to a sub-view name are routed into the Regions group.
   if (REGION_SUBVIEWS.includes(view)) {
     STATE.regionsSub = view;
     view = "regions";
   }
   STATE.view = view;
+
+  // Settings opens as a focused full-screen surface rather than inline at the
+  // bottom of the page. Remember where we came from so "Done" can return there.
+  const settingsEl = document.getElementById("view-settings");
+  if (settingsEl) {
+    const enteringSettings = (view === "settings");
+    if (enteringSettings && prevView !== "settings") {
+      STATE._preSettingsView = prevView || "overview";
+    }
+    settingsEl.classList.toggle("settings-fullscreen", enteringSettings);
+    document.body.classList.toggle("settings-open", enteringSettings);
+  }
+
   document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.view === view));
 
   // The Filters & Search rail only applies to region views (table/map/compare)
@@ -2778,6 +2792,19 @@ function switchView(view) {
   if (view === "support") renderSupportTab();
   if (view === "settings") {
     switchSettingsTab(STATE.settingsTab || "owner");
+  }
+}
+
+// Close the full-screen Settings surface: return to the view the user came
+// from and, during onboarding (no BOMs yet), bring back the Getting Started
+// guide at "Create a BOM" so they always know the next step.
+function closeSettingsView() {
+  const back = (STATE._preSettingsView && STATE._preSettingsView !== "settings")
+    ? STATE._preSettingsView : "overview";
+  STATE._preSettingsView = null;
+  switchView(back);
+  if (!_hasExistingBoms()) {
+    setTimeout(() => reopenGettingStarted(2), 250);
   }
 }
 
@@ -9975,6 +10002,8 @@ function init() {
   document.querySelectorAll(".region-subtab").forEach(t => t.addEventListener("click", () => switchRegionsSub(t.dataset.sub)));
   const openSettingsBtn = document.getElementById("open-settings");
   if (openSettingsBtn) openSettingsBtn.addEventListener("click", () => switchView("settings"));
+  const settingsDoneBtn = document.getElementById("settings-done");
+  if (settingsDoneBtn) settingsDoneBtn.addEventListener("click", closeSettingsView);
   const ownerSaveBtn = document.getElementById("owner-save");
   if (ownerSaveBtn) ownerSaveBtn.addEventListener("click", saveOwnerSettings);
   const ownerValRgCreateBtn = document.getElementById("owner-valrg-create");
@@ -10501,11 +10530,18 @@ function startSettingsCoachTour() {
       before: () => switchSettingsTab("datasets"),
     },
   ], {
-    // When the Settings hand-off finishes, bring the user back to the guide at
-    // the next step ("Create a BOM") so they always know what to do next.
+    // When the Settings hand-off finishes, close the full-screen Settings
+    // surface and bring the user back to the guide at the next step
+    // ("Create a BOM") so they always know what to do next.
     // Only on genuine completion — a Skip leaves them where they are.
     onDone: (reason) => {
-      if (reason === "done") setTimeout(() => reopenGettingStarted(2), 300);
+      if (reason === "done") {
+        const back = (STATE._preSettingsView && STATE._preSettingsView !== "settings")
+          ? STATE._preSettingsView : "overview";
+        STATE._preSettingsView = null;
+        switchView(back);
+        setTimeout(() => reopenGettingStarted(2), 300);
+      }
     },
   });
 }

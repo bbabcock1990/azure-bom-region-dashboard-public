@@ -2354,9 +2354,40 @@ html.filters-collapsed-init.bomnav-collapsed-init .layout { grid-template-column
 
 /* ── Settings blade: header + left-nav + single panel ──────────────────── */
 .settings-shell { padding: 1.25rem 1.5rem 2rem; max-width: 1100px; }
-.settings-header { margin-bottom: 1.25rem; }
+.settings-header { margin-bottom: 1.25rem; display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+.settings-header-main { min-width: 0; }
 .settings-header h1 { margin: 0 0 .25rem; font-size: 1.4rem; }
 .settings-header .muted { color: var(--panel-text-dim); margin: 0; }
+.settings-done-btn { flex: 0 0 auto; white-space: nowrap; }
+
+/* Full-screen overlay: opened as a focused surface, not inline at the bottom. */
+body.settings-open { overflow: hidden; }
+#view-settings.settings-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 9200;
+  margin: 0;
+  overflow-y: auto;
+  background: var(--surface);
+  animation: settingsFadeIn .14s ease-out;
+}
+#view-settings.settings-fullscreen .settings-shell {
+  max-width: 1100px;
+  margin: 0 auto;
+  min-height: 100%;
+  padding: 1.5rem 2rem 4rem;
+  box-sizing: border-box;
+}
+#view-settings.settings-fullscreen .settings-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  margin: -1.5rem -2rem 1.25rem;
+  padding: 1.15rem 2rem 1.1rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--panel-border);
+}
+@keyframes settingsFadeIn { from { opacity: 0; } to { opacity: 1; } }
 .settings-layout { display: grid; grid-template-columns: 232px 1fr; gap: 1.5rem; align-items: start; }
 .settings-nav { display: flex; flex-direction: column; gap: .35rem; position: sticky; top: 1rem; }
 .settings-nav-item {

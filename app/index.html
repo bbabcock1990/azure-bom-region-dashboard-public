@@ -28,7 +28,7 @@
        Order matters: this must run before the <link> below. -->
   <script src="preinit.js?v=2026061503"></script>
 
-  <link rel="stylesheet" href="styles.css?v=2026090402" />
+  <link rel="stylesheet" href="styles.css?v=2026090903" />
 </head>
 <body>
 
@@ -289,8 +289,11 @@
     <div class="view hidden" id="view-settings">
       <div class="settings-shell">
         <header class="settings-header">
-          <h1>Settings</h1>
-          <p class="muted">Manage your default support contact, the model's reference data, and the activity log.</p>
+          <div class="settings-header-main">
+            <h1>Settings</h1>
+            <p class="muted">Manage your default support contact, the model's reference data, and the activity log.</p>
+          </div>
+          <button type="button" id="settings-done" class="btn btn--accent settings-done-btn">← Done — back to guide</button>
         </header>
         <div class="settings-layout">
           <nav class="settings-nav" role="tablist" aria-label="Settings sections">
@@ -931,6 +934,6 @@
 
 <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
 
-<script src="app.js?v=2026090402"></script>
+<script src="app.js?v=2026090903"></script>
 </body>
 </html>

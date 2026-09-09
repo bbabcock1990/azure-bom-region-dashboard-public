@@ -29,8 +29,8 @@ def test_static_index_and_security_headers(client):
     r = client.get("/")
     assert r.status_code == 200
     assert "<html" in r.text.lower()
-    assert "app.js?v=2026090402" in r.text
-    assert "styles.css?v=2026090402" in r.text
+    assert "app.js?v=2026090903" in r.text
+    assert "styles.css?v=2026090903" in r.text
     assert "Content-Security-Policy" in r.headers
     assert r.headers.get("X-Content-Type-Options") == "nosniff"
 
