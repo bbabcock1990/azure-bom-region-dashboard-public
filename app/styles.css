@@ -1911,6 +1911,17 @@ html.filters-collapsed-init.bomnav-collapsed-init .layout { grid-template-column
   color: #ffd479;
 }
 .gs-ok { color: #6ee7b7 !important; font-size: 0.9rem !important; }
+.gs-step-done {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: #1f6f54;
+  color: #eafff4;
+  font-size: 0.72rem;
+  font-weight: 700;
+  vertical-align: middle;
+}
 .gs-tour-actions { margin-top: 14px; display: flex; gap: 10px; flex-wrap: wrap; }
 
 /* Footer nav */

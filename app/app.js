@@ -7022,6 +7022,8 @@ function updateSigninChip() {
     const emptyEl = document.getElementById("bom-panel-empty");
     if (emptyEl && !emptyEl.classList.contains("hidden")) renderOnboardingStepper(emptyEl);
   }
+  // And keep the Getting Started guide's step 1 in sync if it's open.
+  refreshGettingStartedIfOpen();
 }
 
 async function onSigninChipClick() {
@@ -7646,13 +7648,16 @@ function gettingStartedSteps() {
   const steps = [
     {
       title: "Sign in to Azure",
+      done: signedIn,
       body:
+        (signedIn
+          ? `<p class="gs-ok">✓ You're signed in as <strong>${escapeHtml(who)}</strong> — this step is done. Click <strong>Next →</strong> to continue.</p>`
+          : "") +
         `<p>A one-time browser sign-in mints a <strong>read-only ARM token</strong> so the ` +
         `dashboard can read SKU, region, and quota data. Nothing about the customer is ` +
         `stored on the server.</p>` +
         `<p class="muted">You need <em>Reader</em> on the customer's subscription — or have ` +
-        `the customer run the dashboard in their own tenant (same steps, their sign-in).</p>` +
-        (signedIn ? `<p class="gs-ok">✓ Signed in as <strong>${escapeHtml(who)}</strong>.</p>` : ""),
+        `the customer run the dashboard in their own tenant (same steps, their sign-in).</p>`,
       actions: [signInAction],
     },
     {
@@ -7725,6 +7730,14 @@ function reopenGettingStarted(stepIdx) {
   if (typeof _gsOpenAt === "function") { try { _gsOpenAt(stepIdx || 0); } catch (_e) {} }
 }
 
+// Re-renders the Getting Started guide if it is open (set in setupGettingStarted).
+// Called when sign-in state changes so step 1 flips to "done" without the user
+// having to close and reopen the guide.
+let _gsRerender = null;
+function refreshGettingStartedIfOpen() {
+  if (typeof _gsRerender === "function") { try { _gsRerender(); } catch (_e) {} }
+}
+
 function setupGettingStarted() {
   const openBtn = document.getElementById("open-guide");
   const modal = document.getElementById("guide-modal");
@@ -7757,16 +7770,17 @@ function setupGettingStarted() {
     const step = steps[idx];
 
     dotsHost.innerHTML = steps.map((s, i) =>
-      `<button type="button" class="gs-dot${i === idx ? " is-active" : ""}${i < idx ? " is-done" : ""}" ` +
+      `<button type="button" class="gs-dot${i === idx ? " is-active" : ""}${(i < idx || s.done) ? " is-done" : ""}" ` +
       `data-goto="${i}" role="tab" aria-selected="${i === idx}" ` +
       `title="Step ${i + 1}: ${escapeHtml(s.title)}"><span>${i + 1}</span></button>`
     ).join("");
     dotsHost.querySelectorAll("[data-goto]").forEach(d =>
       d.addEventListener("click", () => { idx = Number(d.dataset.goto); render(); }));
 
+    const doneBadge = step.done ? ` <span class="gs-step-done">✓ Done</span>` : "";
     stepHost.innerHTML =
       `<div class="gs-tour-count">Step ${idx + 1} of ${steps.length}</div>` +
-      `<h3 class="gs-tour-title">${escapeHtml(step.title)}</h3>` +
+      `<h3 class="gs-tour-title">${escapeHtml(step.title)}${doneBadge}</h3>` +
       `<div class="gs-tour-copy">${step.body}</div>` +
       `<div class="gs-tour-actions" id="gs-tour-actions"></div>`;
 
@@ -7800,6 +7814,10 @@ function setupGettingStarted() {
   // Expose the opener so coach tours can bring the user back to the guide when
   // they finish a hand-off task (e.g. after the Settings walkthrough).
   _gsOpenAt = open;
+
+  // Expose a re-render hook so sign-in state changes reflect immediately in an
+  // already-open guide (step 1 flips to "done").
+  _gsRerender = () => { if (!modal.classList.contains("hidden")) render(); };
 
   // First-visit auto-open removes the discovery barrier — new users land
   // straight in the guided flow. Only once; the "?" button reopens it later.
