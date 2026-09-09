@@ -125,41 +125,18 @@ function openValidationRgSettings() {
 }
 
 // ---------------------------------------------------------------- Theme
+// The dashboard is dark-only. The theme scaffolding is kept minimal so charts
+// still read their colors from the active CSS variables.
 
-const THEME_KEY = "themePreference"; // "light" | "dark" | (absent → follow system)
-const THEME_ICONS = { light: "☾", dark: "☀" }; // shown icon = action you can take
+function currentTheme() { return "dark"; }
 
-function getStoredTheme() {
-  try {
-    const v = localStorage.getItem(THEME_KEY);
-    return v === "light" || v === "dark" ? v : null;
-  } catch (e) { return null; }
-}
-
-function currentTheme() {
-  // Source of truth is whatever the pre-paint inline script applied to <html>.
-  return document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
-}
-
-function applyTheme(theme) {
-  const next = theme === "dark" ? "dark" : "light";
-  document.documentElement.setAttribute("data-theme", next);
-  const btn = document.getElementById("theme-toggle");
-  if (btn) {
-    const icon = btn.querySelector(".theme-toggle-icon");
-    if (icon) icon.textContent = THEME_ICONS[next];
-    btn.title = next === "dark" ? "Switch to light theme" : "Switch to dark theme";
-    btn.setAttribute("aria-label", btn.title);
-  }
+function applyTheme() {
+  document.documentElement.setAttribute("data-theme", "dark");
   // Re-render anything that picks colors from CSS vars at construction time.
   refreshChartTheme();
 }
 
-function toggleTheme() {
-  const next = currentTheme() === "dark" ? "light" : "dark";
-  try { localStorage.setItem(THEME_KEY, next); } catch (e) {}
-  applyTheme(next);
-}
+function toggleTheme() { /* dark-only: no-op */ }
 
 function themeColors() {
   // Read live values from CSS variables so charts pick the active theme.
@@ -212,23 +189,9 @@ function refreshChartTheme() {
 }
 
 function initThemeController() {
-  // Pre-paint inline script in <head> set the initial `data-theme` already.
-  // Here we just sync the button icon and wire up listeners.
-  applyTheme(currentTheme());
-
-  const btn = document.getElementById("theme-toggle");
-  if (btn) btn.addEventListener("click", toggleTheme);
-
-  // Follow system changes ONLY while user has no explicit preference.
-  try {
-    const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    const onChange = (e) => {
-      if (getStoredTheme()) return; // user picked one — leave it alone
-      applyTheme(e.matches ? "dark" : "light");
-    };
-    if (mq.addEventListener) mq.addEventListener("change", onChange);
-    else if (mq.addListener) mq.addListener(onChange);
-  } catch (e) {}
+  // Dark-only: ensure the attribute is set (pre-paint script already did) and
+  // sync chart colors. No toggle button or system-preference listener.
+  applyTheme();
 }
 
 // ---------------------------------------------------------------- API helpers
@@ -269,10 +232,10 @@ async function apiFetch(path, opts = {}) {
 
 // Acquire (and cache in-memory) the customer's ARM token via MSAL for delegated
 // mode. Returns the token string or null. ``interactive`` allows a sign-in popup.
-async function ensureDelegatedToken({ force = false } = {}) {
+async function ensureDelegatedToken({ force = false, switchAccount = false } = {}) {
   if (!APP_CONFIG || !APP_CONFIG.delegated_mode || !window.DelegatedAuth) return null;
   try {
-    const tok = await window.DelegatedAuth.getArmToken({ interactive: force });
+    const tok = await window.DelegatedAuth.getArmToken({ interactive: force, switchAccount });
     window.__ARM_TOKEN = tok || null;
     return tok;
   } catch (e) {
@@ -2749,12 +2712,26 @@ function renderDeploymentReadinessSection(region, deployment) {
 const REGION_SUBVIEWS = ["table", "map", "latency", "compare"];
 
 function switchView(view) {
+  const prevView = STATE.view;
   // Legacy/direct calls to a sub-view name are routed into the Regions group.
   if (REGION_SUBVIEWS.includes(view)) {
     STATE.regionsSub = view;
     view = "regions";
   }
   STATE.view = view;
+
+  // Settings opens as a focused full-screen surface rather than inline at the
+  // bottom of the page. Remember where we came from so "Done" can return there.
+  const settingsEl = document.getElementById("view-settings");
+  if (settingsEl) {
+    const enteringSettings = (view === "settings");
+    if (enteringSettings && prevView !== "settings") {
+      STATE._preSettingsView = prevView || "overview";
+    }
+    settingsEl.classList.toggle("settings-fullscreen", enteringSettings);
+    document.body.classList.toggle("settings-open", enteringSettings);
+  }
+
   document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.view === view));
 
   // The Filters & Search rail only applies to region views (table/map/compare)
@@ -2798,6 +2775,23 @@ function switchView(view) {
   if (view === "support") renderSupportTab();
   if (view === "settings") {
     switchSettingsTab(STATE.settingsTab || "owner");
+  }
+}
+
+// Close the full-screen Settings surface: return to the view the user came
+// from and, during onboarding (no BOMs yet), bring back the Getting Started
+// guide at "Create a BOM" so they always know the next step.
+function closeSettingsView() {
+  const back = (STATE._preSettingsView && STATE._preSettingsView !== "settings")
+    ? STATE._preSettingsView : "overview";
+  STATE._preSettingsView = null;
+  switchView(back);
+  if (!_hasExistingBoms()) {
+    // Reflect step-2 completion in the inline onboarding stepper so it advances
+    // to "Create your first BOM" when we return from Settings.
+    const emptyEl = document.getElementById("bom-panel-empty");
+    if (emptyEl && !emptyEl.classList.contains("hidden")) renderOnboardingStepper(emptyEl);
+    setTimeout(() => reopenGettingStarted(2), 250);
   }
 }
 
@@ -6883,13 +6877,13 @@ const TOKEN = {
   refreshTimer: null, // setTimeout handle for the countdown
 };
 
-async function refreshAuthToken({ force = false } = {}) {
-  setTokenStatus("loading", force ? "Opening browser sign-in…" : "Checking sign-in…");
+async function refreshAuthToken({ force = false, switchAccount = false } = {}) {
+  setTokenStatus("loading", switchAccount ? "Opening account picker…" : (force ? "Opening browser sign-in…" : "Checking sign-in…"));
   // Delegated (multi-customer) mode: mint the ARM token in the browser first so
   // the follow-up /api/auth/signin call carries it. Silent unless force.
   if (APP_CONFIG && APP_CONFIG.delegated_mode) {
     try {
-      const tok = await ensureDelegatedToken({ force });
+      const tok = await ensureDelegatedToken({ force: force || switchAccount, switchAccount });
       if (!tok) {
         if (force) {
           setTokenStatus("error", "Sign-in was cancelled or blocked. Please try again.");
@@ -6995,6 +6989,8 @@ function updateSigninChip() {
     const emptyEl = document.getElementById("bom-panel-empty");
     if (emptyEl && !emptyEl.classList.contains("hidden")) renderOnboardingStepper(emptyEl);
   }
+  // And keep the Getting Started guide's step 1 in sync if it's open.
+  refreshGettingStartedIfOpen();
 }
 
 async function onSigninChipClick() {
@@ -7032,16 +7028,27 @@ async function doSignOut() {
 }
 
 async function doSwitchDirectory() {
-  setTokenStatus("loading", "Signing out and re-opening sign-in…");
+  setTokenStatus("loading", "Opening the Microsoft account picker…");
   try {
+    // Drop the server-side session and the cached MSAL account so the picker
+    // starts clean and the follow-up token is minted for the newly chosen one.
     try { await apiFetch("/api/auth/signout", { method: "POST" }); } catch (_e) {}
-    // Clear MSAL so the interactive prompt lets the user pick a different account.
     try { if (window.DelegatedAuth && DelegatedAuth.logout) await DelegatedAuth.logout(); } catch (_e) {}
     TOKEN.info = null;
     try { updateSigninChip(); } catch (_e) {}
-    closeSigninModal();
-    // Send the user back to the login start page to sign in again.
-    showAuthGate();
+    // Force the account/directory picker (prompt=select_account, no loginHint)
+    // instead of silently re-SSO'ing back into the same Easy Auth account.
+    const body = await refreshAuthToken({ force: true, switchAccount: true });
+    if (body) {
+      closeSigninModal();
+      // Reload subscriptions, snapshots and per-account state for the new login.
+      await startAppAfterAuth();
+      try { updateSigninChip(); } catch (_e) {}
+      try { showToast("Switched account — data reloaded.", "success"); } catch (_e) {}
+    } else {
+      // Popup cancelled/blocked, or no token minted — fall back to the gate.
+      showAuthGate();
+    }
   } catch (e) {
     setTokenStatus("error", netErrLine(e));
   }
@@ -7619,13 +7626,13 @@ function gettingStartedSteps() {
   const steps = [
     {
       title: "Sign in to Azure",
+      done: signedIn,
       body:
+        (signedIn
+          ? `<p class="gs-ok">✓ You're signed in as <strong>${escapeHtml(who)}</strong> — this step is done. Click <strong>Next →</strong> to continue.</p>`
+          : "") +
         `<p>A one-time browser sign-in mints a <strong>read-only ARM token</strong> so the ` +
-        `dashboard can read SKU, region, and quota data. Nothing about the customer is ` +
-        `stored on the server.</p>` +
-        `<p class="muted">You need <em>Reader</em> on the customer's subscription — or have ` +
-        `the customer run the dashboard in their own tenant (same steps, their sign-in).</p>` +
-        (signedIn ? `<p class="gs-ok">✓ Signed in as <strong>${escapeHtml(who)}</strong>.</p>` : ""),
+        `dashboard can read SKU, region, and quota data. Nothing is stored on the server.</p>`,
       actions: [signInAction],
     },
     {
@@ -7698,6 +7705,14 @@ function reopenGettingStarted(stepIdx) {
   if (typeof _gsOpenAt === "function") { try { _gsOpenAt(stepIdx || 0); } catch (_e) {} }
 }
 
+// Re-renders the Getting Started guide if it is open (set in setupGettingStarted).
+// Called when sign-in state changes so step 1 flips to "done" without the user
+// having to close and reopen the guide.
+let _gsRerender = null;
+function refreshGettingStartedIfOpen() {
+  if (typeof _gsRerender === "function") { try { _gsRerender(); } catch (_e) {} }
+}
+
 function setupGettingStarted() {
   const openBtn = document.getElementById("open-guide");
   const modal = document.getElementById("guide-modal");
@@ -7730,16 +7745,17 @@ function setupGettingStarted() {
     const step = steps[idx];
 
     dotsHost.innerHTML = steps.map((s, i) =>
-      `<button type="button" class="gs-dot${i === idx ? " is-active" : ""}${i < idx ? " is-done" : ""}" ` +
+      `<button type="button" class="gs-dot${i === idx ? " is-active" : ""}${(i < idx || s.done) ? " is-done" : ""}" ` +
       `data-goto="${i}" role="tab" aria-selected="${i === idx}" ` +
       `title="Step ${i + 1}: ${escapeHtml(s.title)}"><span>${i + 1}</span></button>`
     ).join("");
     dotsHost.querySelectorAll("[data-goto]").forEach(d =>
       d.addEventListener("click", () => { idx = Number(d.dataset.goto); render(); }));
 
+    const doneBadge = step.done ? ` <span class="gs-step-done">✓ Done</span>` : "";
     stepHost.innerHTML =
       `<div class="gs-tour-count">Step ${idx + 1} of ${steps.length}</div>` +
-      `<h3 class="gs-tour-title">${escapeHtml(step.title)}</h3>` +
+      `<h3 class="gs-tour-title">${escapeHtml(step.title)}${doneBadge}</h3>` +
       `<div class="gs-tour-copy">${step.body}</div>` +
       `<div class="gs-tour-actions" id="gs-tour-actions"></div>`;
 
@@ -7773,6 +7789,10 @@ function setupGettingStarted() {
   // Expose the opener so coach tours can bring the user back to the guide when
   // they finish a hand-off task (e.g. after the Settings walkthrough).
   _gsOpenAt = open;
+
+  // Expose a re-render hook so sign-in state changes reflect immediately in an
+  // already-open guide (step 1 flips to "done").
+  _gsRerender = () => { if (!modal.classList.contains("hidden")) render(); };
 
   // First-visit auto-open removes the discovery barrier — new users land
   // straight in the guided flow. Only once; the "?" button reopens it later.
@@ -8108,7 +8128,7 @@ async function loadOwnerSettings() {
   set("owner-country", s.country || "US");
   set("owner-tz", s.preferred_timezone || "Pacific Standard Time");
   set("owner-sev", s.default_severity || "moderate");
-  set("owner-valrg", _valRgForSub(focusedSubscriptionId()));
+  set("owner-valrg", _valRgForSub(focusedSubscriptionId()) || "Azure-BOM-Tool-Validation-RG");
   const subLabelEl = document.getElementById("owner-valrg-sub");
   if (subLabelEl) {
     const subName = focusedSubscriptionName();
@@ -8134,7 +8154,7 @@ async function _loadValidationRgOptions() {
     const shorts = Array.from(new Set(regions.map(r => r.short).filter(Boolean))).sort();
     locList.innerHTML = shorts.map(s => `<option value="${escapeHtml(s)}"></option>`).join("");
     const locInput = document.getElementById("owner-valrg-loc");
-    if (locInput && !locInput.value && shorts.length) locInput.value = shorts[0];
+    if (locInput && !locInput.value) locInput.value = "centralus";
   }
   if (!list) return;
   const sub = focusedSubscriptionId() || "";
@@ -8233,6 +8253,8 @@ async function saveOwnerSettings() {
     if (typeof APP_CONFIG === "object" && APP_CONFIG) APP_CONFIG.support_configured = res.configured;
     if (status) status.textContent = res.configured ? "✓ Saved" : "Saved (name + email needed to submit tickets)";
     showToast("Ticket owner saved.", "success");
+    // Saving the owner satisfies onboarding step 2 ("Configure & refresh").
+    _setOnboardSettingsDone();
   } catch (e) {
     if (status) status.textContent = `❌ ${e.message}`;
   }
@@ -9998,6 +10020,8 @@ function init() {
   document.querySelectorAll(".region-subtab").forEach(t => t.addEventListener("click", () => switchRegionsSub(t.dataset.sub)));
   const openSettingsBtn = document.getElementById("open-settings");
   if (openSettingsBtn) openSettingsBtn.addEventListener("click", () => switchView("settings"));
+  const settingsDoneBtn = document.getElementById("settings-done");
+  if (settingsDoneBtn) settingsDoneBtn.addEventListener("click", closeSettingsView);
   const ownerSaveBtn = document.getElementById("owner-save");
   if (ownerSaveBtn) ownerSaveBtn.addEventListener("click", saveOwnerSettings);
   const ownerValRgCreateBtn = document.getElementById("owner-valrg-create");
@@ -10194,7 +10218,6 @@ async function startAppAfterAuth() {
   await loadSnapshotsList();
   const picker = document.getElementById("snapshot-picker");
   await loadSnapshot(picker ? (picker.value || null) : null);
-  maybeShowSettingsCoach();
   // Restore quota request history from the (browser-held) store
   await _restoreQuotaRequestsFromDb();
   // Populate the header sign-in chip (silent — never opens a browser).
@@ -10373,9 +10396,18 @@ async function _cmResolveTarget(target, tries) {
     if (el && el.getBoundingClientRect && el.offsetParent !== null) return el;
     await _cmSleep(120);
   }
-  // Last attempt even if offsetParent is null (e.g. fixed elements).
-  try { return (typeof target === "function") ? target() : document.querySelector(target); }
-  catch (_e) { return null; }
+  // Last attempt: return the element even if offsetParent is null (some fixed
+  // or transformed elements report no offsetParent yet are visible). But a
+  // truly hidden element (display:none → a 0×0 rect) is treated as ABSENT so
+  // the caller skips the step rather than anchoring the coachmark to the
+  // top-left corner (0,0).
+  try {
+    const el = (typeof target === "function") ? target() : document.querySelector(target);
+    if (!el || !el.getBoundingClientRect) return null;
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 && r.height === 0) return null;
+    return el;
+  } catch (_e) { return null; }
 }
 
 function stopCoachmarkTour() {
@@ -10386,6 +10418,7 @@ function stopCoachmarkTour() {
     CM_TOUR.reposition = null;
   }
   [CM_TOUR.ring, CM_TOUR.bubble].forEach(el => { if (el && el.parentNode) el.parentNode.removeChild(el); });
+  if (CM_TOUR.target && CM_TOUR.target.classList) CM_TOUR.target.classList.remove("cm-active-field");
   CM_TOUR.ring = CM_TOUR.bubble = CM_TOUR.arrow = CM_TOUR.inner = CM_TOUR.target = CM_TOUR.steps = null;
   CM_TOUR.i = 0;
 }
@@ -10398,6 +10431,7 @@ function startCoachmarkTour(steps, opts) {
   const myToken = ++CM_TOUR.token;
   CM_TOUR.steps = list;
   CM_TOUR.i = 0;
+  CM_TOUR.skipped = 0;
 
   const ring = document.createElement("div"); ring.className = "cm-ring";
   const bubble = document.createElement("div");
@@ -10458,15 +10492,23 @@ function startCoachmarkTour(steps, opts) {
     if (myToken !== CM_TOUR.token) return;
     const el = await _cmResolveTarget(step.target);
     if (myToken !== CM_TOUR.token) return;
-    if (!el) { CM_TOUR.i++; return show(); }
+    // Target hidden/absent after retries — drop the step and keep the visible
+    // step count honest so numbering never shows a gap.
+    if (!el) { CM_TOUR.skipped = (CM_TOUR.skipped || 0) + 1; CM_TOUR.i++; return show(); }
+    // Lift the newly-active field above the dim overlay and bubble so it stays
+    // crisp and easy to click/type into while the guide points at it.
+    if (CM_TOUR.target && CM_TOUR.target !== el && CM_TOUR.target.classList) CM_TOUR.target.classList.remove("cm-active-field");
     CM_TOUR.target = el;
+    if (el.classList) el.classList.add("cm-active-field");
     try { el.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" }); } catch (_e) {}
     await _cmSleep(step.settle || 240);
     if (myToken !== CM_TOUR.token) return;
 
+    const shownTotal = CM_TOUR.steps.length - (CM_TOUR.skipped || 0);
+    const shownIndex = CM_TOUR.i + 1 - (CM_TOUR.skipped || 0);
     const last = CM_TOUR.i === CM_TOUR.steps.length - 1;
     inner.innerHTML =
-      `<div class="cm-count">Step ${CM_TOUR.i + 1} of ${CM_TOUR.steps.length}</div>` +
+      `<div class="cm-count">Step ${shownIndex} of ${shownTotal}</div>` +
       `<div class="cm-title">${escapeHtml(step.title || "")}</div>` +
       `<div class="cm-text">${step.text || ""}</div>` +
       `<div class="cm-actions">` +
@@ -10524,11 +10566,22 @@ function startSettingsCoachTour() {
       before: () => switchSettingsTab("datasets"),
     },
   ], {
-    // When the Settings hand-off finishes, bring the user back to the guide at
-    // the next step ("Create a BOM") so they always know what to do next.
+    // When the Settings hand-off finishes, close the full-screen Settings
+    // surface and bring the user back to the guide at the next step
+    // ("Create a BOM") so they always know what to do next.
     // Only on genuine completion — a Skip leaves them where they are.
     onDone: (reason) => {
-      if (reason === "done") setTimeout(() => reopenGettingStarted(2), 300);
+      if (reason === "done") {
+        const back = (STATE._preSettingsView && STATE._preSettingsView !== "settings")
+          ? STATE._preSettingsView : "overview";
+        STATE._preSettingsView = null;
+        switchView(back);
+        if (!_hasExistingBoms()) {
+          const emptyEl = document.getElementById("bom-panel-empty");
+          if (emptyEl && !emptyEl.classList.contains("hidden")) renderOnboardingStepper(emptyEl);
+        }
+        setTimeout(() => reopenGettingStarted(2), 300);
+      }
     },
   });
 }

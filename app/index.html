@@ -21,14 +21,14 @@
        the server reports delegated_mode; mints the customer's ARM token
        client-side so tokens never touch the server. -->
   <script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.28.1/lib/msal-browser.min.js"></script>
-  <script src="msal-auth.js?v=2026090329"></script>
+  <script src="msal-auth.js?v=2026090906"></script>
 
   <!-- Apply persisted theme + filters state BEFORE styles.css loads to prevent
        FOUC. Kept external (not inline) so the CSP can forbid inline scripts.
        Order matters: this must run before the <link> below. -->
-  <script src="preinit.js?v=2026061503"></script>
+  <script src="preinit.js?v=2026090912"></script>
 
-  <link rel="stylesheet" href="styles.css?v=2026090901" />
+  <link rel="stylesheet" href="styles.css?v=2026090912" />
 </head>
 <body>
 
@@ -51,9 +51,6 @@
     </button>
     <button type="button" id="open-settings" class="theme-toggle-btn" title="Settings &amp; activity log" aria-label="Open settings and activity log">
       <span class="theme-toggle-icon" aria-hidden="true">⚙</span>
-    </button>
-    <button type="button" id="theme-toggle" class="theme-toggle-btn" title="Toggle light/dark theme" aria-label="Toggle theme">
-      <span class="theme-toggle-icon" aria-hidden="true">☾</span>
     </button>
   </div>
 </header>
@@ -289,8 +286,11 @@
     <div class="view hidden" id="view-settings">
       <div class="settings-shell">
         <header class="settings-header">
-          <h1>Settings</h1>
-          <p class="muted">Manage your default support contact, the model's reference data, and the activity log.</p>
+          <div class="settings-header-main">
+            <h1>Settings</h1>
+            <p class="muted">Manage your default support contact, the model's reference data, and the activity log.</p>
+          </div>
+          <button type="button" id="settings-done" class="btn btn--accent settings-done-btn">← Done — back to guide</button>
         </header>
         <div class="settings-layout">
           <nav class="settings-nav" role="tablist" aria-label="Settings sections">
@@ -649,14 +649,14 @@
       </div>
       <div id="signin-actions" class="signin-actions" style="margin-top:12px; display:flex; gap:8px;">
         <button type="button" id="btn-signout" class="btn-secondary" title="Clear cached credentials and sign out">Sign out</button>
-        <button type="button" id="btn-switch-dir" class="btn-secondary" title="Sign out and re-sign-in with a different account or tenant">Switch directory / account</button>
+        <button type="button" id="btn-switch-dir" class="btn-secondary" title="Pick a different Microsoft account (and its directory)">Switch account</button>
       </div>
       <details>
         <summary>How does this work?</summary>
         <ol>
           <li>Click <em>Sign in</em> — a browser window opens once for your Microsoft sign-in. The local backend then mints an ARM bearer token in-process (no Azure CLI required).</li>
           <li>Your sign-in is cached, so later runs are silent until Azure asks you to refresh.</li>
-          <li><em>Sign out</em> clears the cache. <em>Switch directory</em> signs out then immediately re-opens the sign-in prompt so you can pick a different account or tenant.</li>
+          <li><em>Sign out</em> clears the cache. <em>Switch account</em> opens the Microsoft account picker so you can sign in as a different account — subscriptions from that account's directory are then loaded.</li>
         </ol>
       </details>
     </div>
@@ -931,6 +931,6 @@
 
 <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
 
-<script src="app.js?v=2026090901"></script>
+<script src="app.js?v=2026090912"></script>
 </body>
 </html>
