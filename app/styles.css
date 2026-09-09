@@ -3423,10 +3423,20 @@ body.settings-open { overflow: hidden; }
   border-radius: 8px;
   pointer-events: none;
   box-shadow:
-    0 0 0 9999px rgba(6, 12, 24, 0.62),
+    0 0 0 9999px rgba(6, 12, 24, 0.45),
     0 0 0 2px var(--ms-blue, #2f6feb),
-    0 0 20px 5px rgba(47, 111, 235, 0.55);
+    0 0 18px 4px rgba(47, 111, 235, 0.40);
   transition: top .2s ease, left .2s ease, width .2s ease, height .2s ease;
+}
+/* The field the guide is currently pointing at: lift it above the dim overlay
+   and the bubble so it stays crisp and easy to read/click/type into. */
+.cm-active-field {
+  position: relative;
+  z-index: 9602;
+  border-radius: 6px;
+  outline: 2px solid var(--ms-blue, #2f6feb);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 6px rgba(47, 111, 235, 0.18), 0 8px 22px rgba(0, 0, 0, 0.45);
 }
 .cm-bubble {
   --cm-bg: #173257;

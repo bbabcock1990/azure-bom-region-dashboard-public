@@ -10449,6 +10449,7 @@ function stopCoachmarkTour() {
     CM_TOUR.reposition = null;
   }
   [CM_TOUR.ring, CM_TOUR.bubble].forEach(el => { if (el && el.parentNode) el.parentNode.removeChild(el); });
+  if (CM_TOUR.target && CM_TOUR.target.classList) CM_TOUR.target.classList.remove("cm-active-field");
   CM_TOUR.ring = CM_TOUR.bubble = CM_TOUR.arrow = CM_TOUR.inner = CM_TOUR.target = CM_TOUR.steps = null;
   CM_TOUR.i = 0;
 }
@@ -10525,7 +10526,11 @@ function startCoachmarkTour(steps, opts) {
     // Target hidden/absent after retries — drop the step and keep the visible
     // step count honest so numbering never shows a gap.
     if (!el) { CM_TOUR.skipped = (CM_TOUR.skipped || 0) + 1; CM_TOUR.i++; return show(); }
+    // Lift the newly-active field above the dim overlay and bubble so it stays
+    // crisp and easy to click/type into while the guide points at it.
+    if (CM_TOUR.target && CM_TOUR.target !== el && CM_TOUR.target.classList) CM_TOUR.target.classList.remove("cm-active-field");
     CM_TOUR.target = el;
+    if (el.classList) el.classList.add("cm-active-field");
     try { el.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" }); } catch (_e) {}
     await _cmSleep(step.settle || 240);
     if (myToken !== CM_TOUR.token) return;
