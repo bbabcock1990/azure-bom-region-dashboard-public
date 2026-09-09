@@ -8395,6 +8395,12 @@ async function loadDatasetsSettings() {
     host.innerHTML = `<p class="muted">❌ Could not load datasets: ${escapeHtml(e.message)}</p>`;
     return;
   }
+  // Hide built-in static seeds that customers shouldn't need to manage: the
+  // legacy default region list (superseded by the Region catalog) and the VM
+  // SKU-family seeds (the picker merges a live ARM pull over them at runtime).
+  // The seed files still exist server-side and continue to serve as fallbacks.
+  const HIDDEN_DATASET_IDS = new Set(["regions_list", "skus_list", "sku_families_seed"]);
+  datasets = datasets.filter(d => d && !HIDDEN_DATASET_IDS.has(d.id));
   if (!datasets.length) {
     host.innerHTML = `<p class="muted">No managed datasets.</p>`;
     return;
