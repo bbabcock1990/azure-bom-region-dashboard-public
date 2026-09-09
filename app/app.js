@@ -2824,6 +2824,10 @@ function closeSettingsView() {
   STATE._preSettingsView = null;
   switchView(back);
   if (!_hasExistingBoms()) {
+    // Reflect step-2 completion in the inline onboarding stepper so it advances
+    // to "Create your first BOM" when we return from Settings.
+    const emptyEl = document.getElementById("bom-panel-empty");
+    if (emptyEl && !emptyEl.classList.contains("hidden")) renderOnboardingStepper(emptyEl);
     setTimeout(() => reopenGettingStarted(2), 250);
   }
 }
@@ -8286,6 +8290,8 @@ async function saveOwnerSettings() {
     if (typeof APP_CONFIG === "object" && APP_CONFIG) APP_CONFIG.support_configured = res.configured;
     if (status) status.textContent = res.configured ? "✓ Saved" : "Saved (name + email needed to submit tickets)";
     showToast("Ticket owner saved.", "success");
+    // Saving the owner satisfies onboarding step 2 ("Configure & refresh").
+    _setOnboardSettingsDone();
   } catch (e) {
     if (status) status.textContent = `❌ ${e.message}`;
   }
@@ -10607,6 +10613,10 @@ function startSettingsCoachTour() {
           ? STATE._preSettingsView : "overview";
         STATE._preSettingsView = null;
         switchView(back);
+        if (!_hasExistingBoms()) {
+          const emptyEl = document.getElementById("bom-panel-empty");
+          if (emptyEl && !emptyEl.classList.contains("hidden")) renderOnboardingStepper(emptyEl);
+        }
         setTimeout(() => reopenGettingStarted(2), 300);
       }
     },
