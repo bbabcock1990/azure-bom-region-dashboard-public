@@ -83,6 +83,17 @@
       return rUp.accessToken;
     }
 
+    // Switch-account/directory path: force the Microsoft account picker so the
+    // user can choose a different account or tenant. Deliberately never silent
+    // and with NO loginHint/account (either would pin the flow back to the
+    // current Easy Auth user and skip the picker entirely).
+    if (opts.switchAccount) {
+      var reqSw = { scopes: scopes, prompt: "select_account" };
+      var rSw = await pca.acquireTokenPopup(reqSw);
+      account = rSw.account || account;
+      return rSw.accessToken;
+    }
+
     // 1) Silent with a known account (refresh from cache).
     if (account) {
       try {

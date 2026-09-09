@@ -269,10 +269,10 @@ async function apiFetch(path, opts = {}) {
 
 // Acquire (and cache in-memory) the customer's ARM token via MSAL for delegated
 // mode. Returns the token string or null. ``interactive`` allows a sign-in popup.
-async function ensureDelegatedToken({ force = false } = {}) {
+async function ensureDelegatedToken({ force = false, switchAccount = false } = {}) {
   if (!APP_CONFIG || !APP_CONFIG.delegated_mode || !window.DelegatedAuth) return null;
   try {
-    const tok = await window.DelegatedAuth.getArmToken({ interactive: force });
+    const tok = await window.DelegatedAuth.getArmToken({ interactive: force, switchAccount });
     window.__ARM_TOKEN = tok || null;
     return tok;
   } catch (e) {
@@ -6910,13 +6910,13 @@ const TOKEN = {
   refreshTimer: null, // setTimeout handle for the countdown
 };
 
-async function refreshAuthToken({ force = false } = {}) {
-  setTokenStatus("loading", force ? "Opening browser sign-in…" : "Checking sign-in…");
+async function refreshAuthToken({ force = false, switchAccount = false } = {}) {
+  setTokenStatus("loading", switchAccount ? "Opening account picker…" : (force ? "Opening browser sign-in…" : "Checking sign-in…"));
   // Delegated (multi-customer) mode: mint the ARM token in the browser first so
   // the follow-up /api/auth/signin call carries it. Silent unless force.
   if (APP_CONFIG && APP_CONFIG.delegated_mode) {
     try {
-      const tok = await ensureDelegatedToken({ force });
+      const tok = await ensureDelegatedToken({ force: force || switchAccount, switchAccount });
       if (!tok) {
         if (force) {
           setTokenStatus("error", "Sign-in was cancelled or blocked. Please try again.");
@@ -7061,16 +7061,27 @@ async function doSignOut() {
 }
 
 async function doSwitchDirectory() {
-  setTokenStatus("loading", "Signing out and re-opening sign-in…");
+  setTokenStatus("loading", "Opening the Microsoft account picker…");
   try {
+    // Drop the server-side session and the cached MSAL account so the picker
+    // starts clean and the follow-up token is minted for the newly chosen one.
     try { await apiFetch("/api/auth/signout", { method: "POST" }); } catch (_e) {}
-    // Clear MSAL so the interactive prompt lets the user pick a different account.
     try { if (window.DelegatedAuth && DelegatedAuth.logout) await DelegatedAuth.logout(); } catch (_e) {}
     TOKEN.info = null;
     try { updateSigninChip(); } catch (_e) {}
-    closeSigninModal();
-    // Send the user back to the login start page to sign in again.
-    showAuthGate();
+    // Force the account/directory picker (prompt=select_account, no loginHint)
+    // instead of silently re-SSO'ing back into the same Easy Auth account.
+    const body = await refreshAuthToken({ force: true, switchAccount: true });
+    if (body) {
+      closeSigninModal();
+      // Reload subscriptions, snapshots and per-account state for the new login.
+      await startAppAfterAuth();
+      try { updateSigninChip(); } catch (_e) {}
+      try { showToast("Switched account — data reloaded.", "success"); } catch (_e) {}
+    } else {
+      // Popup cancelled/blocked, or no token minted — fall back to the gate.
+      showAuthGate();
+    }
   } catch (e) {
     setTokenStatus("error", netErrLine(e));
   }
