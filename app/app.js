@@ -8161,7 +8161,7 @@ async function loadOwnerSettings() {
   set("owner-country", s.country || "US");
   set("owner-tz", s.preferred_timezone || "Pacific Standard Time");
   set("owner-sev", s.default_severity || "moderate");
-  set("owner-valrg", _valRgForSub(focusedSubscriptionId()));
+  set("owner-valrg", _valRgForSub(focusedSubscriptionId()) || "Azure-BOM-Tool-Validation-RG");
   const subLabelEl = document.getElementById("owner-valrg-sub");
   if (subLabelEl) {
     const subName = focusedSubscriptionName();
@@ -8187,7 +8187,7 @@ async function _loadValidationRgOptions() {
     const shorts = Array.from(new Set(regions.map(r => r.short).filter(Boolean))).sort();
     locList.innerHTML = shorts.map(s => `<option value="${escapeHtml(s)}"></option>`).join("");
     const locInput = document.getElementById("owner-valrg-loc");
-    if (locInput && !locInput.value && shorts.length) locInput.value = shorts[0];
+    if (locInput && !locInput.value) locInput.value = "centralus";
   }
   if (!list) return;
   const sub = focusedSubscriptionId() || "";
