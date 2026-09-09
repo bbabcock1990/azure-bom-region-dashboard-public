@@ -125,41 +125,18 @@ function openValidationRgSettings() {
 }
 
 // ---------------------------------------------------------------- Theme
+// The dashboard is dark-only. The theme scaffolding is kept minimal so charts
+// still read their colors from the active CSS variables.
 
-const THEME_KEY = "themePreference"; // "light" | "dark" | (absent → follow system)
-const THEME_ICONS = { light: "☾", dark: "☀" }; // shown icon = action you can take
+function currentTheme() { return "dark"; }
 
-function getStoredTheme() {
-  try {
-    const v = localStorage.getItem(THEME_KEY);
-    return v === "light" || v === "dark" ? v : null;
-  } catch (e) { return null; }
-}
-
-function currentTheme() {
-  // Source of truth is whatever the pre-paint inline script applied to <html>.
-  return document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
-}
-
-function applyTheme(theme) {
-  const next = theme === "dark" ? "dark" : "light";
-  document.documentElement.setAttribute("data-theme", next);
-  const btn = document.getElementById("theme-toggle");
-  if (btn) {
-    const icon = btn.querySelector(".theme-toggle-icon");
-    if (icon) icon.textContent = THEME_ICONS[next];
-    btn.title = next === "dark" ? "Switch to light theme" : "Switch to dark theme";
-    btn.setAttribute("aria-label", btn.title);
-  }
+function applyTheme() {
+  document.documentElement.setAttribute("data-theme", "dark");
   // Re-render anything that picks colors from CSS vars at construction time.
   refreshChartTheme();
 }
 
-function toggleTheme() {
-  const next = currentTheme() === "dark" ? "light" : "dark";
-  try { localStorage.setItem(THEME_KEY, next); } catch (e) {}
-  applyTheme(next);
-}
+function toggleTheme() { /* dark-only: no-op */ }
 
 function themeColors() {
   // Read live values from CSS variables so charts pick the active theme.
@@ -212,23 +189,9 @@ function refreshChartTheme() {
 }
 
 function initThemeController() {
-  // Pre-paint inline script in <head> set the initial `data-theme` already.
-  // Here we just sync the button icon and wire up listeners.
-  applyTheme(currentTheme());
-
-  const btn = document.getElementById("theme-toggle");
-  if (btn) btn.addEventListener("click", toggleTheme);
-
-  // Follow system changes ONLY while user has no explicit preference.
-  try {
-    const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    const onChange = (e) => {
-      if (getStoredTheme()) return; // user picked one — leave it alone
-      applyTheme(e.matches ? "dark" : "light");
-    };
-    if (mq.addEventListener) mq.addEventListener("change", onChange);
-    else if (mq.addListener) mq.addListener(onChange);
-  } catch (e) {}
+  // Dark-only: ensure the attribute is set (pre-paint script already did) and
+  // sync chart colors. No toggle button or system-preference listener.
+  applyTheme();
 }
 
 // ---------------------------------------------------------------- API helpers

@@ -26,9 +26,9 @@
   <!-- Apply persisted theme + filters state BEFORE styles.css loads to prevent
        FOUC. Kept external (not inline) so the CSP can forbid inline scripts.
        Order matters: this must run before the <link> below. -->
-  <script src="preinit.js?v=2026061503"></script>
+  <script src="preinit.js?v=2026090912"></script>
 
-  <link rel="stylesheet" href="styles.css?v=2026090911" />
+  <link rel="stylesheet" href="styles.css?v=2026090912" />
 </head>
 <body>
 
@@ -51,9 +51,6 @@
     </button>
     <button type="button" id="open-settings" class="theme-toggle-btn" title="Settings &amp; activity log" aria-label="Open settings and activity log">
       <span class="theme-toggle-icon" aria-hidden="true">⚙</span>
-    </button>
-    <button type="button" id="theme-toggle" class="theme-toggle-btn" title="Toggle light/dark theme" aria-label="Toggle theme">
-      <span class="theme-toggle-icon" aria-hidden="true">☾</span>
     </button>
   </div>
 </header>
@@ -934,6 +931,6 @@
 
 <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
 
-<script src="app.js?v=2026090911"></script>
+<script src="app.js?v=2026090912"></script>
 </body>
 </html>
