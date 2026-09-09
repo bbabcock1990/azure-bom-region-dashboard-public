@@ -430,10 +430,24 @@ async function fetchJson(path) {
 
 async function loadSnapshotsList() {
   try {
-    const params = STATE.activeBomId ? `?bom=${encodeURIComponent(STATE.activeBomId)}` : "";
+    const picker = document.getElementById("snapshot-picker");
+    // No BOM selected (e.g. all BOMs deleted) — never fall back to listing
+    // every BOM's snapshots, or the deleted BOM's results linger on screen.
+    if (!STATE.activeBomId) {
+      STATE.snapshots = [];
+      if (picker) {
+        picker.innerHTML = "";
+        const opt = document.createElement("option");
+        opt.value = "";
+        opt.textContent = "(no analysis results yet — click Refresh analysis)";
+        picker.appendChild(opt);
+      }
+      renderSnapshotCompareControls();
+      return;
+    }
+    const params = `?bom=${encodeURIComponent(STATE.activeBomId)}`;
     const idx = await apiJson(`/api/snapshots${params}`);
     STATE.snapshots = idx.snapshots || [];
-    const picker = document.getElementById("snapshot-picker");
     const previous = picker.value || "";
     picker.innerHTML = "";
     if (!STATE.snapshots.length) {
@@ -461,10 +475,16 @@ async function loadSnapshotsList() {
 
 async function loadSnapshot(runId) {
   try {
-    const path = runId
-      ? `/api/snapshots/${encodeURIComponent(runId)}`
-      : (STATE.activeBomId ? `/api/snapshots/latest?bom=${encodeURIComponent(STATE.activeBomId)}` : `/api/snapshots/latest`);
-    STATE.snapshot = await apiJson(path);
+    if (!runId && !STATE.activeBomId) {
+      // No BOM selected — show a clean empty state instead of falling back to
+      // an orphaned global-latest snapshot from a since-deleted BOM.
+      STATE.snapshot = { regions: [], latency_matrix: {}, stats: {}, bom: { skus: [] } };
+    } else {
+      const path = runId
+        ? `/api/snapshots/${encodeURIComponent(runId)}`
+        : `/api/snapshots/latest?bom=${encodeURIComponent(STATE.activeBomId)}`;
+      STATE.snapshot = await apiJson(path);
+    }
   } catch (e) {
     if (e.status === 404) {
       console.info("no snapshot yet for", STATE.activeBomId);
@@ -6196,9 +6216,12 @@ async function deleteBomFromNav(bomId, label) {
     STATE.activeSubscription = null;
     syncActiveSubscription();
     renderBomNav();
+    // Reload the snapshot list + analysis for whichever BOM is now active. When
+    // no BOMs remain, activeBomId is "" and these clear the picker and results,
+    // so only the Getting Started state shows (no stale deleted-BOM analysis).
+    await loadSnapshotsList();
+    await loadSnapshot(null);
     if (STATE.activeBomId) {
-      await loadSnapshotsList();
-      await loadSnapshot(null);
       await _restoreQuotaRequestsFromDb();
     }
   } catch (e) {
