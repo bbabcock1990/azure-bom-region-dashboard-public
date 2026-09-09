@@ -10249,7 +10249,6 @@ async function startAppAfterAuth() {
   await loadSnapshotsList();
   const picker = document.getElementById("snapshot-picker");
   await loadSnapshot(picker ? (picker.value || null) : null);
-  maybeShowSettingsCoach();
   // Restore quota request history from the (browser-held) store
   await _restoreQuotaRequestsFromDb();
   // Populate the header sign-in chip (silent — never opens a browser).
