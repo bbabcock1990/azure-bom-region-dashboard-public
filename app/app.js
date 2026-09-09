@@ -7665,10 +7665,7 @@ function gettingStartedSteps() {
           ? `<p class="gs-ok">✓ You're signed in as <strong>${escapeHtml(who)}</strong> — this step is done. Click <strong>Next →</strong> to continue.</p>`
           : "") +
         `<p>A one-time browser sign-in mints a <strong>read-only ARM token</strong> so the ` +
-        `dashboard can read SKU, region, and quota data. Nothing about the customer is ` +
-        `stored on the server.</p>` +
-        `<p class="muted">You need <em>Reader</em> on the customer's subscription — or have ` +
-        `the customer run the dashboard in their own tenant (same steps, their sign-in).</p>`,
+        `dashboard can read SKU, region, and quota data. Nothing is stored on the server.</p>`,
       actions: [signInAction],
     },
     {
