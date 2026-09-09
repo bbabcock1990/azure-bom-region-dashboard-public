@@ -652,14 +652,14 @@
       </div>
       <div id="signin-actions" class="signin-actions" style="margin-top:12px; display:flex; gap:8px;">
         <button type="button" id="btn-signout" class="btn-secondary" title="Clear cached credentials and sign out">Sign out</button>
-        <button type="button" id="btn-switch-dir" class="btn-secondary" title="Sign out and re-sign-in with a different account or tenant">Switch directory / account</button>
+        <button type="button" id="btn-switch-dir" class="btn-secondary" title="Pick a different Microsoft account (and its directory)">Switch account</button>
       </div>
       <details>
         <summary>How does this work?</summary>
         <ol>
           <li>Click <em>Sign in</em> — a browser window opens once for your Microsoft sign-in. The local backend then mints an ARM bearer token in-process (no Azure CLI required).</li>
           <li>Your sign-in is cached, so later runs are silent until Azure asks you to refresh.</li>
-          <li><em>Sign out</em> clears the cache. <em>Switch directory</em> signs out then immediately re-opens the sign-in prompt so you can pick a different account or tenant.</li>
+          <li><em>Sign out</em> clears the cache. <em>Switch account</em> opens the Microsoft account picker so you can sign in as a different account — subscriptions from that account's directory are then loaded.</li>
         </ol>
       </details>
     </div>
