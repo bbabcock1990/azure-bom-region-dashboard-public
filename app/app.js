@@ -10402,9 +10402,18 @@ async function _cmResolveTarget(target, tries) {
     if (el && el.getBoundingClientRect && el.offsetParent !== null) return el;
     await _cmSleep(120);
   }
-  // Last attempt even if offsetParent is null (e.g. fixed elements).
-  try { return (typeof target === "function") ? target() : document.querySelector(target); }
-  catch (_e) { return null; }
+  // Last attempt: return the element even if offsetParent is null (some fixed
+  // or transformed elements report no offsetParent yet are visible). But a
+  // truly hidden element (display:none → a 0×0 rect) is treated as ABSENT so
+  // the caller skips the step rather than anchoring the coachmark to the
+  // top-left corner (0,0).
+  try {
+    const el = (typeof target === "function") ? target() : document.querySelector(target);
+    if (!el || !el.getBoundingClientRect) return null;
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 && r.height === 0) return null;
+    return el;
+  } catch (_e) { return null; }
 }
 
 function stopCoachmarkTour() {
@@ -10427,6 +10436,7 @@ function startCoachmarkTour(steps, opts) {
   const myToken = ++CM_TOUR.token;
   CM_TOUR.steps = list;
   CM_TOUR.i = 0;
+  CM_TOUR.skipped = 0;
 
   const ring = document.createElement("div"); ring.className = "cm-ring";
   const bubble = document.createElement("div");
@@ -10487,15 +10497,19 @@ function startCoachmarkTour(steps, opts) {
     if (myToken !== CM_TOUR.token) return;
     const el = await _cmResolveTarget(step.target);
     if (myToken !== CM_TOUR.token) return;
-    if (!el) { CM_TOUR.i++; return show(); }
+    // Target hidden/absent after retries — drop the step and keep the visible
+    // step count honest so numbering never shows a gap.
+    if (!el) { CM_TOUR.skipped = (CM_TOUR.skipped || 0) + 1; CM_TOUR.i++; return show(); }
     CM_TOUR.target = el;
     try { el.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" }); } catch (_e) {}
     await _cmSleep(step.settle || 240);
     if (myToken !== CM_TOUR.token) return;
 
+    const shownTotal = CM_TOUR.steps.length - (CM_TOUR.skipped || 0);
+    const shownIndex = CM_TOUR.i + 1 - (CM_TOUR.skipped || 0);
     const last = CM_TOUR.i === CM_TOUR.steps.length - 1;
     inner.innerHTML =
-      `<div class="cm-count">Step ${CM_TOUR.i + 1} of ${CM_TOUR.steps.length}</div>` +
+      `<div class="cm-count">Step ${shownIndex} of ${shownTotal}</div>` +
       `<div class="cm-title">${escapeHtml(step.title || "")}</div>` +
       `<div class="cm-text">${step.text || ""}</div>` +
       `<div class="cm-actions">` +
