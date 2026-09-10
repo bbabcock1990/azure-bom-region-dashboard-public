@@ -80,15 +80,42 @@ function availableQuotaSubscriptionIds() {
 function defaultQuotaSubscriptionId(ids = availableQuotaSubscriptionIds()) {
   const preferred = String(activeSubscriptionId() || "").trim();
   if (preferred && ids.includes(preferred)) return preferred;
+  const saved = String((SUPPORT.settings && SUPPORT.settings.context_subscription) || "").trim();
+  if (saved && ids.includes(saved)) return saved;
   return ids[0] || null;
 }
 
+// Candidate subscriptions for the GLOBAL context selector (header + Settings →
+// Subscription). When a BOM is open, only that BOM's subscription(s) apply so
+// the context tracks the BOM. Otherwise EVERY readable subscription is
+// selectable — not just the ones that happen to have quota/snapshot results —
+// plus anything referenced by loaded results or the saved default.
+function contextSubscriptionIds() {
+  const bomIds = subscriptionList(activeBomMeta());
+  if (bomIds.length) return bomIds;
+  const set = [];
+  const add = (v) => { const s = String(v || "").trim(); if (s && !set.includes(s)) set.push(s); };
+  (Array.isArray(window._loadedSubscriptions) ? window._loadedSubscriptions : []).forEach((s) => add(s && s.id));
+  Object.keys((STATE.snapshot && STATE.snapshot.per_sub_results) || {}).forEach(add);
+  add(SUPPORT.settings && SUPPORT.settings.context_subscription);
+  return set;
+}
+
 function syncActiveSubscription(preferred) {
-  const ids = availableQuotaSubscriptionIds();
+  // Validate the selection against the UNION of the global-context candidates
+  // and the quota-result subs, so a subscription chosen from the header or
+  // Settings sticks even when a loaded snapshot only covers a subset of subs.
+  const ctxIds = contextSubscriptionIds();
+  const quotaIds = availableQuotaSubscriptionIds();
+  const valid = [];
+  for (const id of [...ctxIds, ...quotaIds]) {
+    const s = String(id || "").trim();
+    if (s && !valid.includes(s)) valid.push(s);
+  }
   const requested = preferred === undefined ? STATE.activeSubscription : preferred;
   let next = requested == null ? null : String(requested || "").trim();
-  if (!ids.length) next = null;
-  else if (!next || !ids.includes(next)) next = defaultQuotaSubscriptionId(ids);
+  if (!valid.length) next = null;
+  else if (!next || !valid.includes(next)) next = defaultQuotaSubscriptionId(valid);
   STATE.activeSubscription = next;
   return next;
 }
@@ -807,12 +834,15 @@ function renderGlobalSubControl() {
   const host = document.getElementById("global-sub-control");
   if (!host) return;
   try { seedSubscriptionContext(); } catch (_e) {}
-  const ids = availableQuotaSubscriptionIds();
+  const ids = contextSubscriptionIds();
   if (!ids.length) { host.hidden = true; host.innerHTML = ""; return; }
   host.hidden = false;
   const activeId = syncActiveSubscription();
   const bomScoped = !!STATE.activeBomId && subscriptionList(activeBomMeta()).length > 0;
-  if (ids.length <= 1) {
+  // A single-subscription context that is BOM-scoped is fixed (the BOM defines
+  // it), so show a static label. Otherwise always render a dropdown so the user
+  // can change the global context even when only one subscription is loaded.
+  if (ids.length <= 1 && bomScoped) {
     const name = _subNameById(activeId) || _subNameById(ids[0]) || "Subscription";
     host.innerHTML = `<span class="global-sub-label">Subscription</span>`
       + `<span class="global-sub-static" title="${escapeHtml(name)}">${escapeHtml(name)}</span>`;
@@ -854,6 +884,21 @@ function applySubscriptionSelection(value, opts = {}) {
     else if (STATE.settingsTab === "subscription") { try { loadSubscriptionSettings(); } catch (_e) {} }
   }
   if (opts.persist !== false) persistSubscriptionContext(contextSubscriptionId());
+}
+
+// Re-render every subscription control (header selector, quota switcher, region
+// filter, and the Settings → Subscription blade) so they all reflect the current
+// STATE.activeSubscription. Call after anything that can change the active
+// subscription outside the header — chiefly opening/closing/creating a BOM.
+// When `persist` is true, the (possibly BOM-derived) subscription is saved as
+// the global default so the setting mirrors what the header shows.
+function reflectSubscriptionContextUI(persist) {
+  try { renderSubscriptionSwitcher(); } catch (_e) {}
+  try { renderSubscriptionFilter(); } catch (_e) {}
+  if (STATE.view === "settings" && STATE.settingsTab === "subscription") {
+    try { loadSubscriptionSettings(); } catch (_e) {}
+  }
+  if (persist) { try { persistSubscriptionContext(contextSubscriptionId()); } catch (_e) {} }
 }
 
 // Epoch (ms) of the snapshot currently shown in the tabs, or null. Uses the
@@ -6265,6 +6310,7 @@ async function selectBom(bomId) {
   const picker = document.getElementById("snapshot-picker");
   await loadSnapshot(picker ? (picker.value || null) : null);
   await _restoreQuotaRequestsFromDb();
+  reflectSubscriptionContextUI(true);
 }
 
 function filterBomNav(query) {
@@ -6283,6 +6329,7 @@ function runBomFromManager(bomId) {
   syncActiveSubscription();
   try { localStorage.setItem("activeBomId", bomId); } catch (e) {}
   markActiveBomNav();
+  reflectSubscriptionContextUI(true);
   openRunModal();
 }
 
@@ -6311,6 +6358,7 @@ async function deleteBomFromNav(bomId, label) {
     if (STATE.activeBomId) {
       await _restoreQuotaRequestsFromDb();
     }
+    reflectSubscriptionContextUI(!!STATE.activeBomId);
   } catch (e) {
     alert(`Network error: ${e.message}`);
   }
@@ -6957,6 +7005,7 @@ async function saveBom() {
     await loadSnapshotsList();
     await loadSnapshot(null);
     await _restoreQuotaRequestsFromDb();
+    reflectSubscriptionContextUI(true);
   } catch (e) {
     setBomStatus(netErrLine(e), "error");
     document.getElementById("bom-save").disabled = false;
@@ -8181,10 +8230,10 @@ async function loadSubscriptionSettings() {
     } catch (_e) { subs = []; }
   }
   try { seedSubscriptionContext(); } catch (_e) {}
-  const ids = availableQuotaSubscriptionIds();
   const bomScoped = !!STATE.activeBomId && subscriptionList(activeBomMeta()).length > 0;
-  // When a BOM is open, restrict to its subscription(s); otherwise all readable.
-  const list = bomScoped ? ids : (subs.length ? subs.map(s => s.id) : ids);
+  // Same candidate set as the header selector: every readable subscription when
+  // no BOM is open, or the BOM's subscription(s) when one is.
+  const list = contextSubscriptionIds();
   const active = contextSubscriptionId();
   if (!list.length) {
     sel.innerHTML = '<option disabled selected>No subscriptions found — sign in first.</option>';
@@ -8198,8 +8247,8 @@ async function loadSubscriptionSettings() {
   sel.value = active || "";
   if (note) {
     note.textContent = bomScoped
-      ? "A BOM is open, so its own subscription is in effect. Close the BOM to change your global default."
-      : "This is your global default. It's used for data refresh, validation, and new BOMs until a BOM overrides it.";
+      ? "A BOM is open, so this shows (and follows) that BOM's subscription. The header stays in sync."
+      : "This is your global default — used for data refresh, validation, and new BOMs. Opening a BOM switches it to that BOM's subscription automatically.";
   }
 }
 
