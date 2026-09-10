@@ -6693,6 +6693,7 @@ function applyBomRegionAzScope() {
 }
 
 function filterBomRegions() {
+  const q = (document.getElementById("bom-regions-search").value || "").trim().toLowerCase();
   const filt = document.getElementById("bom-regions-filter").value || "all";
   const active = !!q || filt !== "all";
   document.querySelectorAll('#bom-regions-list .svc-group').forEach(group => {
