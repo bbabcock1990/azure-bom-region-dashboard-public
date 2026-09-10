@@ -826,10 +826,11 @@ function renderSubscriptionFilter() {
   select.value = activeId || "";
 }
 
-// The single, always-visible subscription-context selector in the header. When
-// a BOM is open it lists that BOM's subscription(s); otherwise it lists every
-// readable subscription and sets the global default. It stays in sync with the
-// quota switcher and the Settings → Subscription blade.
+// The always-visible subscription-context indicator in the header. It is
+// READ-ONLY: it reflects the subscription the dashboard is currently working
+// against but never lets the user change it there. The context is set in one of
+// two places instead — Settings → Subscription when no BOM is open, or the BOM
+// itself (opening a BOM switches the context to that BOM's subscription).
 function renderGlobalSubControl() {
   const host = document.getElementById("global-sub-control");
   if (!host) return;
@@ -839,32 +840,19 @@ function renderGlobalSubControl() {
   host.hidden = false;
   const activeId = syncActiveSubscription();
   const bomScoped = !!STATE.activeBomId && subscriptionList(activeBomMeta()).length > 0;
-  // A single-subscription context that is BOM-scoped is fixed (the BOM defines
-  // it), so show a static label. Otherwise always render a dropdown so the user
-  // can change the global context even when only one subscription is loaded.
-  if (ids.length <= 1 && bomScoped) {
-    const name = _subNameById(activeId) || _subNameById(ids[0]) || "Subscription";
-    host.innerHTML = `<span class="global-sub-label">Subscription</span>`
-      + `<span class="global-sub-static" title="${escapeHtml(name)}">${escapeHtml(name)}</span>`;
-    return;
-  }
-  const options = ids.map((subId, i) => {
-    const name = _subNameById(subId) || `Subscription ${i + 1}`;
-    return `<option value="${escapeHtml(subId)}"${subId === activeId ? " selected" : ""}>${escapeHtml(name)}</option>`;
-  }).join("");
+  const name = _subNameById(activeId) || _subNameById(ids[0]) || "Subscription";
   const title = bomScoped
-    ? "Subscription for this BOM — drives quota, validation & analysis"
-    : "Your subscription context — drives model-data refresh, validation & new BOMs";
-  host.innerHTML = `<label class="global-sub-wrap"><span class="global-sub-label">Subscription</span>`
-    + `<select id="global-sub-select" title="${escapeHtml(title)}" aria-label="Subscription context">${options}</select></label>`;
-  const sel = host.querySelector("#global-sub-select");
-  if (sel) sel.value = activeId || "";
+    ? "This BOM's subscription — change it by editing the BOM."
+    : "Your subscription context — change it in Settings → Subscription (or by opening a BOM).";
+  host.innerHTML = `<span class="global-sub-label">Subscription</span>`
+    + `<span class="global-sub-static" title="${escapeHtml(title)}">${escapeHtml(name)}</span>`;
 }
 
 // Single entry point for changing the active subscription from any control
-// (header selector, quota switcher, or region-filter dropdown). Keeps every
-// dependent view in sync and — when requested — persists the choice as the
-// global default so it survives reloads and applies when no BOM is open.
+// (Settings → Subscription selector, quota switcher, or region-filter dropdown).
+// The header no longer changes it. Keeps every dependent view in sync and —
+// when requested — persists the choice as the global default so it survives
+// reloads and applies when no BOM is open.
 function applySubscriptionSelection(value, opts = {}) {
   syncActiveSubscription(value || null);
   renderSubscriptionFilter();
@@ -878,10 +866,12 @@ function applySubscriptionSelection(value, opts = {}) {
     if (region) { try { openDrilldown(region); } catch (_e) {} }
   }
   // Keep subscription-scoped Settings panels current if the user is in them.
+  // Skip rebuilding the Subscription blade when the change originated there —
+  // rebuilding the very <select> mid-interaction would drop the user's pick.
   if (STATE.view === "settings") {
     if (STATE.settingsTab === "validation") { try { loadValidationSettings(); } catch (_e) {} }
     else if (STATE.settingsTab === "datasets") { try { loadDatasetsSettings(); } catch (_e) {} }
-    else if (STATE.settingsTab === "subscription") { try { loadSubscriptionSettings(); } catch (_e) {} }
+    else if (STATE.settingsTab === "subscription" && !opts.fromSettings) { try { loadSubscriptionSettings(); } catch (_e) {} }
   }
   if (opts.persist !== false) persistSubscriptionContext(contextSubscriptionId());
 }
@@ -8245,9 +8235,17 @@ async function loadSubscriptionSettings() {
     return `<option value="${escapeHtml(id)}"${id === active ? " selected" : ""}>${escapeHtml(name)}</option>`;
   }).join("");
   sel.value = active || "";
+  sel.disabled = !!bomScoped && list.length <= 1;
+  // Bind the change directly (not via delegation) and mark it fromSettings so
+  // applySubscriptionSelection won't rebuild this very <select> mid-selection.
+  sel.onchange = () => {
+    applySubscriptionSelection(sel.value || null, { fromSettings: true });
+    const activeNow = contextSubscriptionId();
+    sel.value = activeNow || "";
+  };
   if (note) {
     note.textContent = bomScoped
-      ? "A BOM is open, so this shows (and follows) that BOM's subscription. The header stays in sync."
+      ? "A BOM is open, so the context follows that BOM's subscription. Edit the BOM to change it."
       : "This is your global default — used for data refresh, validation, and new BOMs. Opening a BOM switches it to that BOM's subscription automatically.";
   }
 }
@@ -10345,7 +10343,7 @@ function init() {
   });
   document.addEventListener("change", (ev) => {
     const sel = ev.target && ev.target.closest
-      ? ev.target.closest("[data-subscription-switcher], #global-sub-select, #ctx-sub-select")
+      ? ev.target.closest("[data-subscription-switcher]")
       : null;
     if (!sel) return;
     applySubscriptionSelection(sel.value || null);

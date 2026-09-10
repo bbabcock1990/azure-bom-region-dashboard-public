@@ -28,7 +28,7 @@
        Order matters: this must run before the <link> below. -->
   <script src="preinit.js?v=2026090912"></script>
 
-  <link rel="stylesheet" href="styles.css?v=2026091004" />
+  <link rel="stylesheet" href="styles.css?v=2026091005" />
 </head>
 <body>
 
@@ -335,9 +335,10 @@
                 One place to choose the Azure subscription the dashboard works against. It drives
                 <strong>model-data refresh</strong> (region &amp; service catalogs), the
                 <strong>deployment-validation resource group</strong>, and the subscription
-                pre-selected when you <strong>create a new BOM</strong>. When a BOM is open, that BOM's
-                own subscription takes over automatically. You can also change it any time from the
-                selector in the top header.
+                pre-selected when you <strong>create a new BOM</strong>. Set it here while you don't
+                have a BOM yet; once you open a BOM, the context follows that BOM's subscription
+                (change it by editing the BOM). The header shows the current subscription but is
+                read-only.
               </p>
               <div class="settings-owner-grid">
                 <label class="settings-owner-wide">Active subscription
@@ -979,6 +980,6 @@
 
 <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
 
-<script src="app.js?v=2026091004"></script>
+<script src="app.js?v=2026091005"></script>
 </body>
 </html>
