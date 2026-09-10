@@ -41,6 +41,7 @@ from urllib.parse import quote
 import httpx
 
 from . import storage, support_settings, activity_log
+from . import arm_mfa
 
 log = logging.getLogger(__name__)
 
@@ -1069,53 +1070,8 @@ def _extract_message(payload: Any, fallback: str) -> str:
 
 
 # Signatures Azure uses when a write is blocked pending an MFA step-up.
-_MFA_MARKERS = (
-    "requestdisallowedbyazure",   # ARM CA block: "...without authenticating through MFA"
-    "multi-factor",
-    "multifactor",
-    "insufficient_claims",
-    "aka.ms/mfaforazure",
-    "mfaforazure",
-    "50076",                      # AADSTS50076 — MFA required
-    "50079",                      # AADSTS50079 — MFA enrollment required
-)
-
-
-def _mfa_challenge(resp: Any, body: Any) -> Optional[Dict[str, Any]]:
-    """Detect an MFA / conditional-access step-up rejection on a support PUT.
-
-    Returns a dict (optionally carrying the base64 ``claims`` challenge from the
-    ``WWW-Authenticate`` header) when Azure demands an MFA-authenticated token,
-    else ``None``. Callers turn this into an ``mfa_required`` error so the SPA
-    can re-acquire an MFA token and retry.
-    """
-    try:
-        status = int(getattr(resp, "status_code", 0) or 0)
-    except Exception:
-        status = 0
-    if status not in (401, 403):
-        return None
-
-    hay = ""
-    if isinstance(body, dict):
-        hay = json.dumps(body, ensure_ascii=False)
-    elif body:
-        hay = str(body)
-    hay = hay.lower()
-
-    www = ""
-    claims: Optional[str] = None
-    try:
-        www = str((getattr(resp, "headers", {}) or {}).get("WWW-Authenticate", "") or "")
-    except Exception:
-        www = ""
-    if www:
-        hay += " " + www.lower()
-        m = re.search(r'claims="([^"]+)"', www)
-        if m:
-            claims = m.group(1)
-
-    if any(marker in hay for marker in _MFA_MARKERS):
-        return {"claims": claims}
-    return None
+# The detector now lives in the shared ``arm_mfa`` helper (reused by the
+# resource-group create endpoint); keep the historical private names as aliases.
+_MFA_MARKERS = arm_mfa.MFA_MARKERS
+_mfa_challenge = arm_mfa.mfa_challenge
 

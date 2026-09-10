@@ -8427,12 +8427,35 @@ async function _createValidationRg() {
   const btn = document.getElementById("owner-valrg-create");
   if (btn) btn.disabled = true;
   if (status) status.textContent = "Creating…";
+  const createOnce = () => apiJson("/api/az/resource-groups", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ subscription_id: sub, name, location }),
+  });
   try {
-    const res = await apiJson("/api/az/resource-groups", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ subscription_id: sub, name, location }),
-    });
+    let res;
+    try {
+      res = await createOnce();
+    } catch (e) {
+      // This subscription enforces "Require MFA for Azure management": the write
+      // was refused because the token lacks an MFA claim (reads still work, so
+      // the Permissions check passed). Step the user up and retry once.
+      if (e && e.body && e.body.error === "mfa_required") {
+        const claims = e.body.details && e.body.details.claims;
+        if (status) status.textContent = "Verifying MFA…";
+        showToast("Azure needs multi-factor authentication to create this resource group — please complete the sign-in prompt.", "warning");
+        try {
+          await stepUpDelegatedToken(claims);
+        } catch (authErr) {
+          showToast(`MFA sign-in was cancelled or blocked: ${authErr.message || authErr}`, "error");
+          throw e;
+        }
+        if (status) status.textContent = "Creating…";
+        res = await createOnce();
+      } else {
+        throw e;
+      }
+    }
     if (status) status.textContent = res.created ? `✓ Created in ${res.location}` : `✓ Already exists in ${res.location}`;
     // Persist it as the validation RG for THIS subscription so the deep check
     // uses it immediately (an RG only exists inside one subscription).

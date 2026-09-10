@@ -20,7 +20,7 @@ import re
 import httpx
 
 from .._shared import httpfunc as func
-from .._shared import auth_token, csrf, activity_log
+from .._shared import auth_token, csrf, activity_log, arm_mfa
 
 log = logging.getLogger(__name__)
 
@@ -103,6 +103,27 @@ def _create_group(subscription_id: str, token: str, name: str, location: str) ->
 
             r = client.put(base, params=params, headers=headers, json={"location": location})
             if r.status_code in (401, 403):
+                try:
+                    err_body = r.json()
+                except Exception:
+                    err_body = None
+                # A subscription that enforces "Require MFA for Azure management"
+                # rejects this *write* with a non-MFA token even for an Owner
+                # (reads are not gated, so the Permissions check still passes).
+                # Surface a distinct code + any claims challenge so the SPA can
+                # step the user up and retry — same flow as support-ticket writes.
+                mfa = arm_mfa.mfa_challenge(r, err_body)
+                if mfa is not None:
+                    return func.HttpResponse(
+                        json.dumps({
+                            "error": "mfa_required",
+                            "message": ("Azure requires multi-factor authentication to create "
+                                        "resources in this subscription. Complete the MFA prompt "
+                                        "and the create will retry automatically."),
+                            "details": {"azure": err_body, "claims": mfa.get("claims")},
+                        }),
+                        status_code=403, mimetype="application/json",
+                    )
                 code, detail = _arm_error(r)
                 # A 403 here is often NOT missing RBAC (the Permissions check reads
                 # RBAC and can pass) but an Azure Policy *deny* or a deny
