@@ -100,6 +100,16 @@ def test_iso3_country_normalization():
     assert st._iso3_country("ZZ") == "USA"        # unknown -> default
 
 
+def test_timezone_normalization():
+    from _shared import support_tickets as st
+    assert st._timezone("Eastern Standard Time") == "Eastern Standard Time"
+    assert st._timezone("Pacific Standard Time") == "Pacific Standard Time"
+    assert st._timezone("ET") == "Eastern Standard Time"
+    assert st._timezone("central") == "Central Standard Time"
+    assert st._timezone("") == "Pacific Standard Time"      # default
+    assert st._timezone("bogus/zone") == "Pacific Standard Time"  # unknown -> default
+
+
 # ─── dry-run: no network ─────────────────────────────────────────────────────
 
 def test_create_ticket_dry_run_is_offline_and_tracked(isolated_storage):

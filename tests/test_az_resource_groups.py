@@ -141,3 +141,90 @@ def test_create_resource_group_requires_location(monkeypatch, tmp_path):
                       json={"subscription_id": SUB, "name": "rg-bom-validation"})
     assert res.status_code == 400
     assert res.json()["error"] == "no_location"
+
+
+def test_create_resource_group_policy_deny_surfaces_reason(monkeypatch, tmp_path):
+    """A 403 RequestDisallowedByPolicy is surfaced as a policy (not RBAC) block,
+    including ARM's own message — so users with Contributor understand why."""
+    monkeypatch.setenv("LOCAL_STORAGE_DIR", str(tmp_path))
+    monkeypatch.delenv("ALLOWED_ORIGIN", raising=False)
+    from api import az_resource_groups as mod
+    from server.app import app
+
+    _patch_token(monkeypatch, mod)
+    _install_fake_client(
+        monkeypatch, mod, get_status=404, get_payload={},
+        put_status=403,
+        put_payload={"error": {
+            "code": "RequestDisallowedByPolicy",
+            "message": "Resource 'Azure-BOM-Tool-Validation-RG' was disallowed by "
+                       "policy. Allowed locations: eastus, westus3.",
+        }},
+    )
+    client = TestClient(app)
+    res = client.post("/api/az/resource-groups",
+                      json={"subscription_id": SUB, "name": "Azure-BOM-Tool-Validation-RG",
+                            "location": "centralus"})
+    assert res.status_code == 403
+    body = res.json()
+    assert body["error"] == "forbidden"
+    assert "Azure Policy" in body["message"]
+    assert "Allowed locations" in body["message"]
+
+
+def test_create_resource_group_mfa_required(monkeypatch, tmp_path):
+    """A subscription that enforces MFA-for-Azure-management returns mfa_required
+    (with any claims challenge) so the SPA can step up and retry — even for an
+    Owner whose RBAC passes the Permissions check."""
+    monkeypatch.setenv("LOCAL_STORAGE_DIR", str(tmp_path))
+    monkeypatch.delenv("ALLOWED_ORIGIN", raising=False)
+    from api import az_resource_groups as mod
+    from server.app import app
+
+    _patch_token(monkeypatch, mod)
+    _install_fake_client(
+        monkeypatch, mod, get_status=404, get_payload={},
+        put_status=403,
+        put_payload={"error": {
+            "code": "RequestDisallowedByAzure",
+            "message": "Resource 'test-resource-group' was disallowed by Azure: you tried to "
+                       "create Azure resources without authenticating through MFA. "
+                       "To resolve this error, go to https://aka.ms/MFAforAzure.",
+        }},
+    )
+    client = TestClient(app)
+    res = client.post("/api/az/resource-groups",
+                      json={"subscription_id": SUB, "name": "test-resource-group", "location": "centralus"})
+    assert res.status_code == 403
+    body = res.json()
+    assert body["error"] == "mfa_required"
+    assert "multi-factor" in body["message"].lower()
+
+
+def test_create_resource_group_rbac_403_surfaces_arm_detail(monkeypatch, tmp_path):
+    """A non-policy 403 keeps the RBAC wording but appends ARM's message."""
+    monkeypatch.setenv("LOCAL_STORAGE_DIR", str(tmp_path))
+    monkeypatch.delenv("ALLOWED_ORIGIN", raising=False)
+    from api import az_resource_groups as mod
+    from server.app import app
+
+    _patch_token(monkeypatch, mod)
+    _install_fake_client(
+        monkeypatch, mod, get_status=404, get_payload={},
+        put_status=403,
+        put_payload={"error": {
+            "code": "AuthorizationFailed",
+            "message": "The client does not have authorization to perform action "
+                       "'Microsoft.Resources/subscriptions/resourceGroups/write'.",
+        }},
+    )
+    client = TestClient(app)
+    res = client.post("/api/az/resource-groups",
+                      json={"subscription_id": SUB, "name": "rg-bom-validation", "location": "eastus"})
+    assert res.status_code == 403
+    body = res.json()
+    assert body["error"] == "forbidden"
+    assert "Not authorized to create a resource group" in body["message"]
+    assert "AuthorizationFailed".lower() in body["message"].lower() or \
+        "does not have authorization" in body["message"]
+

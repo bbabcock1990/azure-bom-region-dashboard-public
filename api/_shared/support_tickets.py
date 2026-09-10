@@ -41,6 +41,7 @@ from urllib.parse import quote
 import httpx
 
 from . import storage, support_settings, activity_log
+from . import arm_mfa
 
 log = logging.getLogger(__name__)
 
@@ -130,6 +131,35 @@ def _iso3_country(value: Any, default: str = "USA") -> str:
         return _COUNTRY_NAME_TO_ALPHA3[text]
     return default
 
+
+# Azure Support's contactDetails.preferredTimeZone expects a Windows time zone
+# ID. The UI offers the common US zones; validate against them (plus a few
+# short aliases) so a stray value can't 400 the submission.
+_VALID_TIMEZONES = {
+    "Eastern Standard Time", "Central Standard Time",
+    "Mountain Standard Time", "Pacific Standard Time",
+    "Alaskan Standard Time", "Hawaiian Standard Time", "UTC",
+}
+_TIMEZONE_ALIASES = {
+    "et": "Eastern Standard Time", "est": "Eastern Standard Time",
+    "eastern": "Eastern Standard Time",
+    "ct": "Central Standard Time", "cst": "Central Standard Time",
+    "central": "Central Standard Time",
+    "mt": "Mountain Standard Time", "mst": "Mountain Standard Time",
+    "mountain": "Mountain Standard Time",
+    "pt": "Pacific Standard Time", "pst": "Pacific Standard Time",
+    "pacific": "Pacific Standard Time",
+}
+
+
+def _timezone(value: Any, default: str = "Pacific Standard Time") -> str:
+    """Normalize a preferred time zone to a Windows time zone ID Azure accepts."""
+    text = str(value or "").strip()
+    if text in _VALID_TIMEZONES:
+        return text
+    return _TIMEZONE_ALIASES.get(text.lower(), default)
+
+
 VALID_SEVERITIES = ("minimal", "moderate", "critical")
 
 
@@ -197,7 +227,7 @@ def _contact_details(settings: Dict[str, Any]) -> Dict[str, Any]:
         "lastName": settings.get("contact_last_name") or "",
         "primaryEmailAddress": settings.get("primary_email") or "",
         "preferredContactMethod": (settings.get("preferred_contact_method") or "email").lower(),
-        "preferredTimeZone": settings.get("preferred_timezone") or "Pacific Standard Time",
+        "preferredTimeZone": _timezone(settings.get("preferred_timezone")),
         "country": _iso3_country(settings.get("country")),
         "preferredSupportLanguage": settings.get("preferred_language") or "en-us",
     }
@@ -1040,53 +1070,8 @@ def _extract_message(payload: Any, fallback: str) -> str:
 
 
 # Signatures Azure uses when a write is blocked pending an MFA step-up.
-_MFA_MARKERS = (
-    "requestdisallowedbyazure",   # ARM CA block: "...without authenticating through MFA"
-    "multi-factor",
-    "multifactor",
-    "insufficient_claims",
-    "aka.ms/mfaforazure",
-    "mfaforazure",
-    "50076",                      # AADSTS50076 — MFA required
-    "50079",                      # AADSTS50079 — MFA enrollment required
-)
-
-
-def _mfa_challenge(resp: Any, body: Any) -> Optional[Dict[str, Any]]:
-    """Detect an MFA / conditional-access step-up rejection on a support PUT.
-
-    Returns a dict (optionally carrying the base64 ``claims`` challenge from the
-    ``WWW-Authenticate`` header) when Azure demands an MFA-authenticated token,
-    else ``None``. Callers turn this into an ``mfa_required`` error so the SPA
-    can re-acquire an MFA token and retry.
-    """
-    try:
-        status = int(getattr(resp, "status_code", 0) or 0)
-    except Exception:
-        status = 0
-    if status not in (401, 403):
-        return None
-
-    hay = ""
-    if isinstance(body, dict):
-        hay = json.dumps(body, ensure_ascii=False)
-    elif body:
-        hay = str(body)
-    hay = hay.lower()
-
-    www = ""
-    claims: Optional[str] = None
-    try:
-        www = str((getattr(resp, "headers", {}) or {}).get("WWW-Authenticate", "") or "")
-    except Exception:
-        www = ""
-    if www:
-        hay += " " + www.lower()
-        m = re.search(r'claims="([^"]+)"', www)
-        if m:
-            claims = m.group(1)
-
-    if any(marker in hay for marker in _MFA_MARKERS):
-        return {"claims": claims}
-    return None
+# The detector now lives in the shared ``arm_mfa`` helper (reused by the
+# resource-group create endpoint); keep the historical private names as aliases.
+_MFA_MARKERS = arm_mfa.MFA_MARKERS
+_mfa_challenge = arm_mfa.mfa_challenge
 

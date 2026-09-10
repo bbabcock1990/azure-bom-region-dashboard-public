@@ -51,12 +51,18 @@ class ProviderError(Exception):
         self.message = message
 
 
-def _operator_context() -> tuple:
+def _operator_context(subscription: Optional[str] = None) -> tuple:
     """Return ``(bearer_token, subscription_id)`` for the signed-in operator.
 
     Reuses the same token/subscription resolution the live SKU pull uses, so
-    it works even when the customer subscription lives in a foreign tenant."""
-    from . import auth_token, sku_families
+    it works even when the customer subscription lives in a foreign tenant.
+
+    Subscription resolution order:
+      1. ``subscription`` passed in by the caller (the BOM's active sub).
+      2. The operator's saved "refresh subscription" setting (Settings).
+      3. The token's own subscription / first readable subscription (fallback).
+    """
+    from . import auth_token, sku_families, support_settings
     try:
         info = auth_token.get_arm_default_token()
     except auth_token.AuthError:
@@ -65,7 +71,21 @@ def _operator_context() -> tuple:
             "Sign in to Azure first — no ARM token is available to refresh "
             "this dataset.",
         )
-    sub = sku_families._resolve_operator_subscription()
+
+    def _valid(sub: Optional[str]) -> Optional[str]:
+        sub = (sub or "").strip()
+        return sub if re.match(r"^[0-9a-fA-F-]{36}$", sub) else None
+
+    sub = _valid(subscription)
+    if not sub:
+        try:
+            s = support_settings.get_settings()
+            sub = (_valid(s.get("context_subscription"))
+                   or _valid(s.get("refresh_subscription")))
+        except Exception:
+            sub = None
+    if not sub:
+        sub = sku_families._resolve_operator_subscription()
     if not sub:
         raise ProviderError(
             "no_subscription",
@@ -111,9 +131,9 @@ def _arm_get_all(url: str, params: Optional[dict], token: str) -> List[dict]:
     return items
 
 
-def region_catalog_bytes() -> bytes:
+def region_catalog_bytes(subscription: Optional[str] = None) -> bytes:
     """Build the region catalog JSON live from the ARM Locations API."""
-    token, sub = _operator_context()
+    token, sub = _operator_context(subscription)
     url = f"{ARM_BASE}/subscriptions/{sub}/locations"
     items = _arm_get_all(url, {"api-version": LOCATIONS_API_VERSION}, token)
     regions: List[Dict] = []
@@ -151,7 +171,7 @@ def region_catalog_bytes() -> bytes:
     return (json.dumps(doc, indent=2) + "\n").encode("utf-8")
 
 
-def sku_families_seed_bytes() -> bytes:
+def sku_families_seed_bytes(subscription: Optional[str] = None) -> bytes:
     """Return the canonical VM family ids live from ``Microsoft.Compute/skus``."""
     from . import sku_families
     fams = sku_families._families_from_arm()
@@ -178,7 +198,7 @@ def _load_curated_services() -> List[Dict]:
         return []
 
 
-def service_catalog_bytes() -> bytes:
+def service_catalog_bytes(subscription: Optional[str] = None) -> bytes:
     """Intersect the curated Azure **product** catalog with the subscription.
 
     ``GET /subscriptions/{sub}/providers`` enumerates every resource provider
@@ -192,7 +212,7 @@ def service_catalog_bytes() -> bytes:
     the subscription can't access are dropped; nothing outside the catalog is
     ever added. The result is a clean, product-aligned list grounded in the
     subscription's real capabilities."""
-    token, sub = _operator_context()
+    token, sub = _operator_context(subscription)
     url = f"{ARM_BASE}/subscriptions/{sub}/providers"
     items = _arm_get_all(url, {"api-version": PROVIDERS_API_VERSION}, token)
 
@@ -246,7 +266,7 @@ def service_catalog_bytes() -> bytes:
 
 
 # Map of dataset id → provider callable returning seed-format bytes.
-PROVIDERS: Dict[str, Callable[[], bytes]] = {
+PROVIDERS: Dict[str, Callable[..., bytes]] = {
     "region_catalog": region_catalog_bytes,
     "sku_families_seed": sku_families_seed_bytes,
     "service_catalog": service_catalog_bytes,
@@ -257,7 +277,7 @@ def can_refresh(ds_id: str) -> bool:
     return ds_id in PROVIDERS
 
 
-def refresh_bytes(ds_id: str) -> bytes:
+def refresh_bytes(ds_id: str, subscription: Optional[str] = None) -> bytes:
     fn = PROVIDERS.get(ds_id)
     if fn is None:
         raise ProviderError(
@@ -265,4 +285,4 @@ def refresh_bytes(ds_id: str) -> bytes:
             f"Dataset '{ds_id}' can't be refreshed from Azure. Use 'Link a "
             "data URL' or upload a file instead.",
         )
-    return fn()
+    return fn(subscription)

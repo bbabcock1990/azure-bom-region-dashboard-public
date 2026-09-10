@@ -64,11 +64,69 @@
     return true;
   }
 
+  // MSAL persists an "interaction.status" flag while a popup/redirect is
+  // pending. If a prior popup was blocked, cancelled, or the tab was closed
+  // mid-flow, that flag can get stuck and every subsequent acquireTokenPopup
+  // throws BrowserAuthError "interaction_in_progress". Clear any stuck flag so
+  // a fresh interactive attempt can start.
+  function clearStuckInteraction() {
+    try {
+      [window.sessionStorage, window.localStorage].forEach(function (store) {
+        if (!store) return;
+        var kill = [];
+        for (var i = 0; i < store.length; i++) {
+          var k = store.key(i);
+          if (k && k.indexOf("interaction.status") !== -1) kill.push(k);
+        }
+        kill.forEach(function (k) { store.removeItem(k); });
+      });
+    } catch (e) { /* ignore */ }
+  }
+
+  // Run an interactive popup, recovering once from a stuck interaction flag.
+  async function popupWithRetry(req) {
+    try {
+      return await pca.acquireTokenPopup(req);
+    } catch (e) {
+      if (e && e.errorCode === "interaction_in_progress") {
+        clearStuckInteraction();
+        return await pca.acquireTokenPopup(req);
+      }
+      throw e;
+    }
+  }
+
+  // MSAL requires the `claims` request param to be a *stringified JSON object*.
+  // Azure's WWW-Authenticate MFA challenge often delivers the claims value
+  // base64url-encoded (or already as a JSON string). Normalize to a JSON string;
+  // return null if we can't, so the caller falls back to prompt:"login".
+  function normalizeClaims(claims) {
+    if (!claims) return null;
+    if (typeof claims === "object") {
+      try { return JSON.stringify(claims); } catch (e) { return null; }
+    }
+    var s = String(claims).trim();
+    if (!s) return null;
+    // Already a JSON string?
+    try { JSON.parse(s); return s; } catch (e) { /* not JSON */ }
+    // Try base64url-decode -> JSON string.
+    try {
+      var b = s.replace(/-/g, "+").replace(/_/g, "/");
+      var pad = b.length % 4;
+      if (pad) b += "====".slice(pad);
+      var dec = atob(b);
+      try { dec = decodeURIComponent(escape(dec)); } catch (e2) { /* keep raw */ }
+      JSON.parse(dec);
+      return dec;
+    } catch (e) { /* not base64 JSON */ }
+    return null;
+  }
+
   async function getArmToken(opts) {
     opts = opts || {};
     if (!pca) return null;
     var scopes = armScopes();
-    var claims = opts.claims || null;
+    var claims = normalizeClaims(opts.claims);
 
     // Step-up path: Azure rejected a write pending MFA. Force a fresh
     // interactive auth (passing the claims challenge when Azure provided one) so
@@ -78,7 +136,7 @@
       if (account) reqUp.account = account;
       if (cfg.login_hint) reqUp.loginHint = cfg.login_hint;
       if (claims) reqUp.claims = claims; else reqUp.prompt = "login";
-      var rUp = await pca.acquireTokenPopup(reqUp);
+      var rUp = await popupWithRetry(reqUp);
       account = rUp.account || account;
       return rUp.accessToken;
     }
@@ -89,7 +147,7 @@
     // current Easy Auth user and skip the picker entirely).
     if (opts.switchAccount) {
       var reqSw = { scopes: scopes, prompt: "select_account" };
-      var rSw = await pca.acquireTokenPopup(reqSw);
+      var rSw = await popupWithRetry(reqSw);
       account = rSw.account || account;
       return rSw.accessToken;
     }
@@ -117,7 +175,7 @@
       var req = { scopes: scopes };
       if (cfg.login_hint) req.loginHint = cfg.login_hint;
       if (claims) req.claims = claims;
-      var r3 = await pca.acquireTokenPopup(req);
+      var r3 = await popupWithRetry(req);
       account = r3.account || account;
       return r3.accessToken;
     }

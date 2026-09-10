@@ -20,7 +20,7 @@ import re
 import httpx
 
 from .._shared import httpfunc as func
-from .._shared import auth_token, csrf, activity_log
+from .._shared import auth_token, csrf, activity_log, arm_mfa
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +76,15 @@ def _list_groups(subscription_id: str, token: str) -> func.HttpResponse:
     return _ok({"subscription_id": subscription_id, "resource_groups": groups})
 
 
+def _arm_error(resp) -> tuple:
+    """Pull ARM's error code + human message out of a failed response."""
+    try:
+        err = ((resp.json() or {}).get("error") or {})
+        return (err.get("code") or "").strip(), (err.get("message") or "").strip()
+    except Exception:
+        return "", (getattr(resp, "text", "") or "").strip()
+
+
 def _create_group(subscription_id: str, token: str, name: str, location: str) -> func.HttpResponse:
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json",
                "Content-Type": "application/json"}
@@ -94,8 +103,41 @@ def _create_group(subscription_id: str, token: str, name: str, location: str) ->
 
             r = client.put(base, params=params, headers=headers, json={"location": location})
             if r.status_code in (401, 403):
-                return _err("forbidden",
-                            "Not authorized to create a resource group in this subscription.", 403)
+                try:
+                    err_body = r.json()
+                except Exception:
+                    err_body = None
+                # A subscription that enforces "Require MFA for Azure management"
+                # rejects this *write* with a non-MFA token even for an Owner
+                # (reads are not gated, so the Permissions check still passes).
+                # Surface a distinct code + any claims challenge so the SPA can
+                # step the user up and retry — same flow as support-ticket writes.
+                mfa = arm_mfa.mfa_challenge(r, err_body)
+                if mfa is not None:
+                    return func.HttpResponse(
+                        json.dumps({
+                            "error": "mfa_required",
+                            "message": ("Azure requires multi-factor authentication to create "
+                                        "resources in this subscription. Complete the MFA prompt "
+                                        "and the create will retry automatically."),
+                            "details": {"azure": err_body, "claims": mfa.get("claims")},
+                        }),
+                        status_code=403, mimetype="application/json",
+                    )
+                code, detail = _arm_error(r)
+                # A 403 here is often NOT missing RBAC (the Permissions check reads
+                # RBAC and can pass) but an Azure Policy *deny* or a deny
+                # assignment, which the permissions API doesn't reflect. Surface
+                # ARM's own reason so the user knows what actually blocked it.
+                if code.lower() == "requestdisallowedbypolicy" or "disallowed by policy" in detail.lower():
+                    msg = ("Azure Policy blocked creating this resource group — this is a "
+                           "governance policy on the subscription, not a missing permission. "
+                           + (detail[:400] or "A policy assignment denies this action. "
+                              "Try a different location, or ask your Azure admin to allow it."))
+                else:
+                    msg = ("Not authorized to create a resource group in this subscription."
+                           + ((" " + detail[:400]) if detail else ""))
+                return _err("forbidden", msg.strip(), 403)
             if r.status_code >= 400:
                 detail = ""
                 try:

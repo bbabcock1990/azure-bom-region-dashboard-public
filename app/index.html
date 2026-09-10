@@ -21,14 +21,14 @@
        the server reports delegated_mode; mints the customer's ARM token
        client-side so tokens never touch the server. -->
   <script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.28.1/lib/msal-browser.min.js"></script>
-  <script src="msal-auth.js?v=2026090906"></script>
+  <script src="msal-auth.js?v=2026091012"></script>
 
   <!-- Apply persisted theme + filters state BEFORE styles.css loads to prevent
        FOUC. Kept external (not inline) so the CSP can forbid inline scripts.
        Order matters: this must run before the <link> below. -->
   <script src="preinit.js?v=2026090912"></script>
 
-  <link rel="stylesheet" href="styles.css?v=2026090913" />
+  <link rel="stylesheet" href="styles.css?v=2026091010" />
 </head>
 <body>
 
@@ -42,6 +42,7 @@
     </div>
   </div>
   <div class="header-meta">
+    <div id="global-sub-control" class="global-sub-control" hidden></div>
     <button type="button" id="signin-chip" class="signin-chip" data-state="unknown" title="Sign-in status" aria-label="Sign-in status">
       <span class="signin-dot" aria-hidden="true"></span>
       <span class="signin-text" id="signin-chip-text">…</span>
@@ -294,6 +295,10 @@
         </header>
         <div class="settings-layout">
           <nav class="settings-nav" role="tablist" aria-label="Settings sections">
+            <button type="button" class="settings-nav-item" data-settings-tab="subscription" role="tab" aria-selected="false">
+              <span class="settings-nav-icon" aria-hidden="true">🧭</span>
+              <span class="settings-nav-text"><strong>Subscription</strong><small>Azure context for data &amp; validation</small></span>
+            </button>
             <button type="button" class="settings-nav-item is-active" data-settings-tab="owner" role="tab" aria-selected="true">
               <span class="settings-nav-icon" aria-hidden="true">👤</span>
               <span class="settings-nav-text"><strong>Ticket owner</strong><small>Default Azure support contact</small></span>
@@ -301,6 +306,10 @@
             <button type="button" class="settings-nav-item" data-settings-tab="permissions" role="tab" aria-selected="false">
               <span class="settings-nav-icon" aria-hidden="true">🔑</span>
               <span class="settings-nav-text"><strong>Permissions</strong><small>Access check for this account</small></span>
+            </button>
+            <button type="button" class="settings-nav-item" data-settings-tab="validation" role="tab" aria-selected="false">
+              <span class="settings-nav-icon" aria-hidden="true">🧪</span>
+              <span class="settings-nav-text"><strong>Deployment validation</strong><small>Pre-flight resource group</small></span>
             </button>
             <button type="button" class="settings-nav-item" data-settings-tab="datasets" role="tab" aria-selected="false">
               <span class="settings-nav-icon" aria-hidden="true">🗂️</span>
@@ -320,6 +329,24 @@
             </button>
           </nav>
           <div class="settings-panels">
+            <section id="settings-subscription" class="settings-panel" data-settings-panel="subscription">
+              <h2>Subscription context</h2>
+              <p class="muted">
+                One place to choose the Azure subscription the dashboard works against. It drives
+                <strong>model-data refresh</strong> (region &amp; service catalogs), the
+                <strong>deployment-validation resource group</strong>, and the subscription
+                pre-selected when you <strong>create a new BOM</strong>. Set it here while you don't
+                have a BOM yet; once you open a BOM, the context follows that BOM's subscription
+                (change it by editing the BOM). The header shows the current subscription but is
+                read-only.
+              </p>
+              <div class="settings-owner-grid">
+                <label class="settings-owner-wide">Active subscription
+                  <select id="ctx-sub-select"></select>
+                  <small class="muted" id="ctx-sub-note"></small>
+                </label>
+              </div>
+            </section>
             <section id="settings-owner" class="settings-panel is-active" data-settings-panel="owner">
               <h2>Ticket owner</h2>
               <p class="muted">
@@ -332,27 +359,51 @@
                 <label>Email <input type="email" id="owner-email" maxlength="120" autocomplete="off" /></label>
                 <label>Additional emails (CC) <input type="text" id="owner-cc" maxlength="400" autocomplete="off" /></label>
                 <label>Phone <input type="text" id="owner-phone" maxlength="40" autocomplete="off" /></label>
-                <label>Country <input type="text" id="owner-country" maxlength="60" autocomplete="off" /></label>
-                <label>Time zone <input type="text" id="owner-tz" maxlength="80" autocomplete="off" /></label>
+                <label>Country
+                  <select id="owner-country">
+                    <option value="US">United States</option>
+                    <option value="CA">Canada</option>
+                    <option value="GB">United Kingdom</option>
+                    <option value="IE">Ireland</option>
+                    <option value="AU">Australia</option>
+                    <option value="NZ">New Zealand</option>
+                    <option value="IN">India</option>
+                    <option value="DE">Germany</option>
+                    <option value="FR">France</option>
+                    <option value="NL">Netherlands</option>
+                    <option value="ES">Spain</option>
+                    <option value="IT">Italy</option>
+                    <option value="SE">Sweden</option>
+                    <option value="NO">Norway</option>
+                    <option value="FI">Finland</option>
+                    <option value="DK">Denmark</option>
+                    <option value="CH">Switzerland</option>
+                    <option value="BE">Belgium</option>
+                    <option value="AT">Austria</option>
+                    <option value="PT">Portugal</option>
+                    <option value="PL">Poland</option>
+                    <option value="BR">Brazil</option>
+                    <option value="MX">Mexico</option>
+                    <option value="JP">Japan</option>
+                    <option value="SG">Singapore</option>
+                    <option value="ZA">South Africa</option>
+                    <option value="AE">United Arab Emirates</option>
+                  </select>
+                </label>
+                <label>Time zone
+                  <select id="owner-tz">
+                    <option value="Eastern Standard Time">Eastern (ET)</option>
+                    <option value="Central Standard Time">Central (CT)</option>
+                    <option value="Mountain Standard Time">Mountain (MT)</option>
+                    <option value="Pacific Standard Time">Pacific (PT)</option>
+                  </select>
+                </label>
                 <label>Default severity
                   <select id="owner-sev">
                     <option value="minimal">Minimal</option>
                     <option value="moderate">Moderate</option>
                     <option value="critical">Critical</option>
                   </select>
-                </label>
-                <label class="settings-owner-wide">Validation resource group <span class="muted" style="font-weight:400;">· optional (advanced)</span>
-                  <div class="muted" id="owner-valrg-sub" style="margin:2px 0 4px;font-size:0.85em;"></div>
-                  <input type="text" id="owner-valrg" list="owner-valrg-list" maxlength="90" autocomplete="off" placeholder="Leave blank for read-only checks" />
-                  <datalist id="owner-valrg-list"></datalist>
-                  <small class="muted">Optional. Leave blank to run <strong>read-only checks</strong> (quota, SKU &amp; zonal availability) — no resource group needed. To also run ARM <strong>deployment-level pre-flight</strong>, point this at an <strong>existing</strong> resource group. It's saved <strong>per subscription</strong> (an RG only exists inside one subscription) and applies to whichever subscription is selected on the dashboard. Pre-flight creates no resources and incurs no cost. <span id="owner-valrg-hint"></span></small>
-                  <div class="owner-valrg-create">
-                    <input type="text" id="owner-valrg-loc" list="owner-valrg-loc-list" maxlength="40" autocomplete="off" placeholder="Location (e.g. eastus)" />
-                    <datalist id="owner-valrg-loc-list"></datalist>
-                    <button type="button" class="btn btn--sm" id="owner-valrg-create">➕ Create if it doesn't exist</button>
-                    <span class="muted" id="owner-valrg-create-status"></span>
-                  </div>
-                  <small class="muted">Creating a resource group is free and holds nothing — it just gives the deep check somewhere to validate. You need Contributor on the subscription.</small>
                 </label>
               </div>
               <div class="support-form-actions">
@@ -381,6 +432,36 @@
               <div id="perm-summary" class="perm-summary hidden"></div>
               <div id="perm-results" class="perm-results">
                 <p class="muted">Pick a subscription and choose <strong>Check permissions</strong> to run the access check.</p>
+              </div>
+            </section>
+            <section id="settings-validation" class="settings-panel" data-settings-panel="validation">
+              <h2>Deployment validation</h2>
+              <p class="muted">
+                An optional <strong>validation resource group</strong> lets the deep check run ARM
+                <strong>deployment-level pre-flight</strong> — the strongest signal that your BOM will
+                actually deploy. Leave it blank to run <strong>read-only checks</strong> (quota, SKU
+                &amp; zonal availability) with no resource group at all. It's saved
+                <strong>per subscription</strong> and applies to whichever subscription is selected on
+                the dashboard.
+              </p>
+              <div class="settings-owner-grid">
+                <label class="settings-owner-wide">Validation resource group <span class="muted" style="font-weight:400;">· optional (advanced)</span>
+                  <div class="muted" id="owner-valrg-sub" style="margin:2px 0 4px;font-size:0.85em;"></div>
+                  <input type="text" id="owner-valrg" list="owner-valrg-list" maxlength="90" autocomplete="off" placeholder="Leave blank for read-only checks" />
+                  <datalist id="owner-valrg-list"></datalist>
+                  <small class="muted">Point this at an <strong>existing</strong> resource group to enable pre-flight (an RG only exists inside one subscription). Pre-flight creates no resources and incurs no cost. <span id="owner-valrg-hint"></span></small>
+                  <div class="owner-valrg-create">
+                    <input type="text" id="owner-valrg-loc" list="owner-valrg-loc-list" maxlength="40" autocomplete="off" placeholder="Location (e.g. eastus)" />
+                    <datalist id="owner-valrg-loc-list"></datalist>
+                    <button type="button" class="btn btn--sm" id="owner-valrg-create">➕ Create if it doesn't exist</button>
+                    <span class="muted" id="owner-valrg-create-status"></span>
+                  </div>
+                  <small class="muted">Creating a resource group is free and holds nothing — it just gives the deep check somewhere to validate. You need Contributor on the subscription.</small>
+                </label>
+              </div>
+              <div class="support-form-actions">
+                <button type="button" class="btn btn--accent" id="valrg-save">Save validation RG</button>
+                <span class="muted" id="valrg-status"></span>
               </div>
             </section>
             <section id="settings-datasets" class="settings-panel" data-settings-panel="datasets">
@@ -757,10 +838,45 @@
             <input type="text" id="bom-owner-phone" placeholder="+1 555 0100" autocomplete="off" maxlength="40" />
           </label>
           <label>Country
-            <input type="text" id="bom-owner-country" placeholder="US" autocomplete="off" maxlength="2" />
+            <select id="bom-owner-country">
+              <option value="">— use global default —</option>
+              <option value="US">United States</option>
+              <option value="CA">Canada</option>
+              <option value="GB">United Kingdom</option>
+              <option value="IE">Ireland</option>
+              <option value="AU">Australia</option>
+              <option value="NZ">New Zealand</option>
+              <option value="IN">India</option>
+              <option value="DE">Germany</option>
+              <option value="FR">France</option>
+              <option value="NL">Netherlands</option>
+              <option value="ES">Spain</option>
+              <option value="IT">Italy</option>
+              <option value="SE">Sweden</option>
+              <option value="NO">Norway</option>
+              <option value="FI">Finland</option>
+              <option value="DK">Denmark</option>
+              <option value="CH">Switzerland</option>
+              <option value="BE">Belgium</option>
+              <option value="AT">Austria</option>
+              <option value="PT">Portugal</option>
+              <option value="PL">Poland</option>
+              <option value="BR">Brazil</option>
+              <option value="MX">Mexico</option>
+              <option value="JP">Japan</option>
+              <option value="SG">Singapore</option>
+              <option value="ZA">South Africa</option>
+              <option value="AE">United Arab Emirates</option>
+            </select>
           </label>
           <label>Preferred time zone
-            <input type="text" id="bom-owner-tz" placeholder="Pacific Standard Time" autocomplete="off" maxlength="60" />
+            <select id="bom-owner-tz">
+              <option value="">— use global default —</option>
+              <option value="Eastern Standard Time">Eastern (ET)</option>
+              <option value="Central Standard Time">Central (CT)</option>
+              <option value="Mountain Standard Time">Mountain (MT)</option>
+              <option value="Pacific Standard Time">Pacific (PT)</option>
+            </select>
           </label>
           <label>Preferred contact method
             <select id="bom-owner-method">
@@ -830,19 +946,6 @@
         <button type="button" class="link-btn" id="bom-regions-clear">Clear</button>
       </div>
       <div class="bom-services-list" id="bom-regions-list"></div>
-      <details class="bom-custom-add">
-        <summary>+ Add custom region</summary>
-        <div class="bom-custom-add-grid">
-          <input type="text" id="bom-custom-rg-name" placeholder="Short name (e.g. polandcentral)" autocomplete="off" maxlength="60" />
-          <input type="text" id="bom-custom-rg-display" placeholder="Display name (e.g. Poland Central)" autocomplete="off" maxlength="100" />
-          <label class="bom-custom-add-zone">
-            <input type="checkbox" id="bom-custom-rg-az" /> has AZs
-          </label>
-          <button type="button" id="bom-custom-rg-add" class="link-btn">Add</button>
-        </div>
-        <p class="muted">Custom regions are saved to your local catalog and become selectable above. To manage the <em>built-in</em> list, edit <code>api/_shared/data/bom_region_catalog.json</code> and restart the dashboard.</p>
-        <div class="bom-custom-status" id="bom-custom-rg-status"></div>
-      </details>
       <p class="muted">Regions chosen here scope the analysis run. Leave the default list checked to use all of Azure, or narrow it for a customer that only wants to deploy in specific regions.</p>
     </div>
     </div>
@@ -931,6 +1034,6 @@
 
 <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
 
-<script src="app.js?v=2026090913"></script>
+<script src="app.js?v=2026091010"></script>
 </body>
 </html>
