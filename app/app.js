@@ -8405,6 +8405,11 @@ async function _loadValidationRgOptions() {
   }
 }
 
+// Set when a create attempt is refused pending MFA — the *next* click performs
+// the interactive step-up inside the user gesture, so the browser doesn't block
+// the sign-in popup (popups fired after a network await are suppressed).
+let _rgMfaPending = null;
+
 // Create the validation resource group named in the field if it doesn't exist.
 // A resource group is free and empty until resources are deployed — the deep
 // check only validates against it. Gated by an explicit confirmation.
@@ -8414,18 +8419,42 @@ async function _createValidationRg() {
   const location = ((document.getElementById("owner-valrg-loc") || {}).value || "").trim();
   const sub = focusedSubscriptionId() || "";
   const subName = focusedSubscriptionName() || sub;
+  const btn = document.getElementById("owner-valrg-create");
   if (!sub) { if (status) status.textContent = "Select a subscription first."; return; }
   if (!name) { if (status) status.textContent = "Enter a resource group name above first."; return; }
   if (!location) { if (status) status.textContent = "Enter a location (e.g. eastus)."; return; }
-  const ok = window.confirm(
-    `Create resource group "${name}" in ${location}\n` +
-    `in subscription: ${subName}?\n\n` +
-    `This is a free, empty resource group used only so the deep check has somewhere to run Azure ` +
-    `pre-flight validation. No resources are deployed and nothing is billed. Requires Contributor on the subscription.`
-  );
-  if (!ok) return;
-  const btn = document.getElementById("owner-valrg-create");
+
+  // A prior attempt was refused pending MFA — treat THIS click as the gesture
+  // that opens the sign-in popup; skip the (already-answered) confirm dialog.
+  const stepUpNeeded = !!_rgMfaPending;
+  if (!stepUpNeeded) {
+    const ok = window.confirm(
+      `Create resource group "${name}" in ${location}\n` +
+      `in subscription: ${subName}?\n\n` +
+      `This is a free, empty resource group used only so the deep check has somewhere to run Azure ` +
+      `pre-flight validation. No resources are deployed and nothing is billed. Requires Contributor on the subscription.`
+    );
+    if (!ok) return;
+  }
+
   if (btn) btn.disabled = true;
+
+  // Do the interactive MFA step-up NOW — before any network await — so the popup
+  // is inside the user's click gesture and the browser allows it.
+  if (stepUpNeeded) {
+    const claims = _rgMfaPending === true ? null : _rgMfaPending;
+    _rgMfaPending = null;
+    if (status) status.textContent = "Verifying MFA…";
+    try {
+      await stepUpDelegatedToken(claims);
+    } catch (authErr) {
+      if (status) status.textContent = "❌ MFA sign-in was cancelled or blocked.";
+      showToast(`MFA sign-in was cancelled or blocked: ${authErr.message || authErr}`, "error");
+      if (btn) { btn.disabled = false; btn.textContent = "Create if it doesn't exist"; }
+      return;
+    }
+  }
+
   if (status) status.textContent = "Creating…";
   const createOnce = () => apiJson("/api/az/resource-groups", {
     method: "POST",
@@ -8439,23 +8468,18 @@ async function _createValidationRg() {
     } catch (e) {
       // This subscription enforces "Require MFA for Azure management": the write
       // was refused because the token lacks an MFA claim (reads still work, so
-      // the Permissions check passed). Step the user up and retry once.
+      // the Permissions check passed). Remember the challenge and let the user's
+      // next click drive the sign-in popup from within their gesture.
       if (e && e.body && e.body.error === "mfa_required") {
-        const claims = e.body.details && e.body.details.claims;
-        if (status) status.textContent = "Verifying MFA…";
-        showToast("Azure needs multi-factor authentication to create this resource group — please complete the sign-in prompt.", "warning");
-        try {
-          await stepUpDelegatedToken(claims);
-        } catch (authErr) {
-          showToast(`MFA sign-in was cancelled or blocked: ${authErr.message || authErr}`, "error");
-          throw e;
-        }
-        if (status) status.textContent = "Creating…";
-        res = await createOnce();
-      } else {
-        throw e;
+        _rgMfaPending = (e.body.details && e.body.details.claims) || true;
+        if (status) status.textContent = "⚠ Azure needs MFA — click “Verify MFA & create” to continue.";
+        showToast("Azure requires multi-factor authentication. Click “Verify MFA & create” to complete the sign-in prompt — the resource group is then created automatically.", "warning");
+        if (btn) { btn.disabled = false; btn.textContent = "Verify MFA & create"; }
+        return;
       }
+      throw e;
     }
+    if (btn) btn.textContent = "Create if it doesn't exist";
     if (status) status.textContent = res.created ? `✓ Created in ${res.location}` : `✓ Already exists in ${res.location}`;
     // Persist it as the validation RG for THIS subscription so the deep check
     // uses it immediately (an RG only exists inside one subscription).
