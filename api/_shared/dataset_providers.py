@@ -243,6 +243,12 @@ def service_catalog_bytes(subscription: Optional[str] = None) -> bytes:
             "zone_check": bool(s.get("zone_check", False)),
             "category": (str(s.get("category")).strip()
                          if s.get("category") else "Other"),
+            # Preserve the curated service tiers (e.g. Azure SQL / PostgreSQL
+            # editions). These are hand-authored in the seed and not derivable
+            # from ARM provider metadata; dropping them here would leave the
+            # refreshed override tier-less, so the wizard offers a tier the BOM
+            # save then rejects ("has no tier ...").
+            "tiers": s.get("tiers") or [],
         })
 
     if not services:
