@@ -6676,8 +6676,23 @@ function getBomSelectedRegions() {
     .map(cb => cb.value);
 }
 
+// Selecting an AZ filter option should scope the actual selection, not just the
+// visual list: check the regions in scope, uncheck the rest, then re-filter for
+// visibility. The text search stays visual-only (bound to filterBomRegions).
+function applyBomRegionAzScope() {
+  const filt = document.getElementById("bom-regions-filter").value || "all";
+  document.querySelectorAll('#bom-regions-list label').forEach(lbl => {
+    const cb = lbl.querySelector('input[data-bom-rg]');
+    if (!cb) return;
+    if (filt === "az") cb.checked = lbl.dataset.az === "1";
+    else if (filt === "noaz") cb.checked = lbl.dataset.az === "0";
+    else cb.checked = true;
+  });
+  filterBomRegions();
+  updateBomRegionsCount();
+}
+
 function filterBomRegions() {
-  const q = (document.getElementById("bom-regions-search").value || "").trim().toLowerCase();
   const filt = document.getElementById("bom-regions-filter").value || "all";
   const active = !!q || filt !== "all";
   document.querySelectorAll('#bom-regions-list .svc-group').forEach(group => {
@@ -8321,8 +8336,14 @@ async function loadOwnerSettings() {
   set("owner-email", s.primary_email || "");
   set("owner-cc", s.additional_emails || "");
   set("owner-phone", s.phone || "");
-  set("owner-country", s.country || "US");
-  set("owner-tz", s.preferred_timezone || "Pacific Standard Time");
+  const setSel = (id, val, dflt) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.value = val;
+    if (el.selectedIndex < 0) el.value = dflt;
+  };
+  setSel("owner-country", s.country || "US", "US");
+  setSel("owner-tz", s.preferred_timezone || "Pacific Standard Time", "Pacific Standard Time");
   set("owner-sev", s.default_severity || "moderate");
 }
 
@@ -8634,7 +8655,6 @@ async function loadDatasetsSettings() {
   }
   host.innerHTML = datasets.map(_datasetCardHtml).join("");
   for (const ds of datasets) _wireDatasetCard(ds);
-  _loadRefreshSubscriptionControl();
 }
 
 // The subscription used to feed "Refresh from Azure" for the region & service
@@ -8642,23 +8662,6 @@ async function loadDatasetsSettings() {
 // header selector or Settings → Subscription.
 function _refreshSubscriptionId() {
   return contextSubscriptionId();
-}
-
-// Show which subscription the catalog refresh will read from (the global
-// context). Read-only here — the subscription is chosen in the header selector
-// or the Subscription settings blade.
-async function _loadRefreshSubscriptionControl() {
-  const note = document.getElementById("dataset-refresh-sub-note");
-  if (!note) return;
-  await ensureSupportSettings();
-  const sub = contextSubscriptionId();
-  const name = sub ? (_subNameById(sub) || sub) : "";
-  note.innerHTML = name
-    ? `Refreshes read from your subscription context: <strong>${escapeHtml(name)}</strong>. `
-      + `Change it in the header selector or <button type="button" class="link-btn" data-goto-subscription="1">Subscription settings</button>.`
-    : `Pick a subscription in the header selector or <button type="button" class="link-btn" data-goto-subscription="1">Subscription settings</button> — refreshes use that context.`;
-  const goto = note.querySelector('[data-goto-subscription]');
-  if (goto) goto.addEventListener("click", () => switchSettingsTab("subscription"));
 }
 
 function _datasetSourceLine(ds) {
@@ -10406,7 +10409,7 @@ function init() {
   document.getElementById("bom-custom-svc-add").addEventListener("click", addCustomBomService);
 
   // Regions picker
-  document.getElementById("bom-regions-filter").addEventListener("change", filterBomRegions);
+  document.getElementById("bom-regions-filter").addEventListener("change", applyBomRegionAzScope);
   document.getElementById("bom-regions-search").addEventListener("input", filterBomRegions);
   document.getElementById("bom-regions-select-all").addEventListener("click", () => {
     document.querySelectorAll('#bom-regions-list label:not(.hidden) input[data-bom-rg]').forEach(cb => { cb.checked = true; });
@@ -10428,7 +10431,6 @@ function init() {
       deleteCustomBomRegion(btn.getAttribute('data-del-rg'));
     }
   });
-  document.getElementById("bom-custom-rg-add").addEventListener("click", addCustomBomRegion);
 
   // Activity log controls
   const actRefresh = document.getElementById("activity-refresh");

@@ -130,6 +130,35 @@ def _iso3_country(value: Any, default: str = "USA") -> str:
         return _COUNTRY_NAME_TO_ALPHA3[text]
     return default
 
+
+# Azure Support's contactDetails.preferredTimeZone expects a Windows time zone
+# ID. The UI offers the common US zones; validate against them (plus a few
+# short aliases) so a stray value can't 400 the submission.
+_VALID_TIMEZONES = {
+    "Eastern Standard Time", "Central Standard Time",
+    "Mountain Standard Time", "Pacific Standard Time",
+    "Alaskan Standard Time", "Hawaiian Standard Time", "UTC",
+}
+_TIMEZONE_ALIASES = {
+    "et": "Eastern Standard Time", "est": "Eastern Standard Time",
+    "eastern": "Eastern Standard Time",
+    "ct": "Central Standard Time", "cst": "Central Standard Time",
+    "central": "Central Standard Time",
+    "mt": "Mountain Standard Time", "mst": "Mountain Standard Time",
+    "mountain": "Mountain Standard Time",
+    "pt": "Pacific Standard Time", "pst": "Pacific Standard Time",
+    "pacific": "Pacific Standard Time",
+}
+
+
+def _timezone(value: Any, default: str = "Pacific Standard Time") -> str:
+    """Normalize a preferred time zone to a Windows time zone ID Azure accepts."""
+    text = str(value or "").strip()
+    if text in _VALID_TIMEZONES:
+        return text
+    return _TIMEZONE_ALIASES.get(text.lower(), default)
+
+
 VALID_SEVERITIES = ("minimal", "moderate", "critical")
 
 
@@ -197,7 +226,7 @@ def _contact_details(settings: Dict[str, Any]) -> Dict[str, Any]:
         "lastName": settings.get("contact_last_name") or "",
         "primaryEmailAddress": settings.get("primary_email") or "",
         "preferredContactMethod": (settings.get("preferred_contact_method") or "email").lower(),
-        "preferredTimeZone": settings.get("preferred_timezone") or "Pacific Standard Time",
+        "preferredTimeZone": _timezone(settings.get("preferred_timezone")),
         "country": _iso3_country(settings.get("country")),
         "preferredSupportLanguage": settings.get("preferred_language") or "en-us",
     }
