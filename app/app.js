@@ -573,7 +573,10 @@ function renderBomPanel() {
   const meta = bomId ? getBomMeta(bomId) : null;
 
   if (!bomId || !meta) {
-    syncActiveSubscription(null);
+    // No BOM open: keep the user's global subscription context (do NOT force it
+    // back to the default). syncActiveSubscription() re-validates without
+    // clearing a valid selection, so a context chosen in Settings sticks.
+    syncActiveSubscription();
     renderSubscriptionSwitcher();
     renderSubscriptionFilter();
     if (bodyEl) bodyEl.classList.add("hidden");
