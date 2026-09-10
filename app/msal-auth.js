@@ -64,6 +64,38 @@
     return true;
   }
 
+  // MSAL persists an "interaction.status" flag while a popup/redirect is
+  // pending. If a prior popup was blocked, cancelled, or the tab was closed
+  // mid-flow, that flag can get stuck and every subsequent acquireTokenPopup
+  // throws BrowserAuthError "interaction_in_progress". Clear any stuck flag so
+  // a fresh interactive attempt can start.
+  function clearStuckInteraction() {
+    try {
+      [window.sessionStorage, window.localStorage].forEach(function (store) {
+        if (!store) return;
+        var kill = [];
+        for (var i = 0; i < store.length; i++) {
+          var k = store.key(i);
+          if (k && k.indexOf("interaction.status") !== -1) kill.push(k);
+        }
+        kill.forEach(function (k) { store.removeItem(k); });
+      });
+    } catch (e) { /* ignore */ }
+  }
+
+  // Run an interactive popup, recovering once from a stuck interaction flag.
+  async function popupWithRetry(req) {
+    try {
+      return await pca.acquireTokenPopup(req);
+    } catch (e) {
+      if (e && e.errorCode === "interaction_in_progress") {
+        clearStuckInteraction();
+        return await pca.acquireTokenPopup(req);
+      }
+      throw e;
+    }
+  }
+
   async function getArmToken(opts) {
     opts = opts || {};
     if (!pca) return null;
@@ -78,7 +110,7 @@
       if (account) reqUp.account = account;
       if (cfg.login_hint) reqUp.loginHint = cfg.login_hint;
       if (claims) reqUp.claims = claims; else reqUp.prompt = "login";
-      var rUp = await pca.acquireTokenPopup(reqUp);
+      var rUp = await popupWithRetry(reqUp);
       account = rUp.account || account;
       return rUp.accessToken;
     }
@@ -89,7 +121,7 @@
     // current Easy Auth user and skip the picker entirely).
     if (opts.switchAccount) {
       var reqSw = { scopes: scopes, prompt: "select_account" };
-      var rSw = await pca.acquireTokenPopup(reqSw);
+      var rSw = await popupWithRetry(reqSw);
       account = rSw.account || account;
       return rSw.accessToken;
     }
@@ -117,7 +149,7 @@
       var req = { scopes: scopes };
       if (cfg.login_hint) req.loginHint = cfg.login_hint;
       if (claims) req.claims = claims;
-      var r3 = await pca.acquireTokenPopup(req);
+      var r3 = await popupWithRetry(req);
       account = r3.account || account;
       return r3.accessToken;
     }
