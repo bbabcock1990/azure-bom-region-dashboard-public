@@ -112,8 +112,24 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
         # ─── Refresh from Azure (ARM) ────────────────────────────────────
         if method == "POST" and action == "refresh":
+            # The BOM's active subscription (preferred) may be supplied as a
+            # query param or JSON body field; the store falls back to the saved
+            # refresh-subscription setting, then any readable subscription.
+            sub = ""
             try:
-                info = dataset_store.refresh_from_azure(dataset_id)
+                sub = (req.params.get("subscription")
+                       or req.params.get("subscription_id") or "").strip()
+            except Exception:
+                sub = ""
+            if not sub:
+                try:
+                    body = req.get_json() or {}
+                    sub = (body.get("subscription")
+                           or body.get("subscription_id") or "").strip()
+                except Exception:
+                    sub = ""
+            try:
+                info = dataset_store.refresh_from_azure(dataset_id, sub or None)
             except dataset_store.DatasetError as ex:
                 _log("error", f"Dataset refresh failed: {ex.code}",
                      dataset=dataset_id, code=ex.code)

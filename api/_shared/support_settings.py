@@ -47,6 +47,7 @@ _FIELDS = (
     "default_severity",    # one of VALID_SEVERITIES
     "validation_resource_group",   # legacy single/global RG (fallback only)
     "validation_resource_groups",  # JSON map {subscription_id: rg_name} — per-subscription
+    "refresh_subscription",        # subscription used to refresh datasets from Azure
 )
 
 DEFAULTS: Dict[str, Any] = {
@@ -62,6 +63,7 @@ DEFAULTS: Dict[str, Any] = {
     "default_severity": "moderate",
     "validation_resource_group": "",
     "validation_resource_groups": {},
+    "refresh_subscription": "",
 }
 
 

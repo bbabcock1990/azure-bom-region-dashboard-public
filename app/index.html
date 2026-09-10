@@ -28,7 +28,7 @@
        Order matters: this must run before the <link> below. -->
   <script src="preinit.js?v=2026090912"></script>
 
-  <link rel="stylesheet" href="styles.css?v=2026090913" />
+  <link rel="stylesheet" href="styles.css?v=2026091001" />
 </head>
 <body>
 
@@ -396,6 +396,19 @@
                 overwrites the built-in copy — use <strong>Revert</strong> to
                 restore it. <strong>Download</strong> exports the current file.
               </p>
+              <div class="dataset-refresh-sub">
+                <label for="dataset-refresh-sub"><strong>Subscription for Azure refresh</strong></label>
+                <p class="muted" id="dataset-refresh-sub-hint">
+                  Catalog refreshes follow the subscription of the BOM you're working in.
+                </p>
+                <div class="dataset-refresh-sub-row">
+                  <select id="dataset-refresh-sub">
+                    <option value="">Use the active BOM's subscription</option>
+                  </select>
+                  <button type="button" class="btn btn--sm" id="dataset-refresh-sub-save">Save</button>
+                  <span class="muted" id="dataset-refresh-sub-status"></span>
+                </div>
+              </div>
               <div id="datasets-list" class="datasets-list">
                 <p class="muted" id="datasets-loading">Loading datasets…</p>
               </div>
@@ -931,6 +944,6 @@
 
 <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
 
-<script src="app.js?v=2026090913"></script>
+<script src="app.js?v=2026091001"></script>
 </body>
 </html>

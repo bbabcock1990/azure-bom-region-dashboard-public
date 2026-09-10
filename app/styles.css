@@ -3324,6 +3324,18 @@ body.settings-open { overflow: hidden; }
 
 /* ── Model datasets (Settings) ─────────────────────────────────────────── */
 .datasets-list { display: flex; flex-direction: column; gap: 14px; }
+.dataset-refresh-sub {
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  background: var(--panel-bg-alt);
+  color: var(--panel-text);
+}
+.dataset-refresh-sub > label { display: block; margin-bottom: 4px; }
+.dataset-refresh-sub .muted { margin: 0 0 10px; }
+.dataset-refresh-sub-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.dataset-refresh-sub-row select { min-width: 340px; max-width: 100%; }
 .dataset-card {
   border: 1px solid var(--panel-border);
   border-radius: 10px;

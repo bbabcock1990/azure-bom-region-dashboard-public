@@ -8407,6 +8407,81 @@ async function loadDatasetsSettings() {
   }
   host.innerHTML = datasets.map(_datasetCardHtml).join("");
   for (const ds of datasets) _wireDatasetCard(ds);
+  _loadRefreshSubscriptionControl();
+}
+
+// The subscription used to feed "Refresh from Azure" for the region & service
+// catalogs. Precedence: an explicit saved setting ("Set your subscription"),
+// otherwise the active BOM's subscription. When neither is set the backend
+// falls back to the first readable subscription.
+function _refreshSubscriptionId() {
+  const set = String((SUPPORT.settings && SUPPORT.settings.refresh_subscription) || "").trim();
+  if (set) return set;
+  return String(activeSubscriptionId() || focusedSubscriptionId() || "").trim();
+}
+
+// Populate the "Set your subscription" picker in the Model datasets settings so
+// the user can pin which subscription the catalog refresh reads from. Defaults
+// to the saved setting; blank means "use the active BOM's subscription".
+async function _loadRefreshSubscriptionControl() {
+  const sel = document.getElementById("dataset-refresh-sub");
+  if (!sel) return;
+  const hint = document.getElementById("dataset-refresh-sub-hint");
+  await ensureSupportSettings();
+  let subs = window._loadedSubscriptions || [];
+  if (!subs.length) {
+    try {
+      const r = await apiJson("/api/az/subscriptions");
+      subs = r.subscriptions || [];
+      window._loadedSubscriptions = subs;
+    } catch (_e) { subs = []; }
+  }
+  const saved = String((SUPPORT.settings && SUPPORT.settings.refresh_subscription) || "").trim();
+  const bomSub = String(activeSubscriptionId() || focusedSubscriptionId() || "").trim();
+  const bomName = (subs.find(s => s && s.id === bomSub) || {}).name || bomSub;
+  const autoLabel = bomSub
+    ? `Use the active BOM's subscription (${bomName})`
+    : "Use the active BOM's subscription";
+  const opts = [`<option value="">${escapeHtml(autoLabel)}</option>`];
+  for (const s of subs) {
+    if (!s || !s.id) continue;
+    const on = s.id === saved ? " selected" : "";
+    opts.push(`<option value="${escapeHtml(s.id)}"${on}>${escapeHtml(s.name || s.id)} (${escapeHtml(String(s.id).substring(0, 8))}…)</option>`);
+  }
+  sel.innerHTML = opts.join("");
+  sel.value = saved || "";
+  if (hint) {
+    hint.textContent = saved
+      ? "Catalog refreshes read from this subscription."
+      : "Catalog refreshes follow the subscription of the BOM you're working in.";
+  }
+}
+
+async function _saveRefreshSubscription() {
+  const sel = document.getElementById("dataset-refresh-sub");
+  const status = document.getElementById("dataset-refresh-sub-status");
+  if (!sel) return;
+  const sub = String(sel.value || "").trim();
+  if (status) status.textContent = "Saving…";
+  try {
+    const res = await apiJson("/api/support/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_subscription: sub }),
+    });
+    SUPPORT.settings = res.settings;
+    if (status) status.textContent = "✓ Saved";
+    const hint = document.getElementById("dataset-refresh-sub-hint");
+    if (hint) {
+      hint.textContent = sub
+        ? "Catalog refreshes read from this subscription."
+        : "Catalog refreshes follow the subscription of the BOM you're working in.";
+    }
+    showToast("Refresh subscription saved.", "success");
+  } catch (e) {
+    if (status) status.textContent = `❌ ${e.message}`;
+    showToast(e.message || "Could not save refresh subscription.", "error");
+  }
 }
 
 function _datasetSourceLine(ds) {
@@ -8530,7 +8605,9 @@ async function _refreshDatasetArm(id, label) {
   const status = _datasetStatusEl(id);
   if (status) status.textContent = "Refreshing from Azure…";
   try {
-    const res = await apiFetch(`/api/datasets/${encodeURIComponent(id)}/refresh`, { method: "POST" });
+    const sub = _refreshSubscriptionId();
+    const qs = sub ? `?subscription=${encodeURIComponent(sub)}` : "";
+    const res = await apiFetch(`/api/datasets/${encodeURIComponent(id)}/refresh${qs}`, { method: "POST" });
     if (!res.ok) {
       let body = null;
       try { body = await res.json(); } catch (e) {}
@@ -10047,6 +10124,7 @@ function init() {
   const pricingSaveBtn = document.getElementById("pricing-save");
   if (pricingSaveBtn) pricingSaveBtn.addEventListener("click", savePricingSettings);
   { const pc = document.getElementById("perm-check"); if (pc) pc.addEventListener("click", checkPermissions); }
+  { const rsb = document.getElementById("dataset-refresh-sub-save"); if (rsb) rsb.addEventListener("click", _saveRefreshSubscription); }
   document.getElementById("btn-export-csv").addEventListener("click", exportCsv);
   document.getElementById("btn-export-xlsx").addEventListener("click", exportXlsx);
   { const vb = document.getElementById("btn-verify-all"); if (vb) vb.addEventListener("click", verifyAllRegions); }

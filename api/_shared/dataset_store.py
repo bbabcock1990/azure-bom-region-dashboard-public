@@ -514,15 +514,17 @@ def reset_override(ds_id: str) -> Dict:
 
 # ─── Refresh from Azure (ARM) ────────────────────────────────────────────────
 
-def refresh_from_azure(ds_id: str) -> Dict:
+def refresh_from_azure(ds_id: str, subscription: Optional[str] = None) -> Dict:
     """Regenerate ``ds_id`` live from ARM and persist it as the override.
 
     Only datasets with a registered provider (region catalog, SKU family seed)
-    can be refreshed this way; others raise a friendly error."""
+    can be refreshed this way; others raise a friendly error. ``subscription``
+    (the BOM's active sub) is preferred; the provider falls back to the saved
+    refresh-subscription setting, then any readable subscription."""
     _require(ds_id)
     from . import dataset_providers
     try:
-        raw = dataset_providers.refresh_bytes(ds_id)
+        raw = dataset_providers.refresh_bytes(ds_id, subscription)
     except dataset_providers.ProviderError as ex:
         status = 502 if ex.code in ("arm_error", "empty_result",
                                     "http_unavailable") else 400
