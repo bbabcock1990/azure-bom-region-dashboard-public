@@ -96,11 +96,37 @@
     }
   }
 
+  // MSAL requires the `claims` request param to be a *stringified JSON object*.
+  // Azure's WWW-Authenticate MFA challenge often delivers the claims value
+  // base64url-encoded (or already as a JSON string). Normalize to a JSON string;
+  // return null if we can't, so the caller falls back to prompt:"login".
+  function normalizeClaims(claims) {
+    if (!claims) return null;
+    if (typeof claims === "object") {
+      try { return JSON.stringify(claims); } catch (e) { return null; }
+    }
+    var s = String(claims).trim();
+    if (!s) return null;
+    // Already a JSON string?
+    try { JSON.parse(s); return s; } catch (e) { /* not JSON */ }
+    // Try base64url-decode -> JSON string.
+    try {
+      var b = s.replace(/-/g, "+").replace(/_/g, "/");
+      var pad = b.length % 4;
+      if (pad) b += "====".slice(pad);
+      var dec = atob(b);
+      try { dec = decodeURIComponent(escape(dec)); } catch (e2) { /* keep raw */ }
+      JSON.parse(dec);
+      return dec;
+    } catch (e) { /* not base64 JSON */ }
+    return null;
+  }
+
   async function getArmToken(opts) {
     opts = opts || {};
     if (!pca) return null;
     var scopes = armScopes();
-    var claims = opts.claims || null;
+    var claims = normalizeClaims(opts.claims);
 
     // Step-up path: Azure rejected a write pending MFA. Force a fresh
     // interactive auth (passing the claims challenge when Azure provided one) so
