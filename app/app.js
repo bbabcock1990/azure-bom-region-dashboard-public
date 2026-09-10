@@ -8038,7 +8038,7 @@ function _collectBomSupportOverride() {
 // Switch the active panel within the Settings view. Lazy-loads each tab's
 // data the first time (and on every re-open, so the content stays fresh).
 function switchSettingsTab(tab) {
-  const tabs = ["owner", "permissions", "datasets", "pricing", "activity", "data"];
+  const tabs = ["owner", "permissions", "validation", "datasets", "pricing", "activity", "data"];
   if (!tabs.includes(tab)) tab = "owner";
   STATE.settingsTab = tab;
   document.querySelectorAll("[data-settings-tab]").forEach(btn => {
@@ -8051,6 +8051,7 @@ function switchSettingsTab(tab) {
   });
   if (tab === "owner") loadOwnerSettings();
   else if (tab === "permissions") loadPermissionsSettings();
+  else if (tab === "validation") loadValidationSettings();
   else if (tab === "datasets") loadDatasetsSettings();
   else if (tab === "pricing") loadPricingSettings();
   else if (tab === "activity") loadActivityLog();
@@ -8128,7 +8129,15 @@ async function loadOwnerSettings() {
   set("owner-country", s.country || "US");
   set("owner-tz", s.preferred_timezone || "Pacific Standard Time");
   set("owner-sev", s.default_severity || "moderate");
-  set("owner-valrg", _valRgForSub(focusedSubscriptionId()) || "Azure-BOM-Tool-Validation-RG");
+}
+
+// Render the "Deployment validation" panel: the per-subscription validation RG
+// field, sub label, and the RG/location datalists. Split out of Ticket owner —
+// pre-flight validation is unrelated to the support contact.
+async function loadValidationSettings() {
+  await ensureSupportSettings();
+  const el = document.getElementById("owner-valrg");
+  if (el) el.value = _valRgForSub(focusedSubscriptionId()) || "Azure-BOM-Tool-Validation-RG";
   const subLabelEl = document.getElementById("owner-valrg-sub");
   if (subLabelEl) {
     const subName = focusedSubscriptionName();
@@ -8136,6 +8145,8 @@ async function loadOwnerSettings() {
       ? `Applies to the selected subscription: ${subName}`
       : "Optional — pick a subscription on the dashboard first, then set a resource group for it here.";
   }
+  const status = document.getElementById("valrg-status");
+  if (status) status.textContent = "";
   _loadValidationRgOptions();
 }
 
@@ -8238,10 +8249,6 @@ async function saveOwnerSettings() {
     preferred_timezone: val("owner-tz"),
     default_severity: (document.getElementById("owner-sev") || {}).value || "moderate",
   };
-  // The validation RG is per-subscription. Only persist it when a subscription
-  // is focused; an empty value clears that subscription's entry server-side.
-  const valSub = focusedSubscriptionId();
-  if (valSub) body.validation_resource_groups = { [valSub]: val("owner-valrg") };
   if (status) status.textContent = "Saving…";
   try {
     const res = await apiJson("/api/support/settings", {
@@ -8255,6 +8262,31 @@ async function saveOwnerSettings() {
     showToast("Ticket owner saved.", "success");
     // Saving the owner satisfies onboarding step 2 ("Configure & refresh").
     _setOnboardSettingsDone();
+  } catch (e) {
+    if (status) status.textContent = `❌ ${e.message}`;
+  }
+}
+
+// Persist the per-subscription validation resource group (Deployment validation
+// panel). An empty value clears that subscription's entry server-side.
+async function saveValidationRg() {
+  const status = document.getElementById("valrg-status");
+  const val = (id) => ((document.getElementById(id) || {}).value || "").trim();
+  const valSub = focusedSubscriptionId();
+  if (!valSub) {
+    if (status) status.textContent = "Pick a subscription on the dashboard first.";
+    return;
+  }
+  if (status) status.textContent = "Saving…";
+  try {
+    const res = await apiJson("/api/support/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ validation_resource_groups: { [valSub]: val("owner-valrg") } }),
+    });
+    SUPPORT.settings = res.settings;
+    if (status) status.textContent = "✓ Saved";
+    showToast("Validation resource group saved.", "success");
   } catch (e) {
     if (status) status.textContent = `❌ ${e.message}`;
   }
@@ -10107,6 +10139,8 @@ function init() {
   if (settingsDoneBtn) settingsDoneBtn.addEventListener("click", closeSettingsView);
   const ownerSaveBtn = document.getElementById("owner-save");
   if (ownerSaveBtn) ownerSaveBtn.addEventListener("click", saveOwnerSettings);
+  const valRgSaveBtn = document.getElementById("valrg-save");
+  if (valRgSaveBtn) valRgSaveBtn.addEventListener("click", saveValidationRg);
   const ownerValRgCreateBtn = document.getElementById("owner-valrg-create");
   if (ownerValRgCreateBtn) ownerValRgCreateBtn.addEventListener("click", _createValidationRg);
   const ownerWipeBtn = document.getElementById("owner-wipe");

@@ -28,7 +28,7 @@
        Order matters: this must run before the <link> below. -->
   <script src="preinit.js?v=2026090912"></script>
 
-  <link rel="stylesheet" href="styles.css?v=2026091001" />
+  <link rel="stylesheet" href="styles.css?v=2026091002" />
 </head>
 <body>
 
@@ -302,6 +302,10 @@
               <span class="settings-nav-icon" aria-hidden="true">🔑</span>
               <span class="settings-nav-text"><strong>Permissions</strong><small>Access check for this account</small></span>
             </button>
+            <button type="button" class="settings-nav-item" data-settings-tab="validation" role="tab" aria-selected="false">
+              <span class="settings-nav-icon" aria-hidden="true">🧪</span>
+              <span class="settings-nav-text"><strong>Deployment validation</strong><small>Pre-flight resource group</small></span>
+            </button>
             <button type="button" class="settings-nav-item" data-settings-tab="datasets" role="tab" aria-selected="false">
               <span class="settings-nav-icon" aria-hidden="true">🗂️</span>
               <span class="settings-nav-text"><strong>Model datasets</strong><small>Latency, regions &amp; catalogs</small></span>
@@ -341,19 +345,6 @@
                     <option value="critical">Critical</option>
                   </select>
                 </label>
-                <label class="settings-owner-wide">Validation resource group <span class="muted" style="font-weight:400;">· optional (advanced)</span>
-                  <div class="muted" id="owner-valrg-sub" style="margin:2px 0 4px;font-size:0.85em;"></div>
-                  <input type="text" id="owner-valrg" list="owner-valrg-list" maxlength="90" autocomplete="off" placeholder="Leave blank for read-only checks" />
-                  <datalist id="owner-valrg-list"></datalist>
-                  <small class="muted">Optional. Leave blank to run <strong>read-only checks</strong> (quota, SKU &amp; zonal availability) — no resource group needed. To also run ARM <strong>deployment-level pre-flight</strong>, point this at an <strong>existing</strong> resource group. It's saved <strong>per subscription</strong> (an RG only exists inside one subscription) and applies to whichever subscription is selected on the dashboard. Pre-flight creates no resources and incurs no cost. <span id="owner-valrg-hint"></span></small>
-                  <div class="owner-valrg-create">
-                    <input type="text" id="owner-valrg-loc" list="owner-valrg-loc-list" maxlength="40" autocomplete="off" placeholder="Location (e.g. eastus)" />
-                    <datalist id="owner-valrg-loc-list"></datalist>
-                    <button type="button" class="btn btn--sm" id="owner-valrg-create">➕ Create if it doesn't exist</button>
-                    <span class="muted" id="owner-valrg-create-status"></span>
-                  </div>
-                  <small class="muted">Creating a resource group is free and holds nothing — it just gives the deep check somewhere to validate. You need Contributor on the subscription.</small>
-                </label>
               </div>
               <div class="support-form-actions">
                 <button type="button" class="btn btn--accent" id="owner-save">Save owner</button>
@@ -381,6 +372,36 @@
               <div id="perm-summary" class="perm-summary hidden"></div>
               <div id="perm-results" class="perm-results">
                 <p class="muted">Pick a subscription and choose <strong>Check permissions</strong> to run the access check.</p>
+              </div>
+            </section>
+            <section id="settings-validation" class="settings-panel" data-settings-panel="validation">
+              <h2>Deployment validation</h2>
+              <p class="muted">
+                An optional <strong>validation resource group</strong> lets the deep check run ARM
+                <strong>deployment-level pre-flight</strong> — the strongest signal that your BOM will
+                actually deploy. Leave it blank to run <strong>read-only checks</strong> (quota, SKU
+                &amp; zonal availability) with no resource group at all. It's saved
+                <strong>per subscription</strong> and applies to whichever subscription is selected on
+                the dashboard.
+              </p>
+              <div class="settings-owner-grid">
+                <label class="settings-owner-wide">Validation resource group <span class="muted" style="font-weight:400;">· optional (advanced)</span>
+                  <div class="muted" id="owner-valrg-sub" style="margin:2px 0 4px;font-size:0.85em;"></div>
+                  <input type="text" id="owner-valrg" list="owner-valrg-list" maxlength="90" autocomplete="off" placeholder="Leave blank for read-only checks" />
+                  <datalist id="owner-valrg-list"></datalist>
+                  <small class="muted">Point this at an <strong>existing</strong> resource group to enable pre-flight (an RG only exists inside one subscription). Pre-flight creates no resources and incurs no cost. <span id="owner-valrg-hint"></span></small>
+                  <div class="owner-valrg-create">
+                    <input type="text" id="owner-valrg-loc" list="owner-valrg-loc-list" maxlength="40" autocomplete="off" placeholder="Location (e.g. eastus)" />
+                    <datalist id="owner-valrg-loc-list"></datalist>
+                    <button type="button" class="btn btn--sm" id="owner-valrg-create">➕ Create if it doesn't exist</button>
+                    <span class="muted" id="owner-valrg-create-status"></span>
+                  </div>
+                  <small class="muted">Creating a resource group is free and holds nothing — it just gives the deep check somewhere to validate. You need Contributor on the subscription.</small>
+                </label>
+              </div>
+              <div class="support-form-actions">
+                <button type="button" class="btn btn--accent" id="valrg-save">Save validation RG</button>
+                <span class="muted" id="valrg-status"></span>
               </div>
             </section>
             <section id="settings-datasets" class="settings-panel" data-settings-panel="datasets">
@@ -944,6 +965,6 @@
 
 <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
 
-<script src="app.js?v=2026091001"></script>
+<script src="app.js?v=2026091002"></script>
 </body>
 </html>
