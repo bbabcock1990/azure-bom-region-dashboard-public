@@ -79,7 +79,9 @@ def _operator_context(subscription: Optional[str] = None) -> tuple:
     sub = _valid(subscription)
     if not sub:
         try:
-            sub = _valid(support_settings.get_settings().get("refresh_subscription"))
+            s = support_settings.get_settings()
+            sub = (_valid(s.get("context_subscription"))
+                   or _valid(s.get("refresh_subscription")))
         except Exception:
             sub = None
     if not sub:

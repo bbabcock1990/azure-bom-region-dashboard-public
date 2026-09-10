@@ -102,6 +102,40 @@ function focusedSubscriptionName() {
   return subId ? _subNameById(subId) : "";
 }
 
+// ── Global subscription context ──────────────────────────────────────────────
+// One place drives which subscription the app works against: model-data
+// refresh, the validation resource group, and the default for new BOMs. It is
+// held in STATE.activeSubscription (BOM-aware via focusedSubscriptionId) and,
+// when no BOM is open, seeded from the saved global default (context_subscription).
+// The header selector and the Settings → Subscription blade both write it.
+function contextSubscriptionId() {
+  return String(focusedSubscriptionId() || "").trim();
+}
+
+// Seed the active subscription from the saved global default the first time we
+// have subscriptions and no explicit selection yet. Safe to call repeatedly.
+function seedSubscriptionContext() {
+  if (STATE.activeSubscription) return;
+  const saved = String((SUPPORT.settings && SUPPORT.settings.context_subscription) || "").trim();
+  if (!saved) return;
+  const ids = availableQuotaSubscriptionIds();
+  if (!ids.length || ids.includes(saved)) STATE.activeSubscription = saved;
+}
+
+// Persist the chosen subscription as the global default (best-effort). Called
+// when the user explicitly picks a subscription in the header or Settings.
+async function persistSubscriptionContext(sub) {
+  const value = String(sub || "").trim();
+  try {
+    const res = await apiJson("/api/support/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ context_subscription: value }),
+    });
+    SUPPORT.settings = res.settings;
+  } catch (_e) { /* non-fatal — the in-session selection still applies */ }
+}
+
 // The validation RG is stored per-subscription (an RG only lives inside one
 // subscription). Resolve the one saved for a given subscription, falling back
 // to the legacy global value for back-compat.
@@ -113,11 +147,12 @@ function _valRgForSub(subId) {
   return String(s.validation_resource_group || "").trim();
 }
 
-// Jump to Settings → Ticket owner and focus the validation-RG field. Used by the
-// contextual "enable deployment validation" affordance on the deep check.
+// Jump to Settings → Deployment validation and focus the validation-RG field.
+// Used by the contextual "enable deployment validation" affordance on the deep
+// check.
 function openValidationRgSettings() {
   try { switchView("settings"); } catch (_e) {}
-  try { switchSettingsTab("owner"); } catch (_e) {}
+  try { switchSettingsTab("validation"); } catch (_e) {}
   setTimeout(() => {
     const el = document.getElementById("owner-valrg");
     if (el) { try { el.scrollIntoView({ behavior: "smooth", block: "center" }); el.focus(); } catch (_e) {} }
@@ -713,6 +748,7 @@ async function loadSampleData(btn) {
 }
 
 function renderSubscriptionSwitcher() {
+  try { renderGlobalSubControl(); } catch (_e) {}
   const hosts = [
     document.getElementById("quota-subscription-control"),
   ].filter(Boolean);
@@ -761,6 +797,63 @@ function renderSubscriptionFilter() {
   select.innerHTML = options.join("");
   select.disabled = ids.length === 0;
   select.value = activeId || "";
+}
+
+// The single, always-visible subscription-context selector in the header. When
+// a BOM is open it lists that BOM's subscription(s); otherwise it lists every
+// readable subscription and sets the global default. It stays in sync with the
+// quota switcher and the Settings → Subscription blade.
+function renderGlobalSubControl() {
+  const host = document.getElementById("global-sub-control");
+  if (!host) return;
+  try { seedSubscriptionContext(); } catch (_e) {}
+  const ids = availableQuotaSubscriptionIds();
+  if (!ids.length) { host.hidden = true; host.innerHTML = ""; return; }
+  host.hidden = false;
+  const activeId = syncActiveSubscription();
+  const bomScoped = !!STATE.activeBomId && subscriptionList(activeBomMeta()).length > 0;
+  if (ids.length <= 1) {
+    const name = _subNameById(activeId) || _subNameById(ids[0]) || "Subscription";
+    host.innerHTML = `<span class="global-sub-label">Subscription</span>`
+      + `<span class="global-sub-static" title="${escapeHtml(name)}">${escapeHtml(name)}</span>`;
+    return;
+  }
+  const options = ids.map((subId, i) => {
+    const name = _subNameById(subId) || `Subscription ${i + 1}`;
+    return `<option value="${escapeHtml(subId)}"${subId === activeId ? " selected" : ""}>${escapeHtml(name)}</option>`;
+  }).join("");
+  const title = bomScoped
+    ? "Subscription for this BOM — drives quota, validation & analysis"
+    : "Your subscription context — drives model-data refresh, validation & new BOMs";
+  host.innerHTML = `<label class="global-sub-wrap"><span class="global-sub-label">Subscription</span>`
+    + `<select id="global-sub-select" title="${escapeHtml(title)}" aria-label="Subscription context">${options}</select></label>`;
+  const sel = host.querySelector("#global-sub-select");
+  if (sel) sel.value = activeId || "";
+}
+
+// Single entry point for changing the active subscription from any control
+// (header selector, quota switcher, or region-filter dropdown). Keeps every
+// dependent view in sync and — when requested — persists the choice as the
+// global default so it survives reloads and applies when no BOM is open.
+function applySubscriptionSelection(value, opts = {}) {
+  syncActiveSubscription(value || null);
+  renderSubscriptionFilter();
+  renderSubscriptionSwitcher();
+  renderGlobalSubControl();
+  try { renderBomPanel(); } catch (_e) {}
+  try { applyFilters(); } catch (_e) {}
+  if (STATE.view === "quota") { try { renderQuotaTab(); } catch (_e) {} }
+  if (STATE.activeDrilldownRegion) {
+    const region = _findRegionByShort(STATE.activeDrilldownRegion);
+    if (region) { try { openDrilldown(region); } catch (_e) {} }
+  }
+  // Keep subscription-scoped Settings panels current if the user is in them.
+  if (STATE.view === "settings") {
+    if (STATE.settingsTab === "validation") { try { loadValidationSettings(); } catch (_e) {} }
+    else if (STATE.settingsTab === "datasets") { try { loadDatasetsSettings(); } catch (_e) {} }
+    else if (STATE.settingsTab === "subscription") { try { loadSubscriptionSettings(); } catch (_e) {} }
+  }
+  if (opts.persist !== false) persistSubscriptionContext(contextSubscriptionId());
 }
 
 // Epoch (ms) of the snapshot currently shown in the tabs, or null. Uses the
@@ -7065,8 +7158,10 @@ async function loadSubscriptionsDropdown() {
       return;
     }
     window._loadedSubscriptions = subs;
+    try { seedSubscriptionContext(); } catch (_e) {}
+    const ctx = (function () { try { return contextSubscriptionId(); } catch (_e) { return ""; } })();
     sel.innerHTML = subs.map(s =>
-      `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name)} (${s.id.substring(0, 8)}…)</option>`
+      `<option value="${escapeHtml(s.id)}"${s.id === ctx ? " selected" : ""}>${escapeHtml(s.name)} (${s.id.substring(0, 8)}…)</option>`
     ).join("");
     sel.size = Math.min(subs.length, 8);
     renderSubscriptionSwitcher();
@@ -7077,12 +7172,20 @@ async function loadSubscriptionsDropdown() {
 }
 
 async function preloadSubscriptionNames() {
-  if (window._loadedSubscriptions && window._loadedSubscriptions.length) return;
+  if (window._loadedSubscriptions && window._loadedSubscriptions.length) {
+    try { await ensureSupportSettings(); } catch (_e) {}
+    try { seedSubscriptionContext(); renderGlobalSubControl(); } catch (_e) {}
+    return;
+  }
   try {
+    // Load the saved subscription context alongside the subscription list so the
+    // header selector shows the right default on first paint.
+    try { await ensureSupportSettings(); } catch (_e) {}
     const r = await apiJson("/api/az/subscriptions");
     const subs = r.subscriptions || [];
     if (subs.length) {
       window._loadedSubscriptions = subs;
+      try { seedSubscriptionContext(); } catch (_e) {}
       renderSubscriptionSwitcher();
       renderSubscriptionFilter();
       if (_isRegionsSub("table")) renderTable();
@@ -8038,7 +8141,7 @@ function _collectBomSupportOverride() {
 // Switch the active panel within the Settings view. Lazy-loads each tab's
 // data the first time (and on every re-open, so the content stays fresh).
 function switchSettingsTab(tab) {
-  const tabs = ["owner", "permissions", "validation", "datasets", "pricing", "activity", "data"];
+  const tabs = ["subscription", "owner", "permissions", "validation", "datasets", "pricing", "activity", "data"];
   if (!tabs.includes(tab)) tab = "owner";
   STATE.settingsTab = tab;
   document.querySelectorAll("[data-settings-tab]").forEach(btn => {
@@ -8049,13 +8152,55 @@ function switchSettingsTab(tab) {
   document.querySelectorAll("[data-settings-panel]").forEach(p => {
     p.classList.toggle("is-active", p.getAttribute("data-settings-panel") === tab);
   });
-  if (tab === "owner") loadOwnerSettings();
+  if (tab === "subscription") loadSubscriptionSettings();
+  else if (tab === "owner") loadOwnerSettings();
   else if (tab === "permissions") loadPermissionsSettings();
   else if (tab === "validation") loadValidationSettings();
   else if (tab === "datasets") loadDatasetsSettings();
   else if (tab === "pricing") loadPricingSettings();
   else if (tab === "activity") loadActivityLog();
   else if (tab === "data") loadDataSettings();
+}
+
+// Render the "Subscription context" blade: the single global subscription
+// selector, mirroring the header control. Lists every readable subscription
+// (or, when a BOM is open, that BOM's subscription(s)) and reflects/sets the
+// active context.
+async function loadSubscriptionSettings() {
+  const sel = document.getElementById("ctx-sub-select");
+  const note = document.getElementById("ctx-sub-note");
+  if (!sel) return;
+  await ensureSupportSettings();
+  let subs = window._loadedSubscriptions || [];
+  if (!subs.length) {
+    sel.innerHTML = '<option disabled selected>Loading subscriptions…</option>';
+    try {
+      const r = await apiJson("/api/az/subscriptions");
+      subs = r.subscriptions || [];
+      window._loadedSubscriptions = subs;
+    } catch (_e) { subs = []; }
+  }
+  try { seedSubscriptionContext(); } catch (_e) {}
+  const ids = availableQuotaSubscriptionIds();
+  const bomScoped = !!STATE.activeBomId && subscriptionList(activeBomMeta()).length > 0;
+  // When a BOM is open, restrict to its subscription(s); otherwise all readable.
+  const list = bomScoped ? ids : (subs.length ? subs.map(s => s.id) : ids);
+  const active = contextSubscriptionId();
+  if (!list.length) {
+    sel.innerHTML = '<option disabled selected>No subscriptions found — sign in first.</option>';
+    if (note) note.textContent = "";
+    return;
+  }
+  sel.innerHTML = list.map((id, i) => {
+    const name = _subNameById(id) || (subs.find(s => s && s.id === id) || {}).name || `Subscription ${i + 1}`;
+    return `<option value="${escapeHtml(id)}"${id === active ? " selected" : ""}>${escapeHtml(name)}</option>`;
+  }).join("");
+  sel.value = active || "";
+  if (note) {
+    note.textContent = bomScoped
+      ? "A BOM is open, so its own subscription is in effect. Close the BOM to change your global default."
+      : "This is your global default. It's used for data refresh, validation, and new BOMs until a BOM overrides it.";
+  }
 }
 
 // Render the "Data & storage" panel: the (mode-aware) storage-path line and
@@ -8443,77 +8588,27 @@ async function loadDatasetsSettings() {
 }
 
 // The subscription used to feed "Refresh from Azure" for the region & service
-// catalogs. Precedence: an explicit saved setting ("Set your subscription"),
-// otherwise the active BOM's subscription. When neither is set the backend
-// falls back to the first readable subscription.
+// catalogs — the single global subscription context (BOM-aware). Set it in the
+// header selector or Settings → Subscription.
 function _refreshSubscriptionId() {
-  const set = String((SUPPORT.settings && SUPPORT.settings.refresh_subscription) || "").trim();
-  if (set) return set;
-  return String(activeSubscriptionId() || focusedSubscriptionId() || "").trim();
+  return contextSubscriptionId();
 }
 
-// Populate the "Set your subscription" picker in the Model datasets settings so
-// the user can pin which subscription the catalog refresh reads from. Defaults
-// to the saved setting; blank means "use the active BOM's subscription".
+// Show which subscription the catalog refresh will read from (the global
+// context). Read-only here — the subscription is chosen in the header selector
+// or the Subscription settings blade.
 async function _loadRefreshSubscriptionControl() {
-  const sel = document.getElementById("dataset-refresh-sub");
-  if (!sel) return;
-  const hint = document.getElementById("dataset-refresh-sub-hint");
+  const note = document.getElementById("dataset-refresh-sub-note");
+  if (!note) return;
   await ensureSupportSettings();
-  let subs = window._loadedSubscriptions || [];
-  if (!subs.length) {
-    try {
-      const r = await apiJson("/api/az/subscriptions");
-      subs = r.subscriptions || [];
-      window._loadedSubscriptions = subs;
-    } catch (_e) { subs = []; }
-  }
-  const saved = String((SUPPORT.settings && SUPPORT.settings.refresh_subscription) || "").trim();
-  const bomSub = String(activeSubscriptionId() || focusedSubscriptionId() || "").trim();
-  const bomName = (subs.find(s => s && s.id === bomSub) || {}).name || bomSub;
-  const autoLabel = bomSub
-    ? `Use the active BOM's subscription (${bomName})`
-    : "Use the active BOM's subscription";
-  const opts = [`<option value="">${escapeHtml(autoLabel)}</option>`];
-  for (const s of subs) {
-    if (!s || !s.id) continue;
-    const on = s.id === saved ? " selected" : "";
-    opts.push(`<option value="${escapeHtml(s.id)}"${on}>${escapeHtml(s.name || s.id)} (${escapeHtml(String(s.id).substring(0, 8))}…)</option>`);
-  }
-  sel.innerHTML = opts.join("");
-  sel.value = saved || "";
-  if (hint) {
-    hint.textContent = saved
-      ? "Catalog refreshes read from this subscription."
-      : "Catalog refreshes follow the subscription of the BOM you're working in.";
-  }
-}
-
-async function _saveRefreshSubscription() {
-  const sel = document.getElementById("dataset-refresh-sub");
-  const status = document.getElementById("dataset-refresh-sub-status");
-  if (!sel) return;
-  const sub = String(sel.value || "").trim();
-  if (status) status.textContent = "Saving…";
-  try {
-    const res = await apiJson("/api/support/settings", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refresh_subscription: sub }),
-    });
-    SUPPORT.settings = res.settings;
-    if (status) status.textContent = "✓ Saved";
-    const hint = document.getElementById("dataset-refresh-sub-hint");
-    if (hint) {
-      hint.textContent = sub
-        ? "Catalog refreshes read from this subscription."
-        : "Catalog refreshes follow the subscription of the BOM you're working in.";
-    }
-    showToast("Refresh subscription saved.", "success");
-  } catch (e) {
-    if (status) status.textContent = `❌ ${e.message}`;
-    showToast(e.message || "Could not save refresh subscription.", "error");
-  }
+  const sub = contextSubscriptionId();
+  const name = sub ? (_subNameById(sub) || sub) : "";
+  note.innerHTML = name
+    ? `Refreshes read from your subscription context: <strong>${escapeHtml(name)}</strong>. `
+      + `Change it in the header selector or <button type="button" class="link-btn" data-goto-subscription="1">Subscription settings</button>.`
+    : `Pick a subscription in the header selector or <button type="button" class="link-btn" data-goto-subscription="1">Subscription settings</button> — refreshes use that context.`;
+  const goto = note.querySelector('[data-goto-subscription]');
+  if (goto) goto.addEventListener("click", () => switchSettingsTab("subscription"));
 }
 
 function _datasetSourceLine(ds) {
@@ -10101,16 +10196,7 @@ function init() {
 
   document.getElementById("filter-search").addEventListener("input", applyFilters);
   document.getElementById("filter-subscription").addEventListener("change", (ev) => {
-    syncActiveSubscription(ev.target.value || null);
-    renderSubscriptionFilter();
-    renderSubscriptionSwitcher();
-    renderBomPanel();
-    applyFilters();
-    if (STATE.view === "quota") renderQuotaTab();
-    if (STATE.activeDrilldownRegion) {
-      const region = _findRegionByShort(STATE.activeDrilldownRegion);
-      if (region) openDrilldown(region);
-    }
+    applySubscriptionSelection(ev.target.value || null);
   });
   document.querySelectorAll('[data-filter="verdict"]').forEach(el => el.addEventListener("change", applyFilters));
   document.querySelectorAll('[data-filter="quota"]').forEach(el => el.addEventListener("change", applyFilters));
@@ -10158,7 +10244,6 @@ function init() {
   const pricingSaveBtn = document.getElementById("pricing-save");
   if (pricingSaveBtn) pricingSaveBtn.addEventListener("click", savePricingSettings);
   { const pc = document.getElementById("perm-check"); if (pc) pc.addEventListener("click", checkPermissions); }
-  { const rsb = document.getElementById("dataset-refresh-sub-save"); if (rsb) rsb.addEventListener("click", _saveRefreshSubscription); }
   document.getElementById("btn-export-csv").addEventListener("click", exportCsv);
   document.getElementById("btn-export-xlsx").addEventListener("click", exportXlsx);
   { const vb = document.getElementById("btn-verify-all"); if (vb) vb.addEventListener("click", verifyAllRegions); }
@@ -10210,18 +10295,11 @@ function init() {
     deleteBomFromNav(STATE.activeBomId, (m && bomDisplayName(m)) || STATE.activeBomId);
   });
   document.addEventListener("change", (ev) => {
-    const sel = ev.target && ev.target.closest ? ev.target.closest("[data-subscription-switcher]") : null;
+    const sel = ev.target && ev.target.closest
+      ? ev.target.closest("[data-subscription-switcher], #global-sub-select, #ctx-sub-select")
+      : null;
     if (!sel) return;
-    syncActiveSubscription(sel.value || null);
-    renderSubscriptionFilter();
-    renderSubscriptionSwitcher();
-    renderBomPanel();
-    applyFilters();
-    if (STATE.view === "quota") renderQuotaTab();
-    if (STATE.activeDrilldownRegion) {
-      const region = _findRegionByShort(STATE.activeDrilldownRegion);
-      if (region) openDrilldown(region);
-    }
+    applySubscriptionSelection(sel.value || null);
   });
 
   // BOM modal wiring

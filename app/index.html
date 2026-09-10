@@ -28,7 +28,7 @@
        Order matters: this must run before the <link> below. -->
   <script src="preinit.js?v=2026090912"></script>
 
-  <link rel="stylesheet" href="styles.css?v=2026091002" />
+  <link rel="stylesheet" href="styles.css?v=2026091003" />
 </head>
 <body>
 
@@ -42,6 +42,7 @@
     </div>
   </div>
   <div class="header-meta">
+    <div id="global-sub-control" class="global-sub-control" hidden></div>
     <button type="button" id="signin-chip" class="signin-chip" data-state="unknown" title="Sign-in status" aria-label="Sign-in status">
       <span class="signin-dot" aria-hidden="true"></span>
       <span class="signin-text" id="signin-chip-text">…</span>
@@ -294,6 +295,10 @@
         </header>
         <div class="settings-layout">
           <nav class="settings-nav" role="tablist" aria-label="Settings sections">
+            <button type="button" class="settings-nav-item" data-settings-tab="subscription" role="tab" aria-selected="false">
+              <span class="settings-nav-icon" aria-hidden="true">🧭</span>
+              <span class="settings-nav-text"><strong>Subscription</strong><small>Azure context for data &amp; validation</small></span>
+            </button>
             <button type="button" class="settings-nav-item is-active" data-settings-tab="owner" role="tab" aria-selected="true">
               <span class="settings-nav-icon" aria-hidden="true">👤</span>
               <span class="settings-nav-text"><strong>Ticket owner</strong><small>Default Azure support contact</small></span>
@@ -324,6 +329,23 @@
             </button>
           </nav>
           <div class="settings-panels">
+            <section id="settings-subscription" class="settings-panel" data-settings-panel="subscription">
+              <h2>Subscription context</h2>
+              <p class="muted">
+                One place to choose the Azure subscription the dashboard works against. It drives
+                <strong>model-data refresh</strong> (region &amp; service catalogs), the
+                <strong>deployment-validation resource group</strong>, and the subscription
+                pre-selected when you <strong>create a new BOM</strong>. When a BOM is open, that BOM's
+                own subscription takes over automatically. You can also change it any time from the
+                selector in the top header.
+              </p>
+              <div class="settings-owner-grid">
+                <label class="settings-owner-wide">Active subscription
+                  <select id="ctx-sub-select"></select>
+                  <small class="muted" id="ctx-sub-note"></small>
+                </label>
+              </div>
+            </section>
             <section id="settings-owner" class="settings-panel is-active" data-settings-panel="owner">
               <h2>Ticket owner</h2>
               <p class="muted">
@@ -418,17 +440,9 @@
                 restore it. <strong>Download</strong> exports the current file.
               </p>
               <div class="dataset-refresh-sub">
-                <label for="dataset-refresh-sub"><strong>Subscription for Azure refresh</strong></label>
-                <p class="muted" id="dataset-refresh-sub-hint">
-                  Catalog refreshes follow the subscription of the BOM you're working in.
+                <p class="muted" id="dataset-refresh-sub-note">
+                  Refreshes read from your selected subscription context.
                 </p>
-                <div class="dataset-refresh-sub-row">
-                  <select id="dataset-refresh-sub">
-                    <option value="">Use the active BOM's subscription</option>
-                  </select>
-                  <button type="button" class="btn btn--sm" id="dataset-refresh-sub-save">Save</button>
-                  <span class="muted" id="dataset-refresh-sub-status"></span>
-                </div>
               </div>
               <div id="datasets-list" class="datasets-list">
                 <p class="muted" id="datasets-loading">Loading datasets…</p>
@@ -965,6 +979,6 @@
 
 <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
 
-<script src="app.js?v=2026091002"></script>
+<script src="app.js?v=2026091003"></script>
 </body>
 </html>
